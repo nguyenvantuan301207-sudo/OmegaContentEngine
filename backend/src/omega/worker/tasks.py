@@ -121,12 +121,7 @@ def execute_task(self, task_id: str) -> dict:
 
     try:
         # Atomic lock & transition QUEUED -> RUNNING
-        task = (
-            session.query(Task)
-            .filter(Task.id == parsed_id)
-            .with_for_update()
-            .first()
-        )
+        task = session.query(Task).filter(Task.id == parsed_id).with_for_update().first()
         if not task:
             logger.error("Task not found in database", task_id=task_id)
             return {"status": "error", "message": "Task not found"}
@@ -272,7 +267,9 @@ def evaluate_mission_task(self, mission_id: str, execution_id: str = "") -> dict
         res = evaluate_mission_sync(session, m_id, e_id)
         return res
     except Exception as exc:
-        logger.error("Orchestrator sync evaluation task failed", mission_id=mission_id, exc_info=True)
+        logger.error(
+            "Orchestrator sync evaluation task failed", mission_id=mission_id, exc_info=True
+        )
         return {"status": "error", "message": _sanitize_task_error(exc)}
     finally:
         session.close()

@@ -14,9 +14,7 @@ from omega.main import app
 @pytest.mark.asyncio
 async def test_topic_candidate_crud_and_lifecycle(db_session: AsyncSession) -> None:
     """Test full TopicCandidate ingestion, evaluation, selection, rejection, and soft-archival lifecycle."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Channel
         c_res = await client.post(
             "/api/v1/channels",
@@ -98,7 +96,9 @@ async def test_topic_candidate_crud_and_lifecycle(db_session: AsyncSession) -> N
         assert batch_eval_res.status_code == 200
 
         # 7. Get Recommendations
-        rec_res = await client.get(f"/api/v1/channels/{channel_id}/topics/recommendations?min_score=0.0")
+        rec_res = await client.get(
+            f"/api/v1/channels/{channel_id}/topics/recommendations?min_score=0.0"
+        )
         assert rec_res.status_code == 200
         recs = rec_res.json()
         assert len(recs) >= 3
@@ -107,7 +107,9 @@ async def test_topic_candidate_crud_and_lifecycle(db_session: AsyncSession) -> N
         assert scores == sorted(scores, reverse=True)
 
         # 8. Select Candidate for Production
-        sel_res = await client.post(f"/api/v1/channels/{channel_id}/topics/candidates/{cand_id}/select")
+        sel_res = await client.post(
+            f"/api/v1/channels/{channel_id}/topics/candidates/{cand_id}/select"
+        )
         assert sel_res.status_code == 200
         assert sel_res.json()["status"] == "SELECTED"
 

@@ -37,9 +37,7 @@ async def create_channel(
     try:
         return await channel_service.create_channel(db, channel_in)
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("", response_model=list[ChannelResponse])
@@ -87,9 +85,7 @@ async def update_channel(
             )
         return updated
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.post("/{channel_id}/activate", response_model=ChannelResponse)
@@ -107,9 +103,7 @@ async def activate_channel(
             )
         return activated
     except (InvalidStateTransitionError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.post("/{channel_id}/pause", response_model=ChannelResponse)
@@ -127,9 +121,7 @@ async def pause_channel(
             )
         return paused
     except (InvalidStateTransitionError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.post("/{channel_id}/archive", response_model=ChannelResponse)
@@ -147,9 +139,7 @@ async def archive_channel(
             )
         return archived
     except (InvalidStateTransitionError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/{channel_id}/dna", response_model=ChannelDNA)
@@ -189,9 +179,7 @@ async def update_channel_dna(
             )
         return updated_dna
     except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
-        ) from exc
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.get("/{channel_id}/dna/revisions", response_model=list[ChannelDNARevisionResponse])

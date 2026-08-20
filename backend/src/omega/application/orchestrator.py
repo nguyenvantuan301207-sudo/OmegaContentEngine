@@ -233,12 +233,12 @@ async def evaluate_mission(
         t.state == TaskState.FAILED.value and t.retry_count >= t.max_retries
         for t in all_current_tasks
     )
-    all_succeeded = (
-        len(all_current_tasks) > 0
-        and all(t.state == TaskState.SUCCEEDED.value for t in all_current_tasks)
+    all_succeeded = len(all_current_tasks) > 0 and all(
+        t.state == TaskState.SUCCEEDED.value for t in all_current_tasks
     )
     has_active_tasks = any(
-        t.state in (
+        t.state
+        in (
             TaskState.RUNNING.value,
             TaskState.QUEUED.value,
             TaskState.READY.value,
@@ -323,12 +323,7 @@ def evaluate_mission_sync(
     now = datetime.now(UTC)
 
     # 1. Load mission with row lock
-    mission = (
-        session.query(Mission)
-        .filter(Mission.id == mission_id)
-        .with_for_update()
-        .first()
-    )
+    mission = session.query(Mission).filter(Mission.id == mission_id).with_for_update().first()
     if not mission:
         logger.error("Mission not found for sync evaluation", mission_id=str(mission_id))
         return {"status": "error", "message": "Mission not found"}
@@ -456,7 +451,9 @@ def evaluate_mission_sync(
             dispatched_count += 1
             logger.info("Dispatched task to worker queue (sync)", task_id=str(task.id))
         except Exception as exc:
-            logger.error("Celery broker dispatch failed for task (sync)", task_id=str(task.id), exc_info=True)
+            logger.error(
+                "Celery broker dispatch failed for task (sync)", task_id=str(task.id), exc_info=True
+            )
             failed_task = session.query(Task).filter(Task.id == task.id).with_for_update().first()
             if failed_task:
                 failed_task.state = TaskState.FAILED.value
@@ -483,12 +480,12 @@ def evaluate_mission_sync(
         t.state == TaskState.FAILED.value and t.retry_count >= t.max_retries
         for t in all_current_tasks
     )
-    all_succeeded = (
-        len(all_current_tasks) > 0
-        and all(t.state == TaskState.SUCCEEDED.value for t in all_current_tasks)
+    all_succeeded = len(all_current_tasks) > 0 and all(
+        t.state == TaskState.SUCCEEDED.value for t in all_current_tasks
     )
     has_active_tasks = any(
-        t.state in (
+        t.state
+        in (
             TaskState.RUNNING.value,
             TaskState.QUEUED.value,
             TaskState.READY.value,

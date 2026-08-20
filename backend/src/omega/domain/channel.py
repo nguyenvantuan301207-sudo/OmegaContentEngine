@@ -140,7 +140,9 @@ def validate_region_tag(region: str) -> str:
     """Validate region tag against ISO-3166-1 alpha-2."""
     normalized = region.strip().upper()
     if not REGION_TAG_REGEX.match(normalized):
-        raise ValueError(f"Invalid region code '{region}'. Must be a 2-letter uppercase ISO country code (e.g., 'US', 'VN').")
+        raise ValueError(
+            f"Invalid region code '{region}'. Must be a 2-letter uppercase ISO country code (e.g., 'US', 'VN')."
+        )
     return normalized
 
 
@@ -148,7 +150,9 @@ def validate_timezone(tz_name: str) -> str:
     """Validate timezone name against standard IANA timezones."""
     normalized = tz_name.strip()
     if normalized not in zoneinfo.available_timezones() and normalized != "UTC":
-        raise ValueError(f"Invalid IANA timezone '{tz_name}'. Example valid timezones: 'UTC', 'America/New_York', 'Asia/Ho_Chi_Minh'.")
+        raise ValueError(
+            f"Invalid IANA timezone '{tz_name}'. Example valid timezones: 'UTC', 'America/New_York', 'Asia/Ho_Chi_Minh'."
+        )
     return normalized
 
 
@@ -238,7 +242,9 @@ class ChannelDNAUpdateRequest(BaseModel):
     """Schema for updating Channel DNA (creates a new revision)."""
 
     dna: ChannelDNA
-    change_reason: str = Field(..., min_length=3, max_length=500, description="Mandatory rationale for the DNA update")
+    change_reason: str = Field(
+        ..., min_length=3, max_length=500, description="Mandatory rationale for the DNA update"
+    )
     actor: str = Field(default="USER", min_length=1, max_length=50)
 
 

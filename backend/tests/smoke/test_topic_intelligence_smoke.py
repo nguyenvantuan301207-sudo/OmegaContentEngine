@@ -17,9 +17,7 @@ async def test_topic_intelligence_e2e_smoke(db_session: AsyncSession) -> None:
 
     scoring, recommendation ranking, selection, TopicMemory synchronization, and candidate archival.
     """
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # Step 1: Create and Activate Channel
         slug = f"smoke-topic-{uuid.uuid4().hex[:8]}"
         chan_res = await client.post(

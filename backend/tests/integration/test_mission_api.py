@@ -14,9 +14,7 @@ from omega.main import app
 @pytest.mark.asyncio
 async def test_mission_crud_and_lifecycle_flow(db_session: AsyncSession) -> None:
     """Test full mission CRUD and lifecycle state machine transitions via API."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Mission (DRAFT)
         res = await client.post(
             "/api/v1/missions",
@@ -63,9 +61,7 @@ async def test_mission_crud_and_lifecycle_flow(db_session: AsyncSession) -> None
         assert planned_exec.state == "PLANNED"
 
         # Verify all tasks belong to planned execution_id
-        tasks_res = await db_session.execute(
-            select(Task).where(Task.mission_id == mission_id)
-        )
+        tasks_res = await db_session.execute(select(Task).where(Task.mission_id == mission_id))
         tasks = list(tasks_res.scalars().all())
         assert len(tasks) == 7
         for t in tasks:

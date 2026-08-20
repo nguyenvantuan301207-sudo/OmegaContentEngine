@@ -94,7 +94,9 @@ async def test_versioned_immutable_brief_revisions(db_session: AsyncSession) -> 
         assert brief_v2["supersedes_brief_id"] == v1_id
 
         # 6. Verify Brief v1 is preserved immutably
-        get_v1_res = await client.get(f"/api/v1/channels/{channel_id}/research/{req_id}/brief?version=1")
+        get_v1_res = await client.get(
+            f"/api/v1/channels/{channel_id}/research/{req_id}/brief?version=1"
+        )
         assert get_v1_res.status_code == 200
         v1_persisted = get_v1_res.json()
         assert v1_persisted["version"] == 1
@@ -107,7 +109,9 @@ async def test_versioned_immutable_brief_revisions(db_session: AsyncSession) -> 
         assert get_curr_res.json()["version"] == 2
 
         # 8. Verify GET /briefs lists both revisions
-        list_briefs_res = await client.get(f"/api/v1/channels/{channel_id}/research/{req_id}/briefs")
+        list_briefs_res = await client.get(
+            f"/api/v1/channels/{channel_id}/research/{req_id}/briefs"
+        )
         assert list_briefs_res.status_code == 200
         briefs_list = list_briefs_res.json()
         assert len(briefs_list) == 2

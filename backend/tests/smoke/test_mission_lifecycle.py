@@ -24,9 +24,7 @@ from omega.main import app
 @pytest.mark.asyncio
 async def test_full_mission_lifecycle_smoke() -> None:
     """Execute complete end-to-end Mission DAG workflow with human-in-the-loop approval."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Mission
         create_res = await client.post(
             "/api/v1/missions",
@@ -87,7 +85,9 @@ async def test_full_mission_lifecycle_smoke() -> None:
         final_tasks = final_tasks_res.json()
         assert len(final_tasks) == 7
         for t in final_tasks:
-            assert t["state"] == "SUCCEEDED", f"Task {t['title']} ({t['task_type']}) was {t['state']}, expected SUCCEEDED"
+            assert t["state"] == "SUCCEEDED", (
+                f"Task {t['title']} ({t['task_type']}) was {t['state']}, expected SUCCEEDED"
+            )
 
         final_decisions_res = await client.get(f"/api/v1/missions/{mission_id}/decisions")
         final_decisions = final_decisions_res.json()

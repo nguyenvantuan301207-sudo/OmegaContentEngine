@@ -16,9 +16,7 @@ from omega.main import app
 @pytest.mark.asyncio
 async def test_mission_channel_linkage_and_immutability(db_session: AsyncSession) -> None:
     """Test mission channel association, validation guards, and channel_id immutability."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Channel
         c_res = await client.post(
             "/api/v1/channels",
@@ -78,9 +76,7 @@ async def test_dna_revision_pinning_and_reproducibility(db_session: AsyncSession
     -> MissionExecution A still points to v1
     -> Mission B is planned (pins v2)
     """
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Channel (Revision 1, version=1)
         c_res = await client.post(
             "/api/v1/channels",
@@ -170,9 +166,7 @@ async def test_dna_revision_pinning_and_reproducibility(db_session: AsyncSession
 @pytest.mark.asyncio
 async def test_backward_compatibility_mission_without_channel(db_session: AsyncSession) -> None:
     """Verify that missions without a channel continue to plan and execute normally with channel_dna_revision_id=None."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # Create Mission with channel_id = None
         m_res = await client.post(
             "/api/v1/missions",

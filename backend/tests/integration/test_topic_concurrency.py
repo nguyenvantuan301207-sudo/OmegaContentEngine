@@ -15,9 +15,7 @@ from omega.main import app
 @pytest.mark.asyncio
 async def test_times_discovered_lifecycle_and_retry_idempotency(db_session: AsyncSession) -> None:
     """Test that TopicMemory.times_discovered increments per distinct discovery event, but not on retries."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Channel
         c_res = await client.post(
             "/api/v1/channels",
@@ -36,7 +34,9 @@ async def test_times_discovered_lifecycle_and_retry_idempotency(db_session: Asyn
             "keywords": ["ML", "Quantization"],
             "idempotency_key": idem_key,
         }
-        res1 = await client.post(f"/api/v1/channels/{channel_id}/topics/candidates", json=cand_payload)
+        res1 = await client.post(
+            f"/api/v1/channels/{channel_id}/topics/candidates", json=cand_payload
+        )
         assert res1.status_code == 201
 
         # Check TopicMemory: times_discovered should be 1
@@ -46,7 +46,9 @@ async def test_times_discovered_lifecycle_and_retry_idempotency(db_session: Asyn
         assert mem1["times_discovered"] == 1
 
         # 3. Retry identical request with same idempotency key (e.g. network retry)
-        res2 = await client.post(f"/api/v1/channels/{channel_id}/topics/candidates", json=cand_payload)
+        res2 = await client.post(
+            f"/api/v1/channels/{channel_id}/topics/candidates", json=cand_payload
+        )
         assert res2.status_code == 201  # Idempotent response
 
         # Check TopicMemory: times_discovered must STILL be 1 (No inflation on retry)
@@ -62,7 +64,9 @@ async def test_times_discovered_lifecycle_and_retry_idempotency(db_session: Asyn
             "source_name": "conference_papers_2026",
             "idempotency_key": f"key-{uuid.uuid4().hex}",  # Different idempotency key
         }
-        res3 = await client.post(f"/api/v1/channels/{channel_id}/topics/candidates", json=distinct_cand_payload)
+        res3 = await client.post(
+            f"/api/v1/channels/{channel_id}/topics/candidates", json=distinct_cand_payload
+        )
         assert res3.status_code == 201
 
         # Check TopicMemory: times_discovered must now be 2
@@ -74,9 +78,7 @@ async def test_times_discovered_lifecycle_and_retry_idempotency(db_session: Asyn
 @pytest.mark.asyncio
 async def test_concurrent_candidate_selection_idempotency(db_session: AsyncSession) -> None:
     """Test that concurrent selection requests on the same candidate increment times_selected exactly once."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Channel & Candidate
         c_res = await client.post(
             "/api/v1/channels",
@@ -95,7 +97,9 @@ async def test_concurrent_candidate_selection_idempotency(db_session: AsyncSessi
 
         # 2. Fire 3 concurrent selection requests
         async def select_cand() -> int:
-            r = await client.post(f"/api/v1/channels/{channel_id}/topics/candidates/{candidate_id}/select")
+            r = await client.post(
+                f"/api/v1/channels/{channel_id}/topics/candidates/{candidate_id}/select"
+            )
             return r.status_code
 
         results = await asyncio.gather(

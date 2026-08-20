@@ -65,15 +65,17 @@ def cluster_source_independence(sources: list[dict[str, Any]]) -> dict[UUID, str
         tokens = _tokenize(excerpt)
         content_hash = s.get("content_hash", "")
 
-        prepared.append({
-            "id": s_id,
-            "norm_title": norm_title,
-            "norm_pub": norm_pub,
-            "domain": domain,
-            "tokens": tokens,
-            "content_hash": content_hash,
-            "cluster_idx": None,
-        })
+        prepared.append(
+            {
+                "id": s_id,
+                "norm_title": norm_title,
+                "norm_pub": norm_pub,
+                "domain": domain,
+                "tokens": tokens,
+                "content_hash": content_hash,
+                "cluster_idx": None,
+            }
+        )
 
     cluster_count = 0
     for i, s1 in enumerate(prepared):
@@ -93,7 +95,12 @@ def cluster_source_independence(sources: list[dict[str, Any]]) -> dict[UUID, str
             excerpt_sim = _dice_similarity(s1["tokens"], s2["tokens"])
 
             # Cluster if identical content, or (same publisher/domain AND excerpt_sim >= 0.50), or high excerpt_sim >= 0.70
-            if same_hash or (same_pub and excerpt_sim >= 0.50) or (same_domain and excerpt_sim >= 0.50) or excerpt_sim >= 0.70:
+            if (
+                same_hash
+                or (same_pub and excerpt_sim >= 0.50)
+                or (same_domain and excerpt_sim >= 0.50)
+                or excerpt_sim >= 0.70
+            ):
                 s2["cluster_idx"] = cluster_count
 
         cluster_count += 1
@@ -106,7 +113,4 @@ def cluster_source_independence(sources: list[dict[str, Any]]) -> dict[UUID, str
         c_hash = hashlib.sha256(f"cluster:{':'.join(items)}".encode()).hexdigest()
         cluster_hashes[c_idx] = c_hash
 
-    return {
-        s["id"]: cluster_hashes[s["cluster_idx"]]
-        for s in prepared
-    }
+    return {s["id"]: cluster_hashes[s["cluster_idx"]] for s in prepared}

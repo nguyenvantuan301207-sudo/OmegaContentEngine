@@ -173,7 +173,9 @@ async def test_research_engine_e2e_smoke(db_session: AsyncSession) -> None:
         assert brief_v1["outcome"] in ("SUFFICIENT", "PARTIAL")
 
         # Verify conflict recorded
-        conflicts_res = await client.get(f"/api/v1/channels/{channel_id}/research/{req_id}/conflicts")
+        conflicts_res = await client.get(
+            f"/api/v1/channels/{channel_id}/research/{req_id}/conflicts"
+        )
         assert conflicts_res.status_code == 200
         assert len(conflicts_res.json()) >= 1
 

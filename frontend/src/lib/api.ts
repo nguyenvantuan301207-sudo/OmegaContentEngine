@@ -1008,3 +1008,316 @@ export async function cancelResearchRequest(
   });
 }
 
+// ── OMEGA-006 Content Engine Types & Functions ──
+
+export type ContentGenerationMode = "INTERACTIVE" | "MISSION_EXECUTION";
+export type ContentRequestStatus = "DRAFT" | "READY" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+export type ContentOutcome = "GENERATED" | "BLOCKED";
+export type ContentType = "YOUTUBE_LONGFORM" | "YOUTUBE_SHORT";
+export type HookType = "QUESTION" | "CONTRARIAN" | "CURIOSITY" | "RESULT_FIRST" | "STORY" | "STATISTIC" | "PROBLEM";
+export type ContentStatementType = "FACTUAL" | "ATTRIBUTED" | "INTERPRETIVE" | "CREATIVE" | "TRANSITION" | "CTA";
+export type ScriptQAStatus = "PENDING" | "PASSED" | "PASSED_WITH_WARNINGS" | "BLOCKED";
+export type QASeverity = "INFO" | "WARNING" | "ERROR" | "BLOCKING";
+
+export interface ContentCitation {
+  id: string;
+  script_statement_id: string;
+  research_brief_id: string;
+  claim_id: string;
+  evidence_id: string;
+  source_id: string;
+  created_at: string;
+}
+
+export interface ScriptStatement {
+  id: string;
+  script_section_id: string;
+  statement_order: number;
+  statement_text: string;
+  statement_type: ContentStatementType;
+  qualification_note?: string | null;
+  citations: ContentCitation[];
+  created_at: string;
+}
+
+export interface ScriptSection {
+  id: string;
+  script_version_id: string;
+  section_order: number;
+  heading: string;
+  narration_text: string;
+  estimated_duration_seconds: number;
+  transition_text?: string | null;
+  retention_beat?: {
+    timestamp_estimate_seconds: number;
+    beat_type: string;
+    purpose: string;
+    text_hint?: string | null;
+  } | null;
+  statements: ScriptStatement[];
+  created_at: string;
+}
+
+export interface ScriptVersionSummary {
+  id: string;
+  content_request_id: string;
+  version: number;
+  is_current: boolean;
+  supersedes_script_id?: string | null;
+  title: string;
+  estimated_word_count: number;
+  estimated_duration_seconds: number;
+  qa_status: ScriptQAStatus;
+  created_at: string;
+}
+
+export interface ScriptVersion {
+  id: string;
+  content_request_id: string;
+  version: number;
+  is_current: boolean;
+  supersedes_script_id?: string | null;
+  title: string;
+  hook_id?: string | null;
+  hook_text: string;
+  closing_text: string;
+  cta_text: string;
+  estimated_word_count: number;
+  estimated_duration_seconds: number;
+  qa_status: ScriptQAStatus;
+  style_snapshot: Record<string, unknown>;
+  sections: ScriptSection[];
+  created_at: string;
+}
+
+export interface HookCitation {
+  id: string;
+  hook_id: string;
+  research_brief_id: string;
+  claim_id: string;
+  evidence_id: string;
+  source_id: string;
+  created_at: string;
+}
+
+export interface ContentHook {
+  id: string;
+  content_request_id: string;
+  hook_variant_index: number;
+  text: string;
+  hook_type: HookType;
+  score: number;
+  reason_codes: string[];
+  selected: boolean;
+  citations: HookCitation[];
+  created_at: string;
+}
+
+export interface ContentIntent {
+  id: string;
+  content_request_id: string;
+  primary_goal: string;
+  audience_intent: string;
+  viewer_promise: string;
+  central_question: string;
+  core_takeaway: string;
+  tone: string;
+  pace: string;
+  complexity: string;
+  desired_emotion: string;
+  call_to_action_type: string;
+  created_at: string;
+}
+
+export interface OutlineSection {
+  section_id: string;
+  title: string;
+  objective: string;
+  key_points: string[];
+  claim_refs: string[];
+  estimated_duration_seconds: number;
+  transition: string;
+  retention_goal: string;
+}
+
+export interface ContentOutline {
+  id: string;
+  content_request_id: string;
+  opening_description: string;
+  sections: OutlineSection[];
+  closing_description: string;
+  created_at: string;
+}
+
+export interface QAFinding {
+  rule_code: string;
+  severity: QASeverity;
+  message: string;
+  section_index?: number | null;
+  statement_order?: number | null;
+  details?: Record<string, unknown>;
+}
+
+export interface ContentQAResult {
+  id: string;
+  script_version_id: string;
+  status: ScriptQAStatus;
+  findings: QAFinding[];
+  executed_at: string;
+}
+
+export interface ContentGenerationRequest {
+  id: string;
+  channel_id: string;
+  topic_candidate_id: string;
+  research_brief_id: string;
+  channel_dna_revision_id: string;
+  mission_execution_id?: string | null;
+  mode: ContentGenerationMode;
+  status: ContentRequestStatus;
+  outcome?: ContentOutcome | null;
+  content_type: ContentType;
+  target_duration_seconds: number;
+  target_word_count?: number | null;
+  language: string;
+  region: string;
+  creative_direction?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  failed_at?: string | null;
+}
+
+export async function createContentRequest(
+  channelId: string,
+  payload: {
+    topic_candidate_id: string;
+    research_brief_id: string;
+    mission_execution_id?: string | null;
+    content_type?: ContentType;
+    target_duration_seconds?: number;
+    target_word_count?: number | null;
+    language?: string;
+    region?: string;
+    creative_direction?: string | null;
+  },
+): Promise<ContentGenerationRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/content`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listContentRequests(
+  channelId: string,
+  status?: string,
+): Promise<ContentGenerationRequest[]> {
+  const q = status ? `?status=${status}` : "";
+  return apiFetch(`/api/v1/channels/${channelId}/content${q}`);
+}
+
+export async function getContentRequest(
+  channelId: string,
+  requestId: string,
+): Promise<ContentGenerationRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}`);
+}
+
+export async function cancelContentRequest(
+  channelId: string,
+  requestId: string,
+): Promise<ContentGenerationRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/cancel`, {
+    method: "POST",
+  });
+}
+
+export async function generateContent(
+  channelId: string,
+  requestId: string,
+  idempotencyKey?: string,
+): Promise<ScriptVersion> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/generate`, {
+    method: "POST",
+    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+  });
+}
+
+export async function regenerateScript(
+  channelId: string,
+  requestId: string,
+  idempotencyKey?: string,
+): Promise<ScriptVersion> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/regenerate`, {
+    method: "POST",
+    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+  });
+}
+
+export async function getContentIntent(
+  channelId: string,
+  requestId: string,
+): Promise<ContentIntent> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/intent`);
+}
+
+export async function listContentHooks(
+  channelId: string,
+  requestId: string,
+): Promise<ContentHook[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/hooks`);
+}
+
+export async function selectContentHook(
+  channelId: string,
+  requestId: string,
+  hookId: string,
+  selected = true,
+): Promise<ContentHook> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/hooks/${hookId}/select`, {
+    method: "POST",
+    body: JSON.stringify({ selected }),
+  });
+}
+
+export async function getContentOutline(
+  channelId: string,
+  requestId: string,
+): Promise<ContentOutline> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/outline`);
+}
+
+export async function listScriptVersions(
+  channelId: string,
+  requestId: string,
+): Promise<ScriptVersionSummary[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/scripts`);
+}
+
+export async function getScriptVersion(
+  channelId: string,
+  requestId: string,
+  version: number,
+): Promise<ScriptVersion> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/scripts/${version}`);
+}
+
+export async function getScriptQAResult(
+  channelId: string,
+  requestId: string,
+  version: number,
+): Promise<ContentQAResult> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/scripts/${version}/qa`);
+}
+
+export async function rerunScriptQA(
+  channelId: string,
+  requestId: string,
+  version: number,
+): Promise<ContentQAResult> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/scripts/${version}/qa`, {
+    method: "POST",
+  });
+}
+
+

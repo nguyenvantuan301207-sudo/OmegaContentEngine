@@ -91,7 +91,9 @@ class InvalidStateTransitionError(Exception):
 def validate_mission_transition(current: MissionState, target: MissionState) -> None:
     """Validate that a transition from current to target state is permissible."""
     if target not in VALID_MISSION_TRANSITIONS.get(current, set()):
-        raise InvalidStateTransitionError(current=current.value, target=target.value, entity="Mission")
+        raise InvalidStateTransitionError(
+            current=current.value, target=target.value, entity="Mission"
+        )
 
 
 # ── Pydantic Schemas ──

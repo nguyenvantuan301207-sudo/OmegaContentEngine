@@ -134,7 +134,7 @@ def has_distinct_angle_evidence(
 
     # Check against memory angles if present
     mem_angle_texts: set[str] = set()
-    for ma in (memory_angles or []):
+    for ma in memory_angles or []:
         if isinstance(ma, dict) and "angle" in ma:
             ang_norm = normalize_text(ma["angle"])
             if ang_norm:
@@ -196,7 +196,10 @@ def classify_topic_similarity(
         composite_sim = token_sim
 
     # 2. Sim >= exact_duplicate_threshold or title exact match
-    if composite_sim >= profile.exact_duplicate_threshold or candidate_norm_title == memory_norm_title:
+    if (
+        composite_sim >= profile.exact_duplicate_threshold
+        or candidate_norm_title == memory_norm_title
+    ):
         if has_angle:
             return DuplicateStatus.SAME_TOPIC_NEW_ANGLE, composite_sim
         return DuplicateStatus.EXACT_DUPLICATE, composite_sim

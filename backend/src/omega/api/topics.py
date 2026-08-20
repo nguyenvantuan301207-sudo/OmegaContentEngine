@@ -27,7 +27,9 @@ from omega.domain.topic import (
 router = APIRouter(prefix="/api/v1/channels/{channel_id}/topics", tags=["Topics"])
 
 
-@router.post("/candidates", response_model=TopicCandidateResponse, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/candidates", response_model=TopicCandidateResponse, status_code=status.HTTP_201_CREATED
+)
 async def ingest_topic_candidate(
     channel_id: UUID,
     candidate_in: TopicCandidateCreate,
@@ -40,7 +42,9 @@ async def ingest_topic_candidate(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
-@router.post("/import", response_model=list[TopicCandidateResponse], status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/import", response_model=list[TopicCandidateResponse], status_code=status.HTTP_201_CREATED
+)
 async def batch_import_candidates(
     channel_id: UUID,
     batch_in: TopicCandidateBatchImport,
@@ -64,7 +68,12 @@ async def list_channel_candidates(
 ) -> list[TopicCandidateResponse]:
     """List topic candidates with optional filters and pagination."""
     return await topic_service.list_candidates(
-        db, channel_id=channel_id, status=status, source_type=source_type, limit=limit, offset=offset
+        db,
+        channel_id=channel_id,
+        status=status,
+        source_type=source_type,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -92,10 +101,14 @@ async def update_candidate_details(
     try:
         cand = await topic_service.get_candidate(db, candidate_id)
         if not cand or cand.channel_id != channel_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found."
+            )
         updated = await topic_service.update_candidate(db, candidate_id, update_in)
         if not updated:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found."
+            )
         return updated
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -128,7 +141,9 @@ async def evaluate_single_candidate(
     try:
         cand = await topic_service.get_candidate(db, candidate_id)
         if not cand or cand.channel_id != channel_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found."
+            )
         return await topic_service.evaluate_candidate(
             db,
             candidate_id=candidate_id,
@@ -180,7 +195,9 @@ async def select_topic_candidate(
     try:
         cand = await topic_service.get_candidate(db, candidate_id)
         if not cand or cand.channel_id != channel_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found."
+            )
         return await topic_service.select_candidate(db, candidate_id)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -197,7 +214,9 @@ async def reject_topic_candidate(
     try:
         cand = await topic_service.get_candidate(db, candidate_id)
         if not cand or cand.channel_id != channel_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found.")
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Candidate not found."
+            )
         return await topic_service.reject_candidate(db, candidate_id, reject_in.reason)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -226,5 +245,7 @@ async def get_topic_memory_record(
     """Get single TopicMemory record by ID."""
     mem = await topic_service.get_topic_memory(db, memory_id)
     if not mem or mem.channel_id != channel_id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Memory record not found.")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Memory record not found."
+        )
     return mem

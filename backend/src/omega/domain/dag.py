@@ -18,7 +18,9 @@ class DAGValidationError(Exception):
 
 def validate_dag(
     task_ids: set[UUID] | list[UUID],
-    dependencies: list[tuple[UUID, UUID]],  # (task_id, depends_on_task_id) -> task_id depends on depends_on_task_id
+    dependencies: list[
+        tuple[UUID, UUID]
+    ],  # (task_id, depends_on_task_id) -> task_id depends on depends_on_task_id
 ) -> list[UUID]:
     """Validate task dependency graph and return a topological ordering.
 

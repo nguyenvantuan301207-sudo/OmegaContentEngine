@@ -17,9 +17,7 @@ from omega.main import app
 async def test_concurrent_channel_dna_updates(db_session: AsyncSession) -> None:
     """Test that concurrent DNA updates generate sequential, monotonic revision numbers without collisions."""
     slug = f"concurrency-{uuid.uuid4().hex[:8]}"
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Channel (Revision 1)
         res = await client.post(
             "/api/v1/channels",

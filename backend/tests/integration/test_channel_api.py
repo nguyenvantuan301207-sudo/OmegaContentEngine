@@ -15,9 +15,7 @@ from omega.main import app
 async def test_channel_crud_and_lifecycle(db_session: AsyncSession) -> None:
     """Test full Channel CRUD, activation, pause, and archive lifecycle."""
     slug = f"ai-daily-{uuid.uuid4().hex[:8]}"
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Channel (DRAFT)
         res = await client.post(
             "/api/v1/channels",
@@ -92,7 +90,10 @@ async def test_channel_crud_and_lifecycle(db_session: AsyncSession) -> None:
         revisions = res.json()
         assert len(revisions) == 2
         assert revisions[0]["version"] == 2
-        assert revisions[0]["change_reason"] == "Pivoting content strategy toward Robotics and Embodied AI"
+        assert (
+            revisions[0]["change_reason"]
+            == "Pivoting content strategy toward Robotics and Embodied AI"
+        )
         assert revisions[1]["version"] == 1
 
         # 10. Get Channel Context
@@ -121,9 +122,7 @@ async def test_channel_crud_and_lifecycle(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_channel_platform_restriction() -> None:
     """Test that non-YOUTUBE platforms are rejected in OMEGA-003."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.post(
             "/api/v1/channels",
             json={

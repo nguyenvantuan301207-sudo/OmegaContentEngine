@@ -14,9 +14,7 @@ from omega.main import app
 @pytest.mark.asyncio
 async def test_channel_memory_isolation(db_session: AsyncSession) -> None:
     """Verify that Topic Memory for Channel A does not impact or leak into Channel B."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # Create Channel A & Candidate
         ca_res = await client.post(
             "/api/v1/channels",
@@ -33,8 +31,12 @@ async def test_channel_memory_isolation(db_session: AsyncSession) -> None:
 
         # Ingest same topic on Channel A and Channel B
         topic_title = "Global Macroeconomics in 2026"
-        await client.post(f"/api/v1/channels/{chan_a_id}/topics/candidates", json={"title": topic_title})
-        cand_b_res = await client.post(f"/api/v1/channels/{chan_b_id}/topics/candidates", json={"title": topic_title})
+        await client.post(
+            f"/api/v1/channels/{chan_a_id}/topics/candidates", json={"title": topic_title}
+        )
+        cand_b_res = await client.post(
+            f"/api/v1/channels/{chan_b_id}/topics/candidates", json={"title": topic_title}
+        )
         cand_b_id = cand_b_res.json()["id"]
 
         # Select candidate on Channel A
@@ -62,9 +64,7 @@ async def test_channel_memory_isolation(db_session: AsyncSession) -> None:
 @pytest.mark.asyncio
 async def test_mission_execution_pinned_dna_context_evaluation(db_session: AsyncSession) -> None:
     """Verify that MISSION_EXECUTION evaluation mode deterministically uses the pinned ChannelDNARevision."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Channel (Revision 1 with Niche: "General Technology")
         c_res = await client.post(
             "/api/v1/channels",
@@ -75,7 +75,11 @@ async def test_mission_execution_pinned_dna_context_evaluation(db_session: Async
         # 2. Create and Plan Mission A (Pins Revision 1)
         m_res = await client.post(
             "/api/v1/missions",
-            json={"title": "Planned Mission A", "objective": "Execute strategy", "channel_id": chan_id},
+            json={
+                "title": "Planned Mission A",
+                "objective": "Execute strategy",
+                "channel_id": chan_id,
+            },
         )
         mission_id = m_res.json()["id"]
         await client.post(f"/api/v1/missions/{mission_id}/plan")
@@ -84,6 +88,7 @@ async def test_mission_execution_pinned_dna_context_evaluation(db_session: Async
         from sqlalchemy import select
 
         from omega.infrastructure.models import MissionExecution
+
         db_session.expire_all()
         exec_res = await db_session.execute(
             select(MissionExecution).where(MissionExecution.mission_id == mission_id)

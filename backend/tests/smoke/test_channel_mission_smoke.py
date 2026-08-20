@@ -25,9 +25,7 @@ from omega.main import app
 @pytest.mark.asyncio
 async def test_full_channel_mission_smoke() -> None:
     """End-to-end smoke test validating Channel -> DNA Revision -> Mission Execution -> Success."""
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # 1. Create Channel
         chan_res = await client.post(
             "/api/v1/channels",

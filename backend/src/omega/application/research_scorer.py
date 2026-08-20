@@ -107,35 +107,43 @@ def detect_claim_conflicts(
     conflicts: list[dict[str, Any]] = []
 
     # 1. Check direct CONTRADICTS evidence direction
-    contradicting_ev = [e for e in evidence_items if e.get("support_direction") == EvidenceDirection.CONTRADICTS]
+    contradicting_ev = [
+        e for e in evidence_items if e.get("support_direction") == EvidenceDirection.CONTRADICTS
+    ]
     if contradicting_ev:
         involved_ev_ids = [str(e["id"]) for e in contradicting_ev]
         involved_src_ids = [str(e["source_id"]) for e in contradicting_ev]
-        conflicts.append({
-            "claim_id": claim_id,
-            "conflict_type": "DIRECT_CONTRADICTION",
-            "severity": ConflictSeverity.HIGH,
-            "description": f"Direct conflicting evidence provided against claim: '{claim_text[:100]}...'",
-            "involved_evidence_ids": involved_ev_ids,
-            "involved_source_ids": involved_src_ids,
-        })
+        conflicts.append(
+            {
+                "claim_id": claim_id,
+                "conflict_type": "DIRECT_CONTRADICTION",
+                "severity": ConflictSeverity.HIGH,
+                "description": f"Direct conflicting evidence provided against claim: '{claim_text[:100]}...'",
+                "involved_evidence_ids": involved_ev_ids,
+                "involved_source_ids": involved_src_ids,
+            }
+        )
 
     # 2. Check numerical discrepancies across supporting excerpts
     num_patterns = re.findall(r"\b\d+(?:\.\d+)?%|\$\d+(?:\.\d+)?\b|\b\d{4}\b", claim_text)
     if num_patterns:
         # Look for conflicting numbers in evidence excerpts
         for ev in evidence_items:
-            ev_nums = re.findall(r"\b\d+(?:\.\d+)?%|\$\d+(?:\.\d+)?\b|\b\d{4}\b", ev.get("excerpt", ""))
+            ev_nums = re.findall(
+                r"\b\d+(?:\.\d+)?%|\$\d+(?:\.\d+)?\b|\b\d{4}\b", ev.get("excerpt", "")
+            )
             # If evidence has numbers but none match claim numbers
             if ev_nums and not any(n in ev_nums for n in num_patterns):
-                conflicts.append({
-                    "claim_id": claim_id,
-                    "conflict_type": "NUMERICAL_DISCREPANCY",
-                    "severity": ConflictSeverity.MEDIUM,
-                    "description": f"Numerical variance detected between claim '{num_patterns}' and source excerpt '{ev_nums}'",
-                    "involved_evidence_ids": [str(ev["id"])],
-                    "involved_source_ids": [str(ev["source_id"])],
-                })
+                conflicts.append(
+                    {
+                        "claim_id": claim_id,
+                        "conflict_type": "NUMERICAL_DISCREPANCY",
+                        "severity": ConflictSeverity.MEDIUM,
+                        "description": f"Numerical variance detected between claim '{num_patterns}' and source excerpt '{ev_nums}'",
+                        "involved_evidence_ids": [str(ev["id"])],
+                        "involved_source_ids": [str(ev["source_id"])],
+                    }
+                )
                 break
 
     return conflicts
@@ -150,8 +158,12 @@ def evaluate_claim_confidence(
 ) -> dict[str, Any]:
     """Calculate confidence score, band, verification status, and reason codes for a claim."""
     claim_type = ClaimType(claim.get("claim_type", ClaimType.FACT))
-    supporting_ev = [e for e in evidence_items if e.get("support_direction") == EvidenceDirection.SUPPORTS]
-    contradicting_ev = [e for e in evidence_items if e.get("support_direction") == EvidenceDirection.CONTRADICTS]
+    supporting_ev = [
+        e for e in evidence_items if e.get("support_direction") == EvidenceDirection.SUPPORTS
+    ]
+    contradicting_ev = [
+        e for e in evidence_items if e.get("support_direction") == EvidenceDirection.CONTRADICTS
+    ]
 
     reasons: list[str] = []
 
@@ -229,9 +241,17 @@ def evaluate_claim_confidence(
     final_score = min(max(raw_score, 0.0), 100.0)
 
     # 5. Discrete Confidence Bands (with multi-source requirements)
-    if final_score >= 90.0 and n_independent >= profile.min_sources_for_very_high_band and not has_high_conflict:
+    if (
+        final_score >= 90.0
+        and n_independent >= profile.min_sources_for_very_high_band
+        and not has_high_conflict
+    ):
         band = ConfidenceBand.VERY_HIGH
-    elif final_score >= 70.0 and n_independent >= profile.min_sources_for_high_band and not has_high_conflict:
+    elif (
+        final_score >= 70.0
+        and n_independent >= profile.min_sources_for_high_band
+        and not has_high_conflict
+    ):
         band = ConfidenceBand.HIGH
     elif final_score >= 40.0:
         band = ConfidenceBand.MEDIUM
@@ -283,7 +303,10 @@ def determine_research_outcome(
     ):
         return ResearchOutcome.SUFFICIENT
 
-    if sources_count >= profile.min_sources_partial and verified_claims_count >= profile.min_claims_partial:
+    if (
+        sources_count >= profile.min_sources_partial
+        and verified_claims_count >= profile.min_claims_partial
+    ):
         return ResearchOutcome.PARTIAL
 
     return ResearchOutcome.INSUFFICIENT

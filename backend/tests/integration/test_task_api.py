@@ -37,9 +37,7 @@ async def test_task_approval_gate_flow(db_session: AsyncSession) -> None:
     db_session.add(task)
     await db_session.commit()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # Get task details
         res = await client.get(f"/api/v1/tasks/{task.id}")
         assert res.status_code == 200
@@ -76,9 +74,7 @@ async def test_task_rejection_flow(db_session: AsyncSession) -> None:
     db_session.add(task)
     await db_session.commit()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # Reject task: WAITING_APPROVAL -> FAILED
         res = await client.post(
             f"/api/v1/tasks/{task.id}/reject",
@@ -113,9 +109,7 @@ async def test_invalid_approval_on_non_waiting_task(db_session: AsyncSession) ->
     db_session.add(task)
     await db_session.commit()
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         res = await client.post(f"/api/v1/tasks/{task.id}/approve")
         assert res.status_code == 400
         assert "WAITING_APPROVAL" in res.json()["detail"]

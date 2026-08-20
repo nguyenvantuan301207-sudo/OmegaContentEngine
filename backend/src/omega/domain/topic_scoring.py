@@ -78,7 +78,9 @@ class TopicScoringProfile(BaseModel):
         if actual_keys != required_keys:
             missing = required_keys - actual_keys
             extra = actual_keys - required_keys
-            raise ValueError(f"Invalid scoring weight dimensions. Missing: {missing}, Extra: {extra}")
+            raise ValueError(
+                f"Invalid scoring weight dimensions. Missing: {missing}, Extra: {extra}"
+            )
 
         for k, v in self.weights.items():
             if v < 0.0 or v > 1.0:

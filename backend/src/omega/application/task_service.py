@@ -33,9 +33,7 @@ async def approve_task(session: AsyncSession, task_id: UUID) -> TaskResponse | N
     Transitions WAITING_APPROVAL -> READY (unblocks for orchestrator dispatch).
     Does NOT mark task as succeeded.
     """
-    res = await session.execute(
-        select(Task).where(Task.id == task_id).with_for_update()
-    )
+    res = await session.execute(select(Task).where(Task.id == task_id).with_for_update())
     task = res.scalar_one_or_none()
     if not task:
         return None
@@ -79,9 +77,7 @@ async def reject_task(
 
     Transitions WAITING_APPROVAL -> FAILED.
     """
-    res = await session.execute(
-        select(Task).where(Task.id == task_id).with_for_update()
-    )
+    res = await session.execute(select(Task).where(Task.id == task_id).with_for_update())
     task = res.scalar_one_or_none()
     if not task:
         return None

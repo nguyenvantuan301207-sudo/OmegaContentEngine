@@ -30,7 +30,10 @@ def test_direct_contradiction_detection() -> None:
 
     conflicts = detect_claim_conflicts(claim_id, claim_text, evidence)
     assert len(conflicts) >= 1
-    assert any(c["conflict_type"] == "DIRECT_CONTRADICTION" and c["severity"] == ConflictSeverity.HIGH for c in conflicts)
+    assert any(
+        c["conflict_type"] == "DIRECT_CONTRADICTION" and c["severity"] == ConflictSeverity.HIGH
+        for c in conflicts
+    )
 
 
 def test_numerical_discrepancy_detection() -> None:

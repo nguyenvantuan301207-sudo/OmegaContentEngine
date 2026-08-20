@@ -25,7 +25,6 @@ class JobState(enum.StrEnum):
     DEAD = "DEAD"
 
 
-
 class JobCreate(BaseModel):
     """Schema for creating a test job (no user input needed)."""
 

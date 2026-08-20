@@ -106,7 +106,9 @@ async def create_research_request(
     )
     topic = topic_res.scalar_one_or_none()
     if not topic:
-        raise ValueError(f"TopicCandidate '{request_in.topic_candidate_id}' not found for channel '{channel_id}'.")
+        raise ValueError(
+            f"TopicCandidate '{request_in.topic_candidate_id}' not found for channel '{channel_id}'."
+        )
 
     mode = EvaluationContextMode.INTERACTIVE.value
     # 3. Topic State Eligibility & Context Resolution
@@ -349,7 +351,9 @@ async def add_claim(
             )
         )
         if not src_res.scalar_one_or_none():
-            raise ValueError(f"Source '{ev_in.source_id}' does not belong to request '{request_id}'.")
+            raise ValueError(
+                f"Source '{ev_in.source_id}' does not belong to request '{request_id}'."
+            )
 
         claim.evidence.append(
             ClaimEvidence(
@@ -399,7 +403,9 @@ async def add_evidence(
         )
     )
     if not src_res.scalar_one_or_none():
-        raise ValueError(f"Source '{evidence_in.source_id}' does not belong to request '{request_id}'.")
+        raise ValueError(
+            f"Source '{evidence_in.source_id}' does not belong to request '{request_id}'."
+        )
 
     ev_id = uuid.uuid4()
     ev = ClaimEvidence(
@@ -631,7 +637,9 @@ async def run_research(
     # 7. Calculate overall metrics and outcome
     verified_claims = [c for c in claims if c.is_verified]
     uncertain_claims = [c for c in claims if not c.is_verified]
-    independent_clusters_count = len({s.independence_cluster_id for s in sources if s.independence_cluster_id})
+    independent_clusters_count = len(
+        {s.independence_cluster_id for s in sources if s.independence_cluster_id}
+    )
 
     outcome = determine_research_outcome(
         sources_count=len(sources),
@@ -641,11 +649,7 @@ async def run_research(
         profile=outcome_profile,
     )
 
-    avg_conf = (
-        sum(c.confidence_score for c in claims) / len(claims)
-        if claims
-        else 0.0
-    )
+    avg_conf = sum(c.confidence_score for c in claims) / len(claims) if claims else 0.0
 
     # 8. Versioned Immutable ResearchBrief creation
     # Fetch existing brief revisions for this request
@@ -673,21 +677,25 @@ async def run_research(
         citations = []
         for e in c.evidence:
             src_obj = next((s for s in sources if s.id == e.source_id), None)
-            citations.append({
-                "source_id": str(e.source_id),
-                "evidence_id": str(e.id),
-                "publisher": src_obj.publisher if src_obj else "Unknown",
-                "excerpt": e.excerpt,
-                "source_location": e.source_location,
-            })
-        verified_brief_items.append({
-            "claim_id": str(c.id),
-            "text": c.claim_text,
-            "type": c.claim_type,
-            "confidence_score": c.confidence_score,
-            "confidence_band": c.confidence_band,
-            "citations": citations,
-        })
+            citations.append(
+                {
+                    "source_id": str(e.source_id),
+                    "evidence_id": str(e.id),
+                    "publisher": src_obj.publisher if src_obj else "Unknown",
+                    "excerpt": e.excerpt,
+                    "source_location": e.source_location,
+                }
+            )
+        verified_brief_items.append(
+            {
+                "claim_id": str(c.id),
+                "text": c.claim_text,
+                "type": c.claim_type,
+                "confidence_score": c.confidence_score,
+                "confidence_band": c.confidence_band,
+                "citations": citations,
+            }
+        )
 
     uncertain_brief_items = [
         {
@@ -696,7 +704,9 @@ async def run_research(
             "type": c.claim_type,
             "confidence_score": c.confidence_score,
             "confidence_band": c.confidence_band,
-            "uncertainty_reason": "; ".join(c.reasons) if c.reasons else "Below confidence threshold",
+            "uncertainty_reason": "; ".join(c.reasons)
+            if c.reasons
+            else "Below confidence threshold",
         }
         for c in uncertain_claims
     ]
@@ -716,15 +726,18 @@ async def run_research(
     key_facts = [c.claim_text for c in verified_claims if c.claim_type == ClaimType.FACT.value]
     statistics = [
         {"claim": c.claim_text, "confidence": c.confidence_score}
-        for c in verified_claims if c.claim_type == ClaimType.STATISTIC.value
+        for c in verified_claims
+        if c.claim_type == ClaimType.STATISTIC.value
     ]
     dates = [
         {"event": c.claim_text, "confidence": c.confidence_score}
-        for c in verified_claims if c.claim_type == ClaimType.DATE.value
+        for c in verified_claims
+        if c.claim_type == ClaimType.DATE.value
     ]
     quotes = [
         {"quote": c.claim_text, "confidence": c.confidence_score}
-        for c in verified_claims if c.claim_type == ClaimType.QUOTE.value
+        for c in verified_claims
+        if c.claim_type == ClaimType.QUOTE.value
     ]
 
     topic_title = req.topic_candidate.title if req.topic_candidate else "Research Topic"
@@ -755,12 +768,18 @@ async def run_research(
         statistics=statistics,
         dates=dates,
         quotes=quotes,
-        open_questions=["Further empirical evidence required." if outcome != ResearchOutcome.SUFFICIENT else "None."],
+        open_questions=[
+            "Further empirical evidence required."
+            if outcome != ResearchOutcome.SUFFICIENT
+            else "None."
+        ],
         sources_summary={
             "total_sources": len(sources),
             "independent_clusters": independent_clusters_count,
             "high_quality_sources": sum(1 for s in sources if s.quality_score >= 70.0),
-            "confirmed_primary_sources": sum(1 for s in sources if s.primary_source_status == PrimarySourceStatus.CONFIRMED.value),
+            "confirmed_primary_sources": sum(
+                1 for s in sources if s.primary_source_status == PrimarySourceStatus.CONFIRMED.value
+            ),
         },
     )
     session.add(brief)

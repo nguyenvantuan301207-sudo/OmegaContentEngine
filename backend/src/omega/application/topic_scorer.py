@@ -71,7 +71,11 @@ def evaluate_audience_fit(
     cand_norm_keywords = [normalize_text(k) for k in candidate_keywords if normalize_text(k)]
     all_cand_text = candidate_text + " " + " ".join(cand_norm_keywords)
 
-    interest_matches = [i for i in dna_interests if i in all_cand_text or any(token in all_cand_text for token in i.split())]
+    interest_matches = [
+        i
+        for i in dna_interests
+        if i in all_cand_text or any(token in all_cand_text for token in i.split())
+    ]
     if interest_matches:
         base_score += min(len(interest_matches) * 12.0, 25.0)
         reasons.append(REASON_HIGH_AUDIENCE_RELEVANCE)
@@ -101,17 +105,23 @@ def evaluate_strategic_fit(
     all_text = candidate_text + " " + " ".join(cand_norm_keywords)
 
     # Niche match
-    if niche_norm and (niche_norm in all_text or any(token in all_text for token in niche_norm.split())):
+    if niche_norm and (
+        niche_norm in all_text or any(token in all_text for token in niche_norm.split())
+    ):
         base_score += 25.0
 
     # Subniche match
-    subniche_matches = [s for s in subniches_norm if s in all_text or any(token in all_text for token in s.split())]
+    subniche_matches = [
+        s for s in subniches_norm if s in all_text or any(token in all_text for token in s.split())
+    ]
     if subniche_matches:
         base_score += 15.0
         reasons.append(REASON_MATCHES_SUBNICHE)
 
     # Pillar match
-    pillar_matches = [p for p in pillars_norm if p in all_text or any(token in all_text for token in p.split())]
+    pillar_matches = [
+        p for p in pillars_norm if p in all_text or any(token in all_text for token in p.split())
+    ]
     if pillar_matches:
         base_score += 20.0
         reasons.append(REASON_MATCHES_PRIMARY_PILLAR)
@@ -142,7 +152,11 @@ def evaluate_novelty(
     if duplicate_status == DuplicateStatus.SAME_TOPIC_NEW_ANGLE:
         reasons.append(REASON_SAME_TOPIC_NEW_ANGLE)
         # Check recency if memory is provided
-        if similar_memory and hasattr(similar_memory, "last_selected_at") and similar_memory.last_selected_at:
+        if (
+            similar_memory
+            and hasattr(similar_memory, "last_selected_at")
+            and similar_memory.last_selected_at
+        ):
             delta_days = (datetime.now(UTC) - similar_memory.last_selected_at).days
             if delta_days < profile.recent_duplicate_days:
                 reasons.append(REASON_PENALIZED_RECENT_DUPLICATE)
@@ -213,7 +227,9 @@ def calculate_topic_scores(
     reasons.extend(strat_reasons)
 
     # 3. Trend Signal
-    trend_score = trend_prov.get_trend_score(title=title, keywords=keywords, manual_score=manual_trend)
+    trend_score = trend_prov.get_trend_score(
+        title=title, keywords=keywords, manual_score=manual_trend
+    )
     if trend_score >= 75.0:
         reasons.append(REASON_STRONG_TREND_SIGNAL)
 

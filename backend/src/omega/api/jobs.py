@@ -37,4 +37,3 @@ async def get_job_endpoint(
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return job
-

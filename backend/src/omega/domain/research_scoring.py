@@ -31,7 +31,11 @@ class ClaimConfidenceProfile(BaseModel):
 
     @model_validator(mode="after")
     def validate_weights(self) -> ClaimConfidenceProfile:
-        total = self.independent_support_weight + self.source_quality_weight + self.evidence_strength_weight
+        total = (
+            self.independent_support_weight
+            + self.source_quality_weight
+            + self.evidence_strength_weight
+        )
         if abs(total - 1.0) > 1e-5:
             raise ValueError(f"Confidence weights must sum to 1.0 (got {total:.4f})")
         return self

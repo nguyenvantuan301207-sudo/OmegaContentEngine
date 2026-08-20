@@ -90,7 +90,10 @@ async def ingest_candidate(
         )
         existing_cand = existing_res.scalar_one_or_none()
         if existing_cand:
-            logger.info("Candidate already exists with idempotency key", idempotency_key=candidate_in.idempotency_key)
+            logger.info(
+                "Candidate already exists with idempotency key",
+                idempotency_key=candidate_in.idempotency_key,
+            )
             return _to_candidate_response(existing_cand)
 
     # 3. Compute normalized title and versioned fingerprint
@@ -140,7 +143,9 @@ async def ingest_candidate(
                 angle=angle_in.angle.strip(),
                 normalized_angle=norm_ang,
                 hook=angle_in.hook.strip() if angle_in.hook else None,
-                audience_intent=angle_in.audience_intent.strip() if angle_in.audience_intent else None,
+                audience_intent=angle_in.audience_intent.strip()
+                if angle_in.audience_intent
+                else None,
                 format_hint=angle_in.format_hint.strip() if angle_in.format_hint else None,
             )
         )
@@ -347,11 +352,15 @@ async def _resolve_dna_context(
             )
 
         rev_res = await session.execute(
-            select(ChannelDNARevision).where(ChannelDNARevision.id == execution.channel_dna_revision_id)
+            select(ChannelDNARevision).where(
+                ChannelDNARevision.id == execution.channel_dna_revision_id
+            )
         )
         revision = rev_res.scalar_one_or_none()
         if not revision:
-            raise ValueError(f"Pinned ChannelDNARevision '{execution.channel_dna_revision_id}' not found.")
+            raise ValueError(
+                f"Pinned ChannelDNARevision '{execution.channel_dna_revision_id}' not found."
+            )
 
         chan_res = await session.execute(select(Channel).where(Channel.id == channel_id))
         channel = chan_res.scalar_one_or_none()
@@ -435,12 +444,10 @@ async def evaluate_candidate(
             continue
 
         mem_angles_list = [
-            {"angle": a.angle, "normalized_angle": a.normalized_angle}
-            for a in mem.angles
+            {"angle": a.angle, "normalized_angle": a.normalized_angle} for a in mem.angles
         ]
         cand_angles_list = [
-            {"angle": a.angle, "normalized_angle": a.normalized_angle}
-            for a in cand.angles
+            {"angle": a.angle, "normalized_angle": a.normalized_angle} for a in cand.angles
         ]
 
         status, sim = classify_topic_similarity(

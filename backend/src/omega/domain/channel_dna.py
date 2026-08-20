@@ -26,7 +26,9 @@ class AudienceProfile(BaseModel):
     """Defines target audience demographics, knowledge level, and intent."""
 
     age_range: str = Field(default="18-34", min_length=1, max_length=50)
-    interests: list[str] = Field(default_factory=lambda: ["technology", "productivity"], min_length=1, max_length=20)
+    interests: list[str] = Field(
+        default_factory=lambda: ["technology", "productivity"], min_length=1, max_length=20
+    )
     knowledge_level: KnowledgeLevel = KnowledgeLevel.ALL_LEVELS
     viewer_intent: list[str] = Field(
         default_factory=lambda: ["EDUCATION", "ANALYSIS"], min_length=1
@@ -70,12 +72,8 @@ class VisualStyle(BaseModel):
     """Defines aesthetic guidelines, thumbnail style, and editing rules."""
 
     visual_theme: str = Field(default="DARK_MINIMAL", min_length=1, max_length=100)
-    thumbnail_style: str = Field(
-        default="BOLD_TEXT_HIGH_CONTRAST", min_length=1, max_length=100
-    )
-    color_preferences: list[str] = Field(
-        default_factory=lambda: ["#0F172A", "#38BDF8", "#F8FAFC"]
-    )
+    thumbnail_style: str = Field(default="BOLD_TEXT_HIGH_CONTRAST", min_length=1, max_length=100)
+    color_preferences: list[str] = Field(default_factory=lambda: ["#0F172A", "#38BDF8", "#F8FAFC"])
     font_preferences: list[str] = Field(
         default_factory=lambda: ["Inter", "Montserrat", "JetBrains Mono"]
     )
@@ -152,9 +150,7 @@ class PublishingPreferences(BaseModel):
     """Defines publishing windows, days, and approval gates."""
 
     target_timezone: str = Field(default="UTC", min_length=1, max_length=50)
-    preferred_days: list[str] = Field(
-        default_factory=lambda: ["MONDAY", "WEDNESDAY", "FRIDAY"]
-    )
+    preferred_days: list[str] = Field(default_factory=lambda: ["MONDAY", "WEDNESDAY", "FRIDAY"])
     preferred_time_windows: list[str] = Field(
         default_factory=lambda: ["14:00-16:00", "18:00-20:00"]
     )
@@ -229,7 +225,11 @@ class KPITarget(BaseModel):
     @model_validator(mode="after")
     def validate_bounds(self) -> KPITarget:
         # Rate metrics (percentages) must be 0-100
-        if self.metric in (KPIMetricType.CTR, KPIMetricType.RETENTION, KPIMetricType.ENGAGEMENT_RATE):
+        if self.metric in (
+            KPIMetricType.CTR,
+            KPIMetricType.RETENTION,
+            KPIMetricType.ENGAGEMENT_RATE,
+        ):
             if not (0.0 <= self.target_value <= 100.0):
                 raise ValueError(
                     f"Target value for percentage metric '{self.metric.value}' must be between 0.0 and 100.0 (got {self.target_value})."
@@ -273,9 +273,7 @@ class ChannelDNA(BaseModel):
     brand_voice: BrandVoice = Field(default_factory=BrandVoice)
     visual_style: VisualStyle = Field(default_factory=VisualStyle)
     content_strategy: ContentStrategy = Field(default_factory=ContentStrategy)
-    publishing_preferences: PublishingPreferences = Field(
-        default_factory=PublishingPreferences
-    )
+    publishing_preferences: PublishingPreferences = Field(default_factory=PublishingPreferences)
     goals_and_kpis: GoalsAndKPIs = Field(default_factory=GoalsAndKPIs)
     constraints: Constraints = Field(default_factory=Constraints)
 

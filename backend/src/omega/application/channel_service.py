@@ -150,9 +150,7 @@ async def update_channel(
     session: AsyncSession, channel_id: UUID, update_in: ChannelUpdate
 ) -> ChannelResponse | None:
     """Update mutable identity attributes of a channel (slug is strictly immutable)."""
-    res = await session.execute(
-        select(Channel).where(Channel.id == channel_id).with_for_update()
-    )
+    res = await session.execute(select(Channel).where(Channel.id == channel_id).with_for_update())
     channel = res.scalar_one_or_none()
     if not channel:
         return None
@@ -185,9 +183,7 @@ async def update_channel(
 
 async def activate_channel(session: AsyncSession, channel_id: UUID) -> ChannelResponse | None:
     """Activate a channel (transitions DRAFT or PAUSED -> ACTIVE)."""
-    res = await session.execute(
-        select(Channel).where(Channel.id == channel_id).with_for_update()
-    )
+    res = await session.execute(select(Channel).where(Channel.id == channel_id).with_for_update())
     channel = res.scalar_one_or_none()
     if not channel:
         return None
@@ -211,9 +207,7 @@ async def activate_channel(session: AsyncSession, channel_id: UUID) -> ChannelRe
 
 async def pause_channel(session: AsyncSession, channel_id: UUID) -> ChannelResponse | None:
     """Pause an active channel (transitions ACTIVE -> PAUSED)."""
-    res = await session.execute(
-        select(Channel).where(Channel.id == channel_id).with_for_update()
-    )
+    res = await session.execute(select(Channel).where(Channel.id == channel_id).with_for_update())
     channel = res.scalar_one_or_none()
     if not channel:
         return None
@@ -237,9 +231,7 @@ async def pause_channel(session: AsyncSession, channel_id: UUID) -> ChannelRespo
 
 async def archive_channel(session: AsyncSession, channel_id: UUID) -> ChannelResponse | None:
     """Archive a channel (transitions DRAFT, ACTIVE, or PAUSED -> ARCHIVED)."""
-    res = await session.execute(
-        select(Channel).where(Channel.id == channel_id).with_for_update()
-    )
+    res = await session.execute(select(Channel).where(Channel.id == channel_id).with_for_update())
     channel = res.scalar_one_or_none()
     if not channel:
         return None
@@ -281,9 +273,7 @@ async def update_channel_dna(
 ) -> ChannelDNA | None:
     """Update Channel DNA, atomically incrementing revision version under row lock."""
     # 1. Lock channel row
-    res = await session.execute(
-        select(Channel).where(Channel.id == channel_id).with_for_update()
-    )
+    res = await session.execute(select(Channel).where(Channel.id == channel_id).with_for_update())
     channel = res.scalar_one_or_none()
     if not channel:
         return None
@@ -345,9 +335,7 @@ async def list_dna_revisions(
     return [ChannelDNARevisionResponse.model_validate(r) for r in revisions]
 
 
-async def get_channel_context(
-    session: AsyncSession, channel_id: UUID
-) -> ChannelContext | None:
+async def get_channel_context(session: AsyncSession, channel_id: UUID) -> ChannelContext | None:
     """Resolve unified ChannelContext with active DNA and latest revision version."""
     res = await session.execute(select(Channel).where(Channel.id == channel_id))
     channel = res.scalar_one_or_none()

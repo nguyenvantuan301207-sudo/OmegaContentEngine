@@ -77,9 +77,7 @@ class Channel(Base):
     target_region: Mapped[str] = mapped_column(String(10), nullable=False, default="US")
     timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="UTC")
     dna: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSON, nullable=False, server_default="{}"
-    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
 
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -90,7 +88,10 @@ class Channel(Base):
     archived_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     revisions: Mapped[list[ChannelDNARevision]] = relationship(
-        "ChannelDNARevision", back_populates="channel", cascade="all, delete-orphan", order_by="ChannelDNARevision.version.desc()"
+        "ChannelDNARevision",
+        back_populates="channel",
+        cascade="all, delete-orphan",
+        order_by="ChannelDNARevision.version.desc()",
     )
     missions: Mapped[list[Mission]] = relationship("Mission", back_populates="channel")
     topic_candidates: Mapped[list[TopicCandidate]] = relationship(
@@ -102,6 +103,9 @@ class Channel(Base):
     research_requests: Mapped[list[ResearchRequest]] = relationship(
         "ResearchRequest", back_populates="channel", cascade="all, delete-orphan"
     )
+    content_requests: Mapped[list[ContentGenerationRequest]] = relationship(
+        "ContentGenerationRequest", back_populates="channel", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Channel id={self.id} slug={self.slug!r} state={self.state}>"
@@ -111,13 +115,14 @@ class ChannelDNARevision(Base):
     """ChannelDNARevision model storing immutable snapshots of Channel DNA."""
 
     __tablename__ = "channel_dna_revisions"
-    __table_args__ = (
-        UniqueConstraint("channel_id", "version", name="uq_channel_dna_version"),
-    )
+    __table_args__ = (UniqueConstraint("channel_id", "version", name="uq_channel_dna_version"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     channel_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
@@ -130,6 +135,9 @@ class ChannelDNARevision(Base):
     channel: Mapped[Channel] = relationship("Channel", back_populates="revisions")
     mission_executions: Mapped[list[MissionExecution]] = relationship(
         "MissionExecution", back_populates="channel_dna_revision"
+    )
+    content_requests: Mapped[list[ContentGenerationRequest]] = relationship(
+        "ContentGenerationRequest", back_populates="channel_dna_revision"
     )
 
     def __repr__(self) -> str:
@@ -146,17 +154,20 @@ class Mission(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     channel_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="RESTRICT"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     objective: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     state: Mapped[str] = mapped_column(String(50), nullable=False, default="DRAFT", index=True)
-    autonomy_level: Mapped[str] = mapped_column(String(50), nullable=False, default="SUPERVISED", index=True)
-    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSON, nullable=False, server_default="{}"
+    autonomy_level: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="SUPERVISED", index=True
     )
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
 
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -191,10 +202,16 @@ class MissionExecution(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     mission_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("missions.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     channel_dna_revision_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
     )
     state: Mapped[str] = mapped_column(String(50), nullable=False, default="PLANNED", index=True)
     trigger_type: Mapped[str] = mapped_column(String(50), nullable=False, default="MANUAL")
@@ -211,11 +228,12 @@ class MissionExecution(Base):
     channel_dna_revision: Mapped[ChannelDNARevision | None] = relationship(
         "ChannelDNARevision", back_populates="mission_executions"
     )
-    tasks: Mapped[list[Task]] = relationship(
-        "Task", back_populates="execution"
-    )
+    tasks: Mapped[list[Task]] = relationship("Task", back_populates="execution")
     research_requests: Mapped[list[ResearchRequest]] = relationship(
         "ResearchRequest", back_populates="mission_execution"
+    )
+    content_requests: Mapped[list[ContentGenerationRequest]] = relationship(
+        "ContentGenerationRequest", back_populates="mission_execution"
     )
 
     def __repr__(self) -> str:
@@ -229,10 +247,16 @@ class Task(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     mission_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("missions.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     execution_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("mission_executions.id", ondelete="SET NULL"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("mission_executions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     task_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -256,7 +280,9 @@ class Task(Base):
     completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     mission: Mapped[Mission] = relationship("Mission", back_populates="tasks")
-    execution: Mapped[MissionExecution | None] = relationship("MissionExecution", back_populates="tasks")
+    execution: Mapped[MissionExecution | None] = relationship(
+        "MissionExecution", back_populates="tasks"
+    )
 
     upstream_dependencies: Mapped[list[TaskDependency]] = relationship(
         "TaskDependency",
@@ -279,13 +305,14 @@ class TaskDependency(Base):
     """Task dependency model defining execution edges in the DAG."""
 
     __tablename__ = "task_dependencies"
-    __table_args__ = (
-        UniqueConstraint("task_id", "depends_on_task_id", name="uq_task_dependency"),
-    )
+    __table_args__ = (UniqueConstraint("task_id", "depends_on_task_id", name="uq_task_dependency"),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     mission_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("missions.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     task_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False, index=True
@@ -297,7 +324,9 @@ class TaskDependency(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    task: Mapped[Task] = relationship("Task", foreign_keys=[task_id], back_populates="upstream_dependencies")
+    task: Mapped[Task] = relationship(
+        "Task", foreign_keys=[task_id], back_populates="upstream_dependencies"
+    )
     depends_on_task: Mapped[Task] = relationship(
         "Task", foreign_keys=[depends_on_task_id], back_populates="downstream_dependencies"
     )
@@ -313,10 +342,16 @@ class DecisionLog(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     mission_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("missions.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     execution_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("mission_executions.id", ondelete="SET NULL"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("mission_executions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     task_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True, index=True
@@ -346,7 +381,10 @@ class TopicCandidate(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     channel_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     normalized_title: Mapped[str] = mapped_column(String(300), nullable=False, index=True)
@@ -378,13 +416,13 @@ class TopicCandidate(Base):
     )
     similarity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    status: Mapped[str] = mapped_column(String(50), nullable=False, default="DISCOVERED", index=True)
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="DISCOVERED", index=True
+    )
     reasons: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
     score_breakdown: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
     idempotency_key: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSON, nullable=False, server_default="{}"
-    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
 
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -396,12 +434,17 @@ class TopicCandidate(Base):
     archived_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     channel: Mapped[Channel] = relationship("Channel", back_populates="topic_candidates")
-    similar_memory: Mapped[TopicMemory | None] = relationship("TopicMemory", foreign_keys=[similar_memory_id])
+    similar_memory: Mapped[TopicMemory | None] = relationship(
+        "TopicMemory", foreign_keys=[similar_memory_id]
+    )
     angles: Mapped[list[TopicAngle]] = relationship(
         "TopicAngle", back_populates="candidate", cascade="all, delete-orphan"
     )
     research_requests: Mapped[list[ResearchRequest]] = relationship(
         "ResearchRequest", back_populates="topic_candidate", cascade="all, delete-orphan"
+    )
+    content_requests: Mapped[list[ContentGenerationRequest]] = relationship(
+        "ContentGenerationRequest", back_populates="topic_candidate", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:
@@ -418,7 +461,10 @@ class TopicMemory(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     channel_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     canonical_topic: Mapped[str] = mapped_column(String(300), nullable=False)
     normalized_topic: Mapped[str] = mapped_column(String(300), nullable=False)
@@ -441,12 +487,14 @@ class TopicMemory(Base):
     last_selected_at: Mapped[DateTime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, index=True
     )
-    last_produced_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_rejected_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    last_evaluation_score: Mapped[float | None] = mapped_column(Float, nullable=True)
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSON, nullable=False, server_default="{}"
+    last_produced_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
+    last_rejected_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_evaluation_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
 
     channel: Mapped[Channel] = relationship("Channel", back_populates="topic_memory")
     angles: Mapped[list[TopicAngle]] = relationship(
@@ -464,10 +512,16 @@ class TopicAngle(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     candidate_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("topic_candidates.id", ondelete="CASCADE"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("topic_candidates.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
     )
     memory_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("topic_memory.id", ondelete="CASCADE"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("topic_memory.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
     )
     angle: Mapped[str] = mapped_column(String(300), nullable=False)
     normalized_angle: Mapped[str] = mapped_column(String(300), nullable=False)
@@ -478,7 +532,9 @@ class TopicAngle(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
-    candidate: Mapped[TopicCandidate | None] = relationship("TopicCandidate", back_populates="angles")
+    candidate: Mapped[TopicCandidate | None] = relationship(
+        "TopicCandidate", back_populates="angles"
+    )
     memory: Mapped[TopicMemory | None] = relationship("TopicMemory", back_populates="angles")
 
     def __repr__(self) -> str:
@@ -495,13 +551,22 @@ class ResearchRequest(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     channel_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     topic_candidate_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("topic_candidates.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("topic_candidates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     mission_execution_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("mission_executions.id", ondelete="SET NULL"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("mission_executions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     mode: Mapped[str] = mapped_column(String(50), nullable=False, default="INTERACTIVE")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING", index=True)
@@ -513,9 +578,7 @@ class ResearchRequest(Base):
     max_sources: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
     minimum_source_quality: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
     minimum_claim_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=60.0)
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSON, nullable=False, server_default="{}"
-    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
 
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -525,20 +588,36 @@ class ResearchRequest(Base):
     failed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     channel: Mapped[Channel] = relationship("Channel", back_populates="research_requests")
-    topic_candidate: Mapped[TopicCandidate] = relationship("TopicCandidate", back_populates="research_requests")
-    mission_execution: Mapped[MissionExecution | None] = relationship("MissionExecution", back_populates="research_requests")
+    topic_candidate: Mapped[TopicCandidate] = relationship(
+        "TopicCandidate", back_populates="research_requests"
+    )
+    mission_execution: Mapped[MissionExecution | None] = relationship(
+        "MissionExecution", back_populates="research_requests"
+    )
 
     sources: Mapped[list[ResearchSource]] = relationship(
-        "ResearchSource", back_populates="request", cascade="all, delete-orphan", order_by="ResearchSource.retrieved_at.asc()"
+        "ResearchSource",
+        back_populates="request",
+        cascade="all, delete-orphan",
+        order_by="ResearchSource.retrieved_at.asc()",
     )
     claims: Mapped[list[ResearchClaim]] = relationship(
-        "ResearchClaim", back_populates="request", cascade="all, delete-orphan", order_by="ResearchClaim.confidence_score.desc()"
+        "ResearchClaim",
+        back_populates="request",
+        cascade="all, delete-orphan",
+        order_by="ResearchClaim.confidence_score.desc()",
     )
     conflicts: Mapped[list[ResearchConflict]] = relationship(
-        "ResearchConflict", back_populates="request", cascade="all, delete-orphan", order_by="ResearchConflict.detected_at.desc()"
+        "ResearchConflict",
+        back_populates="request",
+        cascade="all, delete-orphan",
+        order_by="ResearchConflict.detected_at.desc()",
     )
     briefs: Mapped[list[ResearchBrief]] = relationship(
-        "ResearchBrief", back_populates="request", cascade="all, delete-orphan", order_by="ResearchBrief.version.desc()"
+        "ResearchBrief",
+        back_populates="request",
+        cascade="all, delete-orphan",
+        order_by="ResearchBrief.version.desc()",
     )
 
     def __repr__(self) -> str:
@@ -552,10 +631,16 @@ class ResearchSource(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     research_request_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("research_requests.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("research_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     channel_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     source_type: Mapped[str] = mapped_column(String(50), nullable=False, default="MANUAL")
     title: Mapped[str] = mapped_column(String(300), nullable=False)
@@ -564,13 +649,17 @@ class ResearchSource(Base):
     url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     content_excerpt: Mapped[str] = mapped_column(Text, nullable=False)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    primary_source_status: Mapped[str] = mapped_column(String(50), nullable=False, default="UNKNOWN")
+    primary_source_status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="UNKNOWN"
+    )
 
     quality_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
     relevance_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
     freshness_score: Mapped[float] = mapped_column(Float, nullable=False, default=50.0)
     quality_reasons: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
-    independence_cluster_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    independence_cluster_id: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
 
     published_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     retrieved_at: Mapped[DateTime] = mapped_column(
@@ -578,9 +667,7 @@ class ResearchSource(Base):
     )
     language: Mapped[str] = mapped_column(String(20), nullable=False, default="en")
     region: Mapped[str] = mapped_column(String(10), nullable=False, default="US")
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSON, nullable=False, server_default="{}"
-    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
 
     request: Mapped[ResearchRequest] = relationship("ResearchRequest", back_populates="sources")
     evidence: Mapped[list[ClaimEvidence]] = relationship(
@@ -598,10 +685,16 @@ class ResearchClaim(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     research_request_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("research_requests.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("research_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     channel_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     claim_text: Mapped[str] = mapped_column(Text, nullable=False)
     normalized_claim: Mapped[str] = mapped_column(Text, nullable=False)
@@ -614,9 +707,7 @@ class ResearchClaim(Base):
     independent_sources_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     is_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
     reasons: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSON, nullable=False, server_default="{}"
-    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
 
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -644,10 +735,16 @@ class ClaimEvidence(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     claim_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("research_claims.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("research_claims.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     source_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("research_sources.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("research_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     support_direction: Mapped[str] = mapped_column(String(50), nullable=False, default="SUPPORTS")
     excerpt: Mapped[str] = mapped_column(Text, nullable=False)
@@ -671,12 +768,20 @@ class ResearchConflict(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     research_request_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("research_requests.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("research_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     claim_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("research_claims.id", ondelete="SET NULL"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("research_claims.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
-    conflict_type: Mapped[str] = mapped_column(String(50), nullable=False, default="DIRECT_CONTRADICTION")
+    conflict_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="DIRECT_CONTRADICTION"
+    )
     severity: Mapped[str] = mapped_column(String(50), nullable=False, default="HIGH")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="OPEN", index=True)
     description: Mapped[str] = mapped_column(Text, nullable=False)
@@ -706,13 +811,22 @@ class ResearchBrief(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     research_request_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("research_requests.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("research_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     channel_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     topic_candidate_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("topic_candidates.id", ondelete="CASCADE"), nullable=False, index=True
+        UUID(as_uuid=True),
+        ForeignKey("topic_candidates.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     supersedes_brief_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -734,15 +848,468 @@ class ResearchBrief(Base):
     quotes: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
     open_questions: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
     sources_summary: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
-    metadata_: Mapped[dict] = mapped_column(
-        "metadata", JSON, nullable=False, server_default="{}"
-    )
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
 
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
     request: Mapped[ResearchRequest] = relationship("ResearchRequest", back_populates="briefs")
+    content_requests: Mapped[list[ContentGenerationRequest]] = relationship(
+        "ContentGenerationRequest", back_populates="research_brief"
+    )
 
     def __repr__(self) -> str:
         return f"<ResearchBrief id={self.id} request_id={self.research_request_id} v={self.version} current={self.is_current}>"
+
+
+# ── OMEGA-006 Content Engine Models ──
+
+
+class ContentGenerationRequest(Base):
+    """ContentGenerationRequest database model representing a structured content generation job."""
+
+    __tablename__ = "content_generation_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    topic_candidate_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("topic_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    research_brief_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_briefs.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    channel_dna_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    mission_execution_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mission_executions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    mode: Mapped[str] = mapped_column(String(50), nullable=False, default="INTERACTIVE")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="DRAFT", index=True)
+    outcome: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    content_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="YOUTUBE_LONGFORM"
+    )
+    target_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=480)
+    target_word_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    language: Mapped[str] = mapped_column(String(20), nullable=False, default="en")
+    region: Mapped[str] = mapped_column(String(10), nullable=False, default="US")
+    creative_direction: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
+
+    channel: Mapped[Channel] = relationship("Channel", back_populates="content_requests")
+    topic_candidate: Mapped[TopicCandidate] = relationship(
+        "TopicCandidate", back_populates="content_requests"
+    )
+    research_brief: Mapped[ResearchBrief] = relationship(
+        "ResearchBrief", back_populates="content_requests"
+    )
+    channel_dna_revision: Mapped[ChannelDNARevision] = relationship(
+        "ChannelDNARevision", back_populates="content_requests"
+    )
+    mission_execution: Mapped[MissionExecution | None] = relationship(
+        "MissionExecution", back_populates="content_requests"
+    )
+
+    intent: Mapped[ContentIntent | None] = relationship(
+        "ContentIntent",
+        back_populates="content_request",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    hooks: Mapped[list[ContentHook]] = relationship(
+        "ContentHook",
+        back_populates="content_request",
+        cascade="all, delete-orphan",
+        order_by="ContentHook.hook_variant_index.asc()",
+    )
+    outline: Mapped[ContentOutline | None] = relationship(
+        "ContentOutline",
+        back_populates="content_request",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+    scripts: Mapped[list[ScriptVersion]] = relationship(
+        "ScriptVersion",
+        back_populates="content_request",
+        cascade="all, delete-orphan",
+        order_by="ScriptVersion.version.desc()",
+    )
+
+    def __repr__(self) -> str:
+        return f"<ContentGenerationRequest id={self.id} channel_id={self.channel_id} status={self.status}>"
+
+
+class ContentIntent(Base):
+    """ContentIntent database model storing derived editorial goals and style orientation."""
+
+    __tablename__ = "content_intents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    content_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_generation_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    primary_goal: Mapped[str] = mapped_column(Text, nullable=False)
+    audience_intent: Mapped[str] = mapped_column(Text, nullable=False)
+    viewer_promise: Mapped[str] = mapped_column(Text, nullable=False)
+    central_question: Mapped[str] = mapped_column(Text, nullable=False)
+    core_takeaway: Mapped[str] = mapped_column(Text, nullable=False)
+    tone: Mapped[str] = mapped_column(String(100), nullable=False)
+    pace: Mapped[str] = mapped_column(String(100), nullable=False)
+    complexity: Mapped[str] = mapped_column(String(100), nullable=False)
+    desired_emotion: Mapped[str] = mapped_column(String(100), nullable=False)
+    call_to_action_type: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    content_request: Mapped[ContentGenerationRequest] = relationship(
+        "ContentGenerationRequest", back_populates="intent"
+    )
+
+    def __repr__(self) -> str:
+        return f"<ContentIntent id={self.id} request_id={self.content_request_id}>"
+
+
+class ContentHook(Base):
+    """ContentHook database model storing hook candidates."""
+
+    __tablename__ = "content_hooks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    content_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_generation_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    hook_variant_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    hook_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    reason_codes: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
+    selected: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    content_request: Mapped[ContentGenerationRequest] = relationship(
+        "ContentGenerationRequest", back_populates="hooks"
+    )
+    citations: Mapped[list[ContentHookCitation]] = relationship(
+        "ContentHookCitation", back_populates="hook", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<ContentHook id={self.id} variant={self.hook_variant_index} type={self.hook_type} selected={self.selected}>"
+
+
+class ContentHookCitation(Base):
+    """ContentHookCitation database model linking factual assertions in hooks to research."""
+
+    __tablename__ = "content_hook_citations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hook_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_hooks.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    research_brief_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_briefs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    claim_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_claims.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("claim_evidence.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    hook: Mapped[ContentHook] = relationship("ContentHook", back_populates="citations")
+
+    def __repr__(self) -> str:
+        return f"<ContentHookCitation id={self.id} hook_id={self.hook_id} claim_id={self.claim_id}>"
+
+
+class ContentOutline(Base):
+    """ContentOutline database model representing structured outline."""
+
+    __tablename__ = "content_outlines"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    content_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_generation_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    opening_description: Mapped[str] = mapped_column(Text, nullable=False)
+    sections: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
+    closing_description: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    content_request: Mapped[ContentGenerationRequest] = relationship(
+        "ContentGenerationRequest", back_populates="outline"
+    )
+
+    def __repr__(self) -> str:
+        return f"<ContentOutline id={self.id} request_id={self.content_request_id}>"
+
+
+class ScriptVersion(Base):
+    """ScriptVersion database model storing immutable, versioned script drafts."""
+
+    __tablename__ = "script_versions"
+    __table_args__ = (
+        UniqueConstraint("content_request_id", "version", name="uq_script_version_number"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    content_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_generation_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    supersedes_script_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("script_versions.id", ondelete="SET NULL"), nullable=True
+    )
+
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    hook_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("content_hooks.id", ondelete="SET NULL"), nullable=True
+    )
+    hook_text: Mapped[str] = mapped_column(Text, nullable=False)
+    closing_text: Mapped[str] = mapped_column(Text, nullable=False)
+    cta_text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    estimated_word_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    estimated_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    qa_status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="PENDING", index=True
+    )
+    style_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    content_request: Mapped[ContentGenerationRequest] = relationship(
+        "ContentGenerationRequest", back_populates="scripts"
+    )
+    hook: Mapped[ContentHook | None] = relationship("ContentHook")
+    sections: Mapped[list[ScriptSection]] = relationship(
+        "ScriptSection",
+        back_populates="script_version",
+        cascade="all, delete-orphan",
+        order_by="ScriptSection.section_order.asc()",
+    )
+    qa_result: Mapped[ContentQAResult | None] = relationship(
+        "ContentQAResult",
+        back_populates="script_version",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<ScriptVersion id={self.id} request_id={self.content_request_id} v={self.version} current={self.is_current}>"
+
+
+class ScriptSection(Base):
+    """ScriptSection database model storing individual structured sections of a script."""
+
+    __tablename__ = "script_sections"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    script_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("script_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    section_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    heading: Mapped[str] = mapped_column(String(255), nullable=False)
+    narration_text: Mapped[str] = mapped_column(Text, nullable=False)
+    estimated_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    transition_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retention_beat: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    script_version: Mapped[ScriptVersion] = relationship("ScriptVersion", back_populates="sections")
+    statements: Mapped[list[ScriptStatement]] = relationship(
+        "ScriptStatement",
+        back_populates="script_section",
+        cascade="all, delete-orphan",
+        order_by="ScriptStatement.statement_order.asc()",
+    )
+
+    def __repr__(self) -> str:
+        return f"<ScriptSection id={self.id} order={self.section_order} heading={self.heading!r}>"
+
+
+class ScriptStatement(Base):
+    """ScriptStatement database model storing individual classified statements in a script section."""
+
+    __tablename__ = "script_statements"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    script_section_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("script_sections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    statement_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    statement_text: Mapped[str] = mapped_column(Text, nullable=False)
+    statement_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    qualification_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    script_section: Mapped[ScriptSection] = relationship(
+        "ScriptSection", back_populates="statements"
+    )
+    citations: Mapped[list[ContentCitation]] = relationship(
+        "ContentCitation", back_populates="statement", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<ScriptStatement id={self.id} type={self.statement_type} order={self.statement_order}>"
+
+
+class ContentCitation(Base):
+    """ContentCitation database model storing normalized provenance relationships."""
+
+    __tablename__ = "content_citations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    script_statement_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("script_statements.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    research_brief_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_briefs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    claim_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_claims.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("claim_evidence.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    source_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_sources.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    statement: Mapped[ScriptStatement] = relationship("ScriptStatement", back_populates="citations")
+
+    def __repr__(self) -> str:
+        return f"<ContentCitation id={self.id} statement_id={self.script_statement_id} claim_id={self.claim_id}>"
+
+
+class ContentQAResult(Base):
+    """ContentQAResult database model storing local QA findings for a script version."""
+
+    __tablename__ = "content_qa_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    script_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("script_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING", index=True)
+    findings: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
+
+    executed_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    script_version: Mapped[ScriptVersion] = relationship(
+        "ScriptVersion", back_populates="qa_result"
+    )
+
+    def __repr__(self) -> str:
+        return f"<ContentQAResult id={self.id} script_version_id={self.script_version_id} status={self.status}>"

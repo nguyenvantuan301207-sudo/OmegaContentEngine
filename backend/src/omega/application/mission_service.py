@@ -44,9 +44,7 @@ async def create_mission(session: AsyncSession, mission_in: MissionCreate) -> Mi
     """Create a new mission in DRAFT state with optional channel association."""
     # 1. Channel validation
     if mission_in.channel_id is not None:
-        chan_res = await session.execute(
-            select(Channel).where(Channel.id == mission_in.channel_id)
-        )
+        chan_res = await session.execute(select(Channel).where(Channel.id == mission_in.channel_id))
         channel = chan_res.scalar_one_or_none()
         if not channel:
             raise ValueError(f"Channel with ID '{mission_in.channel_id}' does not exist.")
@@ -104,9 +102,7 @@ async def update_mission(
     session: AsyncSession, mission_id: UUID, update_in: MissionUpdate
 ) -> MissionResponse | None:
     """Update a mission in DRAFT state. Enforces channel_id immutability once planned."""
-    res = await session.execute(
-        select(Mission).where(Mission.id == mission_id).with_for_update()
-    )
+    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
     mission = res.scalar_one_or_none()
     if not mission:
         return None
@@ -125,9 +121,7 @@ async def update_mission(
             )
 
         # Validate new channel
-        chan_res = await session.execute(
-            select(Channel).where(Channel.id == update_in.channel_id)
-        )
+        chan_res = await session.execute(select(Channel).where(Channel.id == update_in.channel_id))
         channel = chan_res.scalar_one_or_none()
         if not channel:
             raise ValueError(f"Channel with ID '{update_in.channel_id}' does not exist.")
@@ -155,9 +149,7 @@ async def update_mission(
 
 async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
     """Plan a mission: generate task DAG, freeze ChannelDNARevision, create planned MissionExecution, transition DRAFT -> READY."""
-    res = await session.execute(
-        select(Mission).where(Mission.id == mission_id).with_for_update()
-    )
+    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
     mission = res.scalar_one_or_none()
     if not mission:
         return None
@@ -167,9 +159,7 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
     # 1. Resolve Channel and latest ChannelDNARevision if linked to a channel
     channel_dna_revision_id = None
     if mission.channel_id is not None:
-        chan_res = await session.execute(
-            select(Channel).where(Channel.id == mission.channel_id)
-        )
+        chan_res = await session.execute(select(Channel).where(Channel.id == mission.channel_id))
         channel = chan_res.scalar_one_or_none()
         if not channel:
             raise ValueError(f"Linked channel with ID '{mission.channel_id}' does not exist.")
@@ -263,9 +253,7 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
 
 async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
     """Start a planned mission: activate planned MissionExecution, transition READY -> RUNNING, trigger orchestrator."""
-    res = await session.execute(
-        select(Mission).where(Mission.id == mission_id).with_for_update()
-    )
+    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
     mission = res.scalar_one_or_none()
     if not mission:
         return None
@@ -274,9 +262,7 @@ async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
 
     # Channel check: verify linked channel is not archived
     if mission.channel_id is not None:
-        chan_res = await session.execute(
-            select(Channel).where(Channel.id == mission.channel_id)
-        )
+        chan_res = await session.execute(select(Channel).where(Channel.id == mission.channel_id))
         channel = chan_res.scalar_one_or_none()
         if channel and channel.state == ChannelState.ARCHIVED.value:
             raise ValueError(f"Cannot start mission for archived channel '{channel.name}'.")
@@ -328,9 +314,7 @@ async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
 
 async def pause_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
     """Pause an active mission."""
-    res = await session.execute(
-        select(Mission).where(Mission.id == mission_id).with_for_update()
-    )
+    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
     mission = res.scalar_one_or_none()
     if not mission:
         return None
@@ -374,9 +358,7 @@ async def pause_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
 
 async def resume_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
     """Resume a paused mission."""
-    res = await session.execute(
-        select(Mission).where(Mission.id == mission_id).with_for_update()
-    )
+    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
     mission = res.scalar_one_or_none()
     if not mission:
         return None
@@ -424,9 +406,7 @@ async def resume_mission(session: AsyncSession, mission_id: UUID) -> MissionResp
 
 async def cancel_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
     """Cancel a mission and all non-terminal tasks."""
-    res = await session.execute(
-        select(Mission).where(Mission.id == mission_id).with_for_update()
-    )
+    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
     mission = res.scalar_one_or_none()
     if not mission:
         return None
@@ -442,7 +422,13 @@ async def cancel_mission(session: AsyncSession, mission_id: UUID) -> MissionResp
         select(MissionExecution)
         .where(
             MissionExecution.mission_id == mission.id,
-            MissionExecution.state.in_([ExecutionState.PLANNED.value, ExecutionState.RUNNING.value, ExecutionState.PAUSED.value]),
+            MissionExecution.state.in_(
+                [
+                    ExecutionState.PLANNED.value,
+                    ExecutionState.RUNNING.value,
+                    ExecutionState.PAUSED.value,
+                ]
+            ),
         )
         .with_for_update()
     )
@@ -457,13 +443,15 @@ async def cancel_mission(session: AsyncSession, mission_id: UUID) -> MissionResp
         select(Task)
         .where(
             Task.mission_id == mission.id,
-            Task.state.in_([
-                TaskState.PENDING.value,
-                TaskState.BLOCKED.value,
-                TaskState.READY.value,
-                TaskState.WAITING_APPROVAL.value,
-                TaskState.QUEUED.value,
-            ]),
+            Task.state.in_(
+                [
+                    TaskState.PENDING.value,
+                    TaskState.BLOCKED.value,
+                    TaskState.READY.value,
+                    TaskState.WAITING_APPROVAL.value,
+                    TaskState.QUEUED.value,
+                ]
+            ),
         )
         .with_for_update()
     )
@@ -489,7 +477,9 @@ async def cancel_mission(session: AsyncSession, mission_id: UUID) -> MissionResp
 async def get_mission_tasks(session: AsyncSession, mission_id: UUID) -> list[TaskResponse]:
     """Retrieve all tasks for a mission ordered by priority/creation."""
     res = await session.execute(
-        select(Task).where(Task.mission_id == mission_id).order_by(Task.priority.asc(), Task.created_at.asc())
+        select(Task)
+        .where(Task.mission_id == mission_id)
+        .order_by(Task.priority.asc(), Task.created_at.asc())
     )
     tasks = res.scalars().all()
     return [TaskResponse.model_validate(t) for t in tasks]

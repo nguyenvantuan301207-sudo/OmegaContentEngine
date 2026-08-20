@@ -34,11 +34,15 @@ def analyze_content_gap(
 
     for record in memory_records:
         canon_topic = normalize_text(
-            record.canonical_topic if hasattr(record, "canonical_topic") else record.get("canonical_topic", "")
+            record.canonical_topic
+            if hasattr(record, "canonical_topic")
+            else record.get("canonical_topic", "")
         )
         rec_keywords = [
             normalize_text(k)
-            for k in (record.keywords if hasattr(record, "keywords") else record.get("keywords", []))
+            for k in (
+                record.keywords if hasattr(record, "keywords") else record.get("keywords", [])
+            )
         ]
         rec_text = canon_topic + " " + " ".join(rec_keywords)
 
@@ -47,8 +51,16 @@ def analyze_content_gap(
                 pillar_counts[p] += 1
 
     # Determine matched pillar for this candidate
-    cand_norm_text = normalize_text(candidate_title) + " " + " ".join(normalize_text(k) for k in candidate_keywords)
-    matched_pillars = [p for p in norm_pillars if p in cand_norm_text or any(token in cand_norm_text for token in p.split())]
+    cand_norm_text = (
+        normalize_text(candidate_title)
+        + " "
+        + " ".join(normalize_text(k) for k in candidate_keywords)
+    )
+    matched_pillars = [
+        p
+        for p in norm_pillars
+        if p in cand_norm_text or any(token in cand_norm_text for token in p.split())
+    ]
 
     total_memories = len(memory_records)
     avg_per_pillar = total_memories / max(len(norm_pillars), 1)
