@@ -1,7 +1,8 @@
 """SQLAlchemy ORM models.
 
 All database table definitions live here.
-Preserves OMEGA-001 Foundation (Job) and introduces OMEGA-002 Mission Engine models.
+Preserves OMEGA-001 Foundation (Job) and OMEGA-002 Mission Engine models,
+and introduces OMEGA-003 Channel Manager models.
 """
 
 from __future__ import annotations
@@ -49,6 +50,75 @@ class Job(Base):
         return f"<Job id={self.id} type={self.job_type} state={self.state}>"
 
 
+# ── OMEGA-003 Channel Manager Models ──
+
+
+class Channel(Base):
+    """Channel database model representing an autonomous operating workspace."""
+
+    __tablename__ = "channels"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    slug: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    state: Mapped[str] = mapped_column(String(50), nullable=False, default="DRAFT", index=True)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False, default="YOUTUBE", index=True)
+    platform_channel_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    primary_language: Mapped[str] = mapped_column(String(20), nullable=False, default="en")
+    target_region: Mapped[str] = mapped_column(String(10), nullable=False, default="US")
+    timezone: Mapped[str] = mapped_column(String(50), nullable=False, default="UTC")
+    dna: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    metadata_: Mapped[dict] = mapped_column(
+        "metadata", JSON, nullable=False, server_default="{}"
+    )
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    archived_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    revisions: Mapped[list[ChannelDNARevision]] = relationship(
+        "ChannelDNARevision", back_populates="channel", cascade="all, delete-orphan", order_by="ChannelDNARevision.version.desc()"
+    )
+    missions: Mapped[list[Mission]] = relationship("Mission", back_populates="channel")
+
+    def __repr__(self) -> str:
+        return f"<Channel id={self.id} slug={self.slug!r} state={self.state}>"
+
+
+class ChannelDNARevision(Base):
+    """ChannelDNARevision model storing immutable snapshots of Channel DNA."""
+
+    __tablename__ = "channel_dna_revisions"
+    __table_args__ = (
+        UniqueConstraint("channel_id", "version", name="uq_channel_dna_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    change_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(String(50), nullable=False, default="USER")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    channel: Mapped[Channel] = relationship("Channel", back_populates="revisions")
+    executions: Mapped[list[MissionExecution]] = relationship(
+        "MissionExecution", back_populates="channel_dna_revision"
+    )
+
+    def __repr__(self) -> str:
+        return f"<ChannelDNARevision id={self.id} channel_id={self.channel_id} v={self.version}>"
+
+
 # ── OMEGA-002 Mission Engine Models ──
 
 
@@ -58,6 +128,9 @@ class Mission(Base):
     __tablename__ = "missions"
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     objective: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -81,6 +154,7 @@ class Mission(Base):
     completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    channel: Mapped[Channel | None] = relationship("Channel", back_populates="missions")
     executions: Mapped[list[MissionExecution]] = relationship(
         "MissionExecution", back_populates="mission", cascade="all, delete-orphan"
     )
@@ -107,6 +181,12 @@ class MissionExecution(Base):
     mission_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("missions.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    channel_dna_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     state: Mapped[str] = mapped_column(String(50), nullable=False, index=True, default="PLANNED")
     trigger_type: Mapped[str] = mapped_column(String(50), nullable=False, default="MANUAL")
 
@@ -120,6 +200,9 @@ class MissionExecution(Base):
     completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     mission: Mapped[Mission] = relationship("Mission", back_populates="executions")
+    channel_dna_revision: Mapped[ChannelDNARevision | None] = relationship(
+        "ChannelDNARevision", back_populates="executions"
+    )
     tasks: Mapped[list[Task]] = relationship("Task", back_populates="execution")
     decisions: Mapped[list[DecisionLog]] = relationship("DecisionLog", back_populates="execution")
 

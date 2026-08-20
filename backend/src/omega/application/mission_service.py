@@ -1,6 +1,7 @@
 """Mission Application Service.
 
 Orchestrates Mission lifecycle, planning, start, pause, resume, cancel, and queries.
+Integrates channel association, channel validation, and deterministic ChannelDNARevision pinning.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.orchestrator import evaluate_mission
 from omega.application.planner import StaticMissionPlanner
+from omega.domain.channel import ChannelState
 from omega.domain.decision import Actor, DecisionLogResponse, DecisionType
 from omega.domain.mission import (
     ExecutionState,
@@ -24,18 +26,38 @@ from omega.domain.mission import (
     validate_mission_transition,
 )
 from omega.domain.task import TaskResponse, TaskState
-from omega.infrastructure.models import DecisionLog, Mission, MissionExecution, Task, TaskDependency
+from omega.infrastructure.models import (
+    Channel,
+    ChannelDNARevision,
+    DecisionLog,
+    Mission,
+    MissionExecution,
+    Task,
+    TaskDependency,
+)
 from omega.logging import get_logger
 
 logger = get_logger(service="omega-mission-service")
 
 
 async def create_mission(session: AsyncSession, mission_in: MissionCreate) -> MissionResponse:
-    """Create a new mission in DRAFT state."""
+    """Create a new mission in DRAFT state with optional channel association."""
+    # 1. Channel validation
+    if mission_in.channel_id is not None:
+        chan_res = await session.execute(
+            select(Channel).where(Channel.id == mission_in.channel_id)
+        )
+        channel = chan_res.scalar_one_or_none()
+        if not channel:
+            raise ValueError(f"Channel with ID '{mission_in.channel_id}' does not exist.")
+        if channel.state == ChannelState.ARCHIVED.value:
+            raise ValueError(f"Cannot create mission for archived channel '{channel.name}'.")
+
     mission = Mission(
         id=uuid4(),
         title=mission_in.title,
         objective=mission_in.objective,
+        channel_id=mission_in.channel_id,
         description=mission_in.description,
         state=MissionState.DRAFT.value,
         autonomy_level=mission_in.autonomy_level.value,
@@ -81,7 +103,7 @@ async def list_missions(
 async def update_mission(
     session: AsyncSession, mission_id: UUID, update_in: MissionUpdate
 ) -> MissionResponse | None:
-    """Update a mission in DRAFT state."""
+    """Update a mission in DRAFT state. Enforces channel_id immutability once planned."""
     res = await session.execute(
         select(Mission).where(Mission.id == mission_id).with_for_update()
     )
@@ -91,6 +113,27 @@ async def update_mission(
 
     if mission.state != MissionState.DRAFT.value:
         raise ValueError(f"Cannot update mission in state '{mission.state}'. Must be DRAFT.")
+
+    # Enforce channel_id immutability if mission already has executions planned
+    if update_in.channel_id != mission.channel_id and update_in.channel_id is not None:
+        exec_check = await session.execute(
+            select(MissionExecution).where(MissionExecution.mission_id == mission.id)
+        )
+        if exec_check.first() is not None:
+            raise ValueError(
+                "Mission channel_id cannot be modified after the mission has been planned or executed."
+            )
+
+        # Validate new channel
+        chan_res = await session.execute(
+            select(Channel).where(Channel.id == update_in.channel_id)
+        )
+        channel = chan_res.scalar_one_or_none()
+        if not channel:
+            raise ValueError(f"Channel with ID '{update_in.channel_id}' does not exist.")
+        if channel.state == ChannelState.ARCHIVED.value:
+            raise ValueError(f"Cannot associate mission with archived channel '{channel.name}'.")
+        mission.channel_id = update_in.channel_id
 
     if update_in.title is not None:
         mission.title = update_in.title
@@ -111,7 +154,7 @@ async def update_mission(
 
 
 async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
-    """Plan a mission: generate task DAG, create planned MissionExecution, transition DRAFT -> READY."""
+    """Plan a mission: generate task DAG, freeze ChannelDNARevision, create planned MissionExecution, transition DRAFT -> READY."""
     res = await session.execute(
         select(Mission).where(Mission.id == mission_id).with_for_update()
     )
@@ -121,17 +164,39 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
 
     validate_mission_transition(MissionState(mission.state), MissionState.READY)
 
-    # 1. Create the MissionExecution for this planned run
+    # 1. Resolve Channel and latest ChannelDNARevision if linked to a channel
+    channel_dna_revision_id = None
+    if mission.channel_id is not None:
+        chan_res = await session.execute(
+            select(Channel).where(Channel.id == mission.channel_id)
+        )
+        channel = chan_res.scalar_one_or_none()
+        if not channel:
+            raise ValueError(f"Linked channel with ID '{mission.channel_id}' does not exist.")
+        if channel.state == ChannelState.ARCHIVED.value:
+            raise ValueError(f"Cannot plan mission for archived channel '{channel.name}'.")
+
+        rev_res = await session.execute(
+            select(ChannelDNARevision)
+            .where(ChannelDNARevision.channel_id == mission.channel_id)
+            .order_by(ChannelDNARevision.version.desc())
+        )
+        latest_rev = rev_res.scalars().first()
+        if latest_rev:
+            channel_dna_revision_id = latest_rev.id
+
+    # 2. Create the MissionExecution for this planned run, pinning the DNA revision
     execution = MissionExecution(
         id=uuid4(),
         mission_id=mission.id,
+        channel_dna_revision_id=channel_dna_revision_id,
         state=ExecutionState.PLANNED.value,
         trigger_type=MissionTriggerType.MANUAL.value,
     )
     session.add(execution)
     await session.flush()
 
-    # 2. Generate task DAG using StaticMissionPlanner
+    # 3. Generate task DAG using StaticMissionPlanner
     planner = StaticMissionPlanner()
     plan = planner.plan(
         mission_title=mission.title,
@@ -139,7 +204,7 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
         autonomy_level=mission.autonomy_level,
     )
 
-    # 3. Persist planned tasks associated with this execution_id
+    # 4. Persist planned tasks associated with this execution_id
     temp_id_to_real_id: dict[UUID, UUID] = {}
     for pt in plan.tasks:
         real_task_id = uuid4()
@@ -161,7 +226,7 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
 
     await session.flush()
 
-    # 4. Persist dependencies
+    # 5. Persist dependencies
     for pdep in plan.dependencies:
         dep_db = TaskDependency(
             id=uuid4(),
@@ -171,7 +236,7 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
         )
         session.add(dep_db)
 
-    # 5. Transition Mission DRAFT -> READY
+    # 6. Transition Mission DRAFT -> READY
     mission.state = MissionState.READY.value
     mission.updated_at = datetime.now(UTC)
 
@@ -181,13 +246,18 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
             execution_id=execution.id,
             decision_type=DecisionType.MISSION_PLAN.value,
             decision="Generate and validate 7-stage DAG",
-            reason=f"StaticMissionPlanner generated {len(plan.tasks)} tasks and {len(plan.dependencies)} dependencies",
+            reason=f"StaticMissionPlanner generated {len(plan.tasks)} tasks and {len(plan.dependencies)} dependencies (pinned DNA rev: {channel_dna_revision_id})",
             actor=Actor.PLANNER.value,
         )
     )
 
     await session.commit()
-    logger.info("Mission planned successfully", mission_id=str(mission.id), tasks_count=len(plan.tasks))
+    logger.info(
+        "Mission planned successfully",
+        mission_id=str(mission.id),
+        tasks_count=len(plan.tasks),
+        channel_dna_revision_id=str(channel_dna_revision_id) if channel_dna_revision_id else None,
+    )
     return MissionResponse.model_validate(mission)
 
 
@@ -201,6 +271,15 @@ async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
         return None
 
     validate_mission_transition(MissionState(mission.state), MissionState.RUNNING)
+
+    # Channel check: verify linked channel is not archived
+    if mission.channel_id is not None:
+        chan_res = await session.execute(
+            select(Channel).where(Channel.id == mission.channel_id)
+        )
+        channel = chan_res.scalar_one_or_none()
+        if channel and channel.state == ChannelState.ARCHIVED.value:
+            raise ValueError(f"Cannot start mission for archived channel '{channel.name}'.")
 
     now = datetime.now(UTC)
 

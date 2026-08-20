@@ -6,12 +6,14 @@ Mounts all v1 sub-routers:
 - jobs (OMEGA-001 Foundation test jobs at /api/v1/jobs/...)
 - missions (OMEGA-002 Mission Engine at /api/v1/missions/...)
 - tasks (OMEGA-002 Task Engine at /api/v1/tasks/...)
+- channels (OMEGA-003 Channel Manager at /api/v1/channels/...)
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter
 
+from omega.api.channels import router as channels_router
 from omega.api.health import router as health_router
 from omega.api.jobs import router as jobs_router
 from omega.api.missions import router as missions_router
@@ -24,3 +26,4 @@ api_router.include_router(system_router)
 api_router.include_router(jobs_router)
 api_router.include_router(missions_router)
 api_router.include_router(tasks_router)
+api_router.include_router(channels_router)

@@ -102,6 +102,7 @@ class MissionCreate(BaseModel):
 
     title: str = Field(..., min_length=1, max_length=255)
     objective: str = Field(..., min_length=1)
+    channel_id: UUID | None = None
     description: str | None = None
     autonomy_level: AutonomyLevel = AutonomyLevel.SUPERVISED
     priority: int = Field(default=1, ge=1, le=10)
@@ -113,6 +114,7 @@ class MissionUpdate(BaseModel):
 
     title: str | None = Field(default=None, min_length=1, max_length=255)
     objective: str | None = Field(default=None, min_length=1)
+    channel_id: UUID | None = None
     description: str | None = None
     autonomy_level: AutonomyLevel | None = None
     priority: int | None = Field(default=None, ge=1, le=10)
@@ -124,6 +126,7 @@ class MissionExecutionResponse(BaseModel):
 
     id: UUID
     mission_id: UUID
+    channel_dna_revision_id: UUID | None = None
     state: ExecutionState
     trigger_type: str
     created_at: datetime
@@ -140,6 +143,7 @@ class MissionResponse(BaseModel):
     id: UUID
     title: str
     objective: str
+    channel_id: UUID | None = None
     description: str | None = None
     state: MissionState
     autonomy_level: AutonomyLevel

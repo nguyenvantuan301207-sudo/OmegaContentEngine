@@ -89,6 +89,21 @@ export default function Home() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
           <Link
+            href="/channels"
+            style={{
+              padding: "0.5rem 1rem",
+              borderRadius: "4px",
+              backgroundColor: "rgba(99, 102, 241, 0.15)",
+              color: "#818cf8",
+              border: "1px solid rgba(99, 102, 241, 0.3)",
+              fontSize: "0.85rem",
+              fontWeight: 600,
+              textDecoration: "none",
+            }}
+          >
+            📺 Channels →
+          </Link>
+          <Link
             href="/missions"
             style={{
               padding: "0.5rem 1rem",
@@ -101,7 +116,7 @@ export default function Home() {
               textDecoration: "none",
             }}
           >
-            🚀 Missions Dashboard →
+            🚀 Missions →
           </Link>
           {systemInfo && (
             <span className="env-badge">{systemInfo.environment}</span>
@@ -167,7 +182,7 @@ export default function Home() {
       </div>
 
       <footer className="footer">
-        OMEGA v{systemInfo?.version ?? "0.1.0"} · Mission Engine Enabled
+        OMEGA v{systemInfo?.version ?? "0.1.0"} · Channel Manager & Mission Engine Enabled
       </footer>
     </div>
   );

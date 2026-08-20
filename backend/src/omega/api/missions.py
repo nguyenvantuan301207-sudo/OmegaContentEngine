@@ -43,7 +43,12 @@ async def create_new_mission(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> MissionResponse:
     """Create a new mission in DRAFT state."""
-    return await create_mission(db, payload)
+    try:
+        return await create_mission(db, payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
 
 
 @router.get("", response_model=list[MissionResponse])

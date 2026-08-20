@@ -1,19 +1,29 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { AutonomyLevel, createMission } from "@/lib/api";
+import { AutonomyLevel, Channel, createMission, getChannels } from "@/lib/api";
 
 export default function NewMissionPage() {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [objective, setObjective] = useState("");
+  const [channelId, setChannelId] = useState<string>("");
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [description, setDescription] = useState("");
   const [autonomyLevel, setAutonomyLevel] = useState<AutonomyLevel>("SUPERVISED");
   const [priority, setPriority] = useState(1);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getChannels("ACTIVE")
+      .then((data) => setChannels(data))
+      .catch(() => {
+        // ignore load error for optional channel dropdown
+      });
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -29,6 +39,7 @@ export default function NewMissionPage() {
       const created = await createMission({
         title: title.trim(),
         objective: objective.trim(),
+        channel_id: channelId ? channelId : undefined,
         description: description.trim() || undefined,
         autonomy_level: autonomyLevel,
         priority: Number(priority),
@@ -54,7 +65,7 @@ export default function NewMissionPage() {
             Create New Mission
           </h1>
           <p className="text-sm text-zinc-400">
-            Define a high-level goal and autonomy constraints for the orchestrator.
+            Define a high-level goal, optional channel link, and autonomy constraints for the orchestrator.
           </p>
         </div>
 
@@ -77,6 +88,27 @@ export default function NewMissionPage() {
               placeholder="e.g., Q3 Developer Intelligence Campaign"
               className="w-full px-4 py-3 rounded bg-zinc-950 border border-zinc-800 text-white placeholder-zinc-600 focus:outline-none focus:border-emerald-500 text-sm font-sans"
             />
+          </div>
+
+          <div className="space-y-2">
+            <label className="block text-xs font-mono uppercase text-zinc-300">
+              Operating Channel (Optional)
+            </label>
+            <select
+              value={channelId}
+              onChange={(e) => setChannelId(e.target.value)}
+              className="w-full px-4 py-3 rounded bg-zinc-950 border border-zinc-800 text-white focus:outline-none focus:border-emerald-500 text-sm font-sans"
+            >
+              <option value="">-- Standalone Mission (No Channel Link) --</option>
+              {channels.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name} (/{c.slug}) — {c.state}
+                </option>
+              ))}
+            </select>
+            <p className="text-[11px] text-zinc-500">
+              Linking a channel will deterministically pin its active DNA revision at execution planning time.
+            </p>
           </div>
 
           <div className="space-y-2">
