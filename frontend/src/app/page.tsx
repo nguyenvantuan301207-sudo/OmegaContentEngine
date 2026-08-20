@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import {
   getHealth,
   getSystemStatus,
@@ -86,9 +87,26 @@ export default function Home() {
             <span>Autonomous Content Operating System</span>
           </div>
         </div>
-        {systemInfo && (
-          <span className="env-badge">{systemInfo.environment}</span>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+          <Link
+            href="/missions"
+            style={{
+              padding: "0.5rem 1rem",
+              borderRadius: "4px",
+              backgroundColor: "rgba(16, 185, 129, 0.15)",
+              color: "#10b981",
+              border: "1px solid rgba(16, 185, 129, 0.3)",
+              fontSize: "0.85rem",
+              fontWeight: 600,
+              textDecoration: "none",
+            }}
+          >
+            🚀 Missions Dashboard →
+          </Link>
+          {systemInfo && (
+            <span className="env-badge">{systemInfo.environment}</span>
+          )}
+        </div>
       </header>
 
       <h2 className="section-title">System Overview</h2>
@@ -123,7 +141,7 @@ export default function Home() {
         {renderCheck("Celery Worker", systemStatus?.checks?.worker)}
       </div>
 
-      <h2 className="section-title">Test Job</h2>
+      <h2 className="section-title">Test Job (OMEGA-001)</h2>
       <div className="card">
         <p style={{ marginBottom: "1rem", color: "var(--text-secondary)", fontSize: "0.85rem" }}>
           Dispatch a test job to verify the worker pipeline.
@@ -149,7 +167,7 @@ export default function Home() {
       </div>
 
       <footer className="footer">
-        OMEGA v{systemInfo?.version ?? "0.1.0"} · Foundation
+        OMEGA v{systemInfo?.version ?? "0.1.0"} · Mission Engine Enabled
       </footer>
     </div>
   );

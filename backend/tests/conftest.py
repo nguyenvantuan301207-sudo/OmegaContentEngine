@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncGenerator
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession
 
 
 def is_docker() -> bool:
@@ -28,3 +30,12 @@ def _set_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.setenv("ENVIRONMENT", "test")
         if "CORS_ORIGINS" not in os.environ:
             monkeypatch.setenv("CORS_ORIGINS", "http://localhost:3000")
+
+
+@pytest.fixture
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    """Yield an async database session for integration tests."""
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as session:
+        yield session

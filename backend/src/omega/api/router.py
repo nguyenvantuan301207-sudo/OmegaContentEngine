@@ -1,6 +1,11 @@
 """API v1 router aggregator.
 
-Mounts all v1 sub-routers.
+Mounts all v1 sub-routers:
+- health (liveness probe at /health)
+- system (readiness probe at /api/v1/system/...)
+- jobs (OMEGA-001 Foundation test jobs at /api/v1/jobs/...)
+- missions (OMEGA-002 Mission Engine at /api/v1/missions/...)
+- tasks (OMEGA-002 Task Engine at /api/v1/tasks/...)
 """
 
 from __future__ import annotations
@@ -9,11 +14,13 @@ from fastapi import APIRouter
 
 from omega.api.health import router as health_router
 from omega.api.jobs import router as jobs_router
+from omega.api.missions import router as missions_router
 from omega.api.system import router as system_router
+from omega.api.tasks import router as tasks_router
 
-# Health is mounted at root level (/health)
-# System and jobs are mounted at /api/v1/...
 api_router = APIRouter()
 api_router.include_router(health_router)
 api_router.include_router(system_router)
 api_router.include_router(jobs_router)
+api_router.include_router(missions_router)
+api_router.include_router(tasks_router)
