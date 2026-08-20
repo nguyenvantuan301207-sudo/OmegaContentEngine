@@ -57,6 +57,8 @@ services:
         condition: service_healthy
       omega-redis:
         condition: service_healthy
+    volumes:
+      - ./backend:/app
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -84,6 +86,8 @@ services:
         condition: service_healthy
       omega-redis:
         condition: service_healthy
+    volumes:
+      - ./backend:/app
     restart: unless-stopped
 
   # ── Next.js Frontend ──

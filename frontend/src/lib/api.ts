@@ -209,6 +209,128 @@ export interface ChannelContext {
   active_dna_version: number;
 }
 
+// ── Topic Intelligence Types (OMEGA-004) ──
+
+export type TopicStatus =
+  | "DISCOVERED"
+  | "EVALUATED"
+  | "RECOMMENDED"
+  | "SELECTED"
+  | "REJECTED"
+  | "ARCHIVED";
+
+export type TopicSourceType =
+  | "MANUAL"
+  | "SEED"
+  | "HISTORICAL"
+  | "IMPORT"
+  | "SYSTEM_GENERATED";
+
+export type DuplicateStatus =
+  | "FRESH_TOPIC"
+  | "RELATED_TOPIC"
+  | "SAME_TOPIC_NEW_ANGLE"
+  | "SEMANTIC_DUPLICATE"
+  | "EXACT_DUPLICATE";
+
+export interface TopicAngle {
+  id: string;
+  candidate_id?: string | null;
+  memory_id?: string | null;
+  angle: string;
+  normalized_angle: string;
+  hook?: string | null;
+  audience_intent?: string | null;
+  format_hint?: string | null;
+  created_at: string;
+}
+
+export interface TopicCandidate {
+  id: string;
+  channel_id: string;
+  title: string;
+  normalized_title: string;
+  summary: string | null;
+  source_type: TopicSourceType;
+  source_name: string;
+  source_ref: string | null;
+  language: string;
+  region: string;
+  entities: string[];
+  keywords: string[];
+  tags: string[];
+  topic_fingerprint: string;
+  audience_fit_score: number | null;
+  strategic_fit_score: number | null;
+  trend_score: number | null;
+  novelty_score: number | null;
+  content_gap_score: number | null;
+  historical_performance_score: number | null;
+  cost_efficiency_score: number | null;
+  revenue_potential_score: number | null;
+  final_score: number | null;
+  duplicate_status: DuplicateStatus;
+  similar_memory_id: string | null;
+  similarity_score: number | null;
+  status: TopicStatus;
+  reasons: string[];
+  score_breakdown: Record<string, number>;
+  angles: TopicAngle[];
+  idempotency_key: string | null;
+  metadata: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+  evaluated_at: string | null;
+  archived_at: string | null;
+}
+
+export interface TopicCandidateCreatePayload {
+  title: string;
+  summary?: string | null;
+  source_type?: TopicSourceType;
+  source_name?: string;
+  source_ref?: string | null;
+  language?: string;
+  region?: string;
+  entities?: string[];
+  keywords?: string[];
+  tags?: string[];
+  angles?: {
+    angle: string;
+    hook?: string | null;
+    audience_intent?: string | null;
+    format_hint?: string | null;
+  }[];
+  idempotency_key?: string | null;
+  manual_trend_score?: number | null;
+  manual_cost_efficiency_score?: number | null;
+  manual_revenue_score?: number | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface TopicMemory {
+  id: string;
+  channel_id: string;
+  canonical_topic: string;
+  normalized_topic: string;
+  topic_fingerprint: string;
+  entities: string[];
+  keywords: string[];
+  semantic_tags: string[];
+  first_seen_at: string;
+  last_seen_at: string;
+  times_discovered: int;
+  times_selected: number;
+  times_produced: number;
+  times_rejected: number;
+  last_selected_at: string | null;
+  last_produced_at: string | null;
+  last_rejected_at: string | null;
+  last_evaluation_score: number | null;
+  angles: TopicAngle[];
+  metadata: Record<string, unknown>;
+}
+
 // ── Mission Engine Types (OMEGA-002) ──
 
 export type MissionState =
@@ -412,6 +534,110 @@ export async function getChannelDNARevisions(channelId: string): Promise<Channel
 
 export async function getChannelContext(channelId: string): Promise<ChannelContext> {
   return apiFetch(`/api/v1/channels/${channelId}/context`);
+}
+
+// ── Topic Intelligence API Functions (OMEGA-004) ──
+
+export async function getTopicCandidates(
+  channelId: string,
+  status?: string,
+  sourceType?: string,
+): Promise<TopicCandidate[]> {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (sourceType) params.set("source_type", sourceType);
+  const q = params.toString() ? `?${params.toString()}` : "";
+  return apiFetch(`/api/v1/channels/${channelId}/topics/candidates${q}`);
+}
+
+export async function getTopicCandidate(channelId: string, candidateId: string): Promise<TopicCandidate> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/candidates/${candidateId}`);
+}
+
+export async function createTopicCandidate(
+  channelId: string,
+  payload: TopicCandidateCreatePayload,
+): Promise<TopicCandidate> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/candidates`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function importTopicCandidates(
+  channelId: string,
+  candidates: TopicCandidateCreatePayload[],
+): Promise<TopicCandidate[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/import`, {
+    method: "POST",
+    body: JSON.stringify({ candidates }),
+  });
+}
+
+export async function archiveTopicCandidate(channelId: string, candidateId: string): Promise<TopicCandidate> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/candidates/${candidateId}/archive`, {
+    method: "POST",
+  });
+}
+
+export async function evaluateTopicCandidate(
+  channelId: string,
+  candidateId: string,
+  mode: "INTERACTIVE" | "MISSION_EXECUTION" = "INTERACTIVE",
+  missionExecutionId?: string | null,
+): Promise<TopicCandidate> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/candidates/${candidateId}/evaluate`, {
+    method: "POST",
+    body: JSON.stringify({ mode, mission_execution_id: missionExecutionId }),
+  });
+}
+
+export async function evaluateTopicBatch(
+  channelId: string,
+  mode: "INTERACTIVE" | "MISSION_EXECUTION" = "INTERACTIVE",
+  missionExecutionId?: string | null,
+): Promise<TopicCandidate[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/evaluate-batch`, {
+    method: "POST",
+    body: JSON.stringify({ mode, mission_execution_id: missionExecutionId }),
+  });
+}
+
+export async function getTopicRecommendations(
+  channelId: string,
+  minScore: number = 60.0,
+  limit: number = 10,
+): Promise<TopicCandidate[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/recommendations?min_score=${minScore}&limit=${limit}`);
+}
+
+export async function selectTopicCandidate(channelId: string, candidateId: string): Promise<TopicCandidate> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/candidates/${candidateId}/select`, {
+    method: "POST",
+  });
+}
+
+export async function rejectTopicCandidate(
+  channelId: string,
+  candidateId: string,
+  reason: string,
+): Promise<TopicCandidate> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/candidates/${candidateId}/reject`, {
+    method: "POST",
+    body: JSON.stringify({ reason }),
+  });
+}
+
+export async function getTopicMemory(
+  channelId: string,
+  search?: string,
+): Promise<TopicMemory[]> {
+  const q = search ? `?search=${encodeURIComponent(search)}` : "";
+  return apiFetch(`/api/v1/channels/${channelId}/topics/memory${q}`);
+}
+
+export async function getTopicMemoryRecord(channelId: string, memoryId: string): Promise<TopicMemory> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/memory/${memoryId}`);
 }
 
 // ── Mission Engine API Functions (OMEGA-002) ──
