@@ -1,0 +1,105 @@
+# ──────────────────────────────────────────────────────────────
+# OMEGA — Docker Compose
+# ──────────────────────────────────────────────────────────────
+
+services:
+  # ── PostgreSQL ──
+  omega-postgres:
+    image: postgres:16-alpine
+    container_name: omega-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-omega}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-omega_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-omega}
+    ports:
+      - "5432:5432"
+    volumes:
+      - omega-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omega}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis ──
+  omega-redis:
+    image: redis:7-alpine
+    container_name: omega-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── FastAPI Backend ──
+  omega-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: omega-api
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:omega_dev@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:omega_dev@omega-postgres:5432/omega}
+      REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      SERVICE_NAME: omega-api
+    depends_on:
+      omega-postgres:
+        condition: service_healthy
+      omega-redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Celery Worker ──
+  omega-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: omega-worker
+    command: celery -A omega.infrastructure.celery_app:celery_app worker --loglevel=info --concurrency=2
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:omega_dev@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:omega_dev@omega-postgres:5432/omega}
+      REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_NAME: omega-worker
+    depends_on:
+      omega-postgres:
+        condition: service_healthy
+      omega-redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Next.js Frontend ──
+  omega-web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: omega-web
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+    depends_on:
+      omega-api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  omega-postgres-data:
