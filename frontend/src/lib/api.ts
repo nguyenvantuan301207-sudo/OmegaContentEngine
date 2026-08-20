@@ -706,3 +706,305 @@ export async function rejectTask(
     body: JSON.stringify({ reason }),
   });
 }
+
+// ── Research Engine Types (OMEGA-005) ──
+
+export type ResearchRequestStatus = "PENDING" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+export type ResearchOutcome = "SUFFICIENT" | "PARTIAL" | "INSUFFICIENT";
+export type ResearchSourceType = "MANUAL" | "IMPORT" | "SYSTEM_SEED";
+export type PrimarySourceStatus = "UNKNOWN" | "CLAIMED" | "CONFIRMED";
+export type ClaimType = "FACT" | "STATISTIC" | "DATE" | "QUOTE" | "CAUSAL" | "DEFINITION" | "INTERPRETATION";
+export type EvidenceDirection = "SUPPORTS" | "CONTRADICTS" | "CONTEXT_ONLY";
+export type ConfidenceBand = "LOW" | "MEDIUM" | "HIGH" | "VERY_HIGH";
+export type ConflictSeverity = "LOW" | "MEDIUM" | "HIGH";
+export type ConflictStatus = "OPEN" | "RESOLVED" | "DISMISSED";
+
+export interface ClaimEvidence {
+  id: string;
+  claim_id: string;
+  source_id: string;
+  support_direction: EvidenceDirection;
+  excerpt: string;
+  source_location?: string | null;
+  strength_score: number;
+  created_at: string;
+}
+
+export interface ResearchClaim {
+  id: string;
+  research_request_id: string;
+  channel_id: string;
+  claim_text: string;
+  normalized_claim: string;
+  claim_type: ClaimType;
+  confidence_score: number;
+  confidence_band: ConfidenceBand;
+  supporting_sources_count: number;
+  contradicting_sources_count: number;
+  independent_sources_count: number;
+  is_verified: boolean;
+  reasons: string[];
+  evidence: ClaimEvidence[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ResearchSource {
+  id: string;
+  research_request_id: string;
+  channel_id: string;
+  source_type: ResearchSourceType;
+  title: string;
+  publisher: string;
+  author?: string | null;
+  url?: string | null;
+  content_excerpt: string;
+  content_hash: string;
+  primary_source_status: PrimarySourceStatus;
+  quality_score: number;
+  relevance_score: number;
+  freshness_score: number;
+  quality_reasons: string[];
+  independence_cluster_id?: string | null;
+  published_at?: string | null;
+  retrieved_at: string;
+  language: string;
+  region: string;
+}
+
+export interface ResearchConflict {
+  id: string;
+  research_request_id: string;
+  claim_id?: string | null;
+  conflict_type: string;
+  severity: ConflictSeverity;
+  status: ConflictStatus;
+  description: string;
+  involved_evidence_ids: string[];
+  involved_source_ids: string[];
+  resolution_note?: string | null;
+  detected_at: string;
+  resolved_at?: string | null;
+}
+
+export interface CitationRef {
+  source_id: string;
+  evidence_id: string;
+  publisher: string;
+  excerpt: string;
+  source_location?: string | null;
+}
+
+export interface VerifiedClaimBrief {
+  claim_id: string;
+  text: string;
+  type: ClaimType;
+  confidence_score: number;
+  confidence_band: ConfidenceBand;
+  citations: CitationRef[];
+}
+
+export interface UncertainClaimBrief {
+  claim_id: string;
+  text: string;
+  type: ClaimType;
+  confidence_score: number;
+  confidence_band: ConfidenceBand;
+  uncertainty_reason: string;
+}
+
+export interface ConflictBrief {
+  conflict_id: string;
+  claim_id?: string | null;
+  description: string;
+  severity: ConflictSeverity;
+  involved_source_ids: string[];
+}
+
+export interface ResearchBrief {
+  id: string;
+  research_request_id: string;
+  topic_candidate_id: string;
+  channel_id: string;
+  version: number;
+  supersedes_brief_id?: string | null;
+  is_current: boolean;
+  outcome: ResearchOutcome;
+  overall_confidence: number;
+  title: string;
+  summary: string;
+  verified_claims: VerifiedClaimBrief[];
+  uncertain_claims: UncertainClaimBrief[];
+  contradictions: ConflictBrief[];
+  key_facts: string[];
+  statistics: Record<string, unknown>[];
+  dates: Record<string, unknown>[];
+  quotes: Record<string, unknown>[];
+  open_questions: string[];
+  sources_summary: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ResearchBriefSummary {
+  id: string;
+  research_request_id: string;
+  version: number;
+  supersedes_brief_id?: string | null;
+  is_current: boolean;
+  outcome: ResearchOutcome;
+  overall_confidence: number;
+  verified_claims_count: number;
+  contradictions_count: number;
+  created_at: string;
+}
+
+export interface ResearchRequest {
+  id: string;
+  channel_id: string;
+  topic_candidate_id: string;
+  mission_execution_id?: string | null;
+  mode: string;
+  status: ResearchRequestStatus;
+  outcome?: ResearchOutcome | null;
+  research_question?: string | null;
+  scope?: string | null;
+  language: string;
+  region: string;
+  max_sources: number;
+  minimum_source_quality: number;
+  minimum_claim_confidence: number;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  failed_at?: string | null;
+}
+
+// ── Research Engine API Functions (OMEGA-005) ──
+
+export async function createResearchRequest(
+  channelId: string,
+  payload: {
+    topic_candidate_id: string;
+    mission_execution_id?: string | null;
+    research_question?: string;
+    scope?: string;
+    language?: string;
+    region?: string;
+    max_sources?: number;
+    minimum_source_quality?: number;
+    minimum_claim_confidence?: number;
+  },
+): Promise<ResearchRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/research`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listResearchRequests(
+  channelId: string,
+  status?: string,
+  topicCandidateId?: string,
+): Promise<ResearchRequest[]> {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  if (topicCandidateId) params.set("topic_candidate_id", topicCandidateId);
+  const q = params.toString() ? `?${params.toString()}` : "";
+  return apiFetch(`/api/v1/channels/${channelId}/research${q}`);
+}
+
+export async function getResearchRequest(channelId: string, requestId: string): Promise<ResearchRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}`);
+}
+
+export async function addResearchSource(
+  channelId: string,
+  requestId: string,
+  payload: {
+    source_type?: ResearchSourceType;
+    title: string;
+    publisher: string;
+    author?: string;
+    url?: string;
+    content_excerpt: string;
+    primary_source_status?: PrimarySourceStatus;
+    published_at?: string;
+    language?: string;
+    region?: string;
+  },
+): Promise<ResearchSource> {
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}/sources`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listResearchSources(channelId: string, requestId: string): Promise<ResearchSource[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}/sources`);
+}
+
+export async function addResearchClaim(
+  channelId: string,
+  requestId: string,
+  payload: {
+    claim_text: string;
+    claim_type?: ClaimType;
+    evidence?: Array<{
+      source_id: string;
+      support_direction?: EvidenceDirection;
+      excerpt: string;
+      source_location?: string;
+      strength_score?: number;
+    }>;
+  },
+): Promise<ResearchClaim> {
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}/claims`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listResearchClaims(channelId: string, requestId: string): Promise<ResearchClaim[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}/claims`);
+}
+
+export async function listResearchConflicts(channelId: string, requestId: string): Promise<ResearchConflict[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}/conflicts`);
+}
+
+export async function runResearchPipeline(
+  channelId: string,
+  requestId: string,
+  idempotencyKey?: string,
+): Promise<ResearchBrief> {
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}/run`, {
+    method: "POST",
+    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+  });
+}
+
+export async function getResearchBrief(
+  channelId: string,
+  requestId: string,
+  version?: number,
+): Promise<ResearchBrief> {
+  const q = version ? `?version=${version}` : "";
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}/brief${q}`);
+}
+
+export async function listResearchBriefs(
+  channelId: string,
+  requestId: string,
+): Promise<ResearchBriefSummary[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}/briefs`);
+}
+
+export async function cancelResearchRequest(
+  channelId: string,
+  requestId: string,
+): Promise<ResearchRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/research/${requestId}/cancel`, {
+    method: "POST",
+  });
+}
+

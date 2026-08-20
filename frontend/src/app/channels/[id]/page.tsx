@@ -211,6 +211,15 @@ export default function ChannelDetailPage({
               )}
 
               {channel.state !== "ARCHIVED" && (
+                <Link
+                  href={`/channels/${channel.id}/research`}
+                  className="px-3.5 py-1.5 bg-cyan-600/30 hover:bg-cyan-600/50 text-cyan-300 text-xs font-semibold rounded-lg border border-cyan-500/40 transition-all flex items-center space-x-1"
+                >
+                  <span>🔬 Research →</span>
+                </Link>
+              )}
+
+              {channel.state !== "ARCHIVED" && (
                 <button
                   onClick={() => {
                     setIsEditingDNA(!isEditingDNA);

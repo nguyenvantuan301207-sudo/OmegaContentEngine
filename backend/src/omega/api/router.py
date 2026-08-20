@@ -8,6 +8,7 @@ Mounts all v1 sub-routers:
 - tasks (OMEGA-002 Task Engine at /api/v1/tasks/...)
 - channels (OMEGA-003 Channel Manager at /api/v1/channels/...)
 - topics (OMEGA-004 Topic Intelligence at /api/v1/channels/{channel_id}/topics/...)
+- research (OMEGA-005 Research Engine at /api/v1/channels/{channel_id}/research/...)
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from omega.api.channels import router as channels_router
 from omega.api.health import router as health_router
 from omega.api.jobs import router as jobs_router
 from omega.api.missions import router as missions_router
+from omega.api.research import router as research_router
 from omega.api.system import router as system_router
 from omega.api.tasks import router as tasks_router
 from omega.api.topics import router as topics_router
@@ -30,3 +32,4 @@ api_router.include_router(missions_router)
 api_router.include_router(tasks_router)
 api_router.include_router(channels_router)
 api_router.include_router(topics_router)
+api_router.include_router(research_router)

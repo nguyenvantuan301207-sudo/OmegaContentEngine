@@ -1,7 +1,7 @@
 """Task Executor architecture and registry.
 
 Defines the generic TaskExecutor abstraction and TaskExecutorRegistry.
-Executors in OMEGA-002 and OMEGA-004 are safe generic placeholders with zero AI or media APIs.
+Executors in OMEGA-002, OMEGA-004, and OMEGA-005 are safe generic placeholders with zero AI or media APIs.
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ class TestExecutor(TaskExecutor):
 
 
 class GenericWorkflowExecutor(TaskExecutor):
-    """Generic workflow node executor for placeholder stages (e.g. strategy, research)."""
+    """Generic workflow node executor for placeholder stages (e.g. strategy, script)."""
 
     def execute(
         self,
@@ -96,6 +96,25 @@ class TopicIntelligenceExecutor(TaskExecutor):
         }
 
 
+class ResearchEngineExecutor(TaskExecutor):
+    """Generic research engine executor for DAG research collection and synthesis stages."""
+
+    def execute(
+        self,
+        task_id: UUID,
+        task_type: str,
+        task_input: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "stage": task_type,
+            "status": "success",
+            "task_id": str(task_id),
+            "summary": f"Research Engine stage '{task_type}' executed successfully.",
+            "channel_dna_revision_id": context.get("channel_dna_revision_id"),
+        }
+
+
 class TaskExecutorRegistry:
     """Registry mapping task_type strings to TaskExecutor instances."""
 
@@ -108,6 +127,10 @@ class TaskExecutorRegistry:
         self.register("system.test", TestExecutor())
         self.register("topic.evaluate", TopicIntelligenceExecutor())
         self.register("topic.recommend", TopicIntelligenceExecutor())
+        self.register("research.collect", ResearchEngineExecutor())
+        self.register("research.analyze", ResearchEngineExecutor())
+        self.register("research.synthesize", ResearchEngineExecutor())
+        self.register("research.execute", ResearchEngineExecutor())
 
     def register(self, task_type: str, executor: TaskExecutor) -> None:
         """Register an executor for a given task_type."""
