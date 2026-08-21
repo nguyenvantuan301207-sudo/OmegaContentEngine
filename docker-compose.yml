@@ -59,6 +59,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - omega-media-data:/app/data
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -88,6 +89,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - omega-media-data:/app/data
     restart: unless-stopped
 
   # ── Next.js Frontend ──
@@ -111,3 +113,4 @@ services:
 
 volumes:
   omega-postgres-data:
+  omega-media-data:

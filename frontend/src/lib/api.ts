@@ -1320,4 +1320,258 @@ export async function rerunScriptQA(
   });
 }
 
+// ── Production Engine Types & APIs (OMEGA-007) ──
+
+export interface ProductionRequest {
+  id: string;
+  channel_id: string;
+  script_version_id: string;
+  content_request_id: string;
+  channel_dna_revision_id: string;
+  mission_execution_id?: string | null;
+  mode: "INTERACTIVE" | "MISSION_EXECUTION";
+  status: "DRAFT" | "READY" | "RUNNING" | "SUCCEEDED" | "FAILED" | "CANCELLED";
+  outcome?: "RENDERED" | "BLOCKED" | null;
+  target_width: number;
+  target_height: number;
+  fps: number;
+  video_codec: string;
+  audio_codec: string;
+  container_format: string;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+  failed_at?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface ProductionScene {
+  id: string;
+  production_request_id: string;
+  scene_order: number;
+  script_section_id?: string | null;
+  start_statement_id?: string | null;
+  end_statement_id?: string | null;
+  scene_type: string;
+  narration_text: string;
+  estimated_duration_ms: number;
+  visual_intent?: string | null;
+  transition_in?: string | null;
+  transition_out?: string | null;
+  created_at: string;
+}
+
+export interface AssetRequirement {
+  id: string;
+  scene_id: string;
+  asset_type: string;
+  purpose: string;
+  query_hint?: string | null;
+  required: boolean;
+  status: string;
+  license_requirement: string;
+  created_at: string;
+}
+
+export interface ProductionAsset {
+  id: string;
+  channel_id: string;
+  production_request_id: string;
+  asset_requirement_id?: string | null;
+  asset_type: string;
+  provider_type: string;
+  storage_uri: string;
+  content_hash: string;
+  mime_type: string;
+  width?: number | null;
+  height?: number | null;
+  duration_ms?: number | null;
+  license_status: string;
+  source_ref?: string | null;
+  attribution?: string | null;
+  created_at: string;
+}
+
+export interface NarrationSegment {
+  id: string;
+  production_request_id: string;
+  scene_id: string;
+  audio_asset_id?: string | null;
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  duration_ms: number;
+  created_at: string;
+}
+
+export interface SubtitleCue {
+  id: string;
+  production_request_id: string;
+  scene_id: string;
+  cue_order: number;
+  start_ms: number;
+  end_ms: number;
+  text: string;
+  created_at: string;
+}
+
+export interface RenderPlan {
+  id: string;
+  production_request_id: string;
+  version: number;
+  width: number;
+  height: number;
+  fps: number;
+  video_codec: string;
+  audio_codec: string;
+  container: string;
+  total_duration_ms: number;
+  scene_manifest: Array<Record<string, unknown>>;
+  audio_manifest: Array<Record<string, unknown>>;
+  subtitle_manifest: Array<Record<string, unknown>>;
+  created_at: string;
+}
+
+export interface ProductionRenderJob {
+  id: string;
+  production_request_id: string;
+  render_plan_id: string;
+  idempotency_key: string;
+  state: string;
+  attempt: number;
+  max_attempts: number;
+  error_code?: string | null;
+  sanitized_error?: string | null;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+}
+
+export interface MediaArtifact {
+  id: string;
+  production_request_id: string;
+  render_job_id?: string | null;
+  artifact_type: string;
+  version: number;
+  is_current: boolean;
+  storage_uri: string;
+  content_hash: string;
+  file_size_bytes: number;
+  mime_type: string;
+  width?: number | null;
+  height?: number | null;
+  duration_ms?: number | null;
+  created_at: string;
+}
+
+export interface ProductionQAFinding {
+  rule_code: string;
+  severity: "INFO" | "WARNING" | "ERROR" | "BLOCKING";
+  message: string;
+  details?: Record<string, unknown>;
+}
+
+export interface ProductionQAResult {
+  id: string;
+  production_request_id: string;
+  artifact_id: string;
+  status: "PENDING" | "PASSED" | "PASSED_WITH_WARNINGS" | "BLOCKED";
+  findings: ProductionQAFinding[];
+  executed_at: string;
+}
+
+export async function createProductionRequest(
+  channelId: string,
+  payload: {
+    script_version_id: string;
+    target_width?: number;
+    target_height?: number;
+    fps?: number;
+    video_codec?: string;
+    audio_codec?: string;
+    container_format?: string;
+    mission_execution_id?: string | null;
+  },
+): Promise<ProductionRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/production`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listProductionRequests(channelId: string): Promise<ProductionRequest[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/production`);
+}
+
+export async function getProductionRequest(channelId: string, requestId: string): Promise<ProductionRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}`);
+}
+
+export async function prepareProduction(channelId: string, requestId: string): Promise<ProductionRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/prepare`, {
+    method: "POST",
+  });
+}
+
+export async function listProductionScenes(channelId: string, requestId: string): Promise<ProductionScene[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/scenes`);
+}
+
+export async function listProductionAssets(channelId: string, requestId: string): Promise<ProductionAsset[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/assets`);
+}
+
+export async function listNarrationSegments(channelId: string, requestId: string): Promise<NarrationSegment[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/narration`);
+}
+
+export async function listSubtitleCues(channelId: string, requestId: string): Promise<SubtitleCue[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/subtitles`);
+}
+
+export async function getRenderPlan(channelId: string, requestId: string): Promise<RenderPlan> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/render-plan`);
+}
+
+export async function renderProduction(
+  channelId: string,
+  requestId: string,
+  idempotencyKey: string,
+): Promise<ProductionRenderJob> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/render`, {
+    method: "POST",
+    body: JSON.stringify({ idempotency_key: idempotencyKey }),
+  });
+}
+
+export async function rerenderProduction(
+  channelId: string,
+  requestId: string,
+  idempotencyKey: string,
+  changeReason = "Explicit rerender",
+): Promise<ProductionRenderJob> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/rerender`, {
+    method: "POST",
+    body: JSON.stringify({ idempotency_key: idempotencyKey, change_reason: changeReason }),
+  });
+}
+
+export async function listRenderJobs(channelId: string, requestId: string): Promise<ProductionRenderJob[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/render-jobs`);
+}
+
+export async function listMediaArtifacts(channelId: string, requestId: string): Promise<MediaArtifact[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/artifacts`);
+}
+
+export function getMediaArtifactStreamUrl(channelId: string, requestId: string, artifactId: string): string {
+  const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
+  return `${baseUrl}/api/v1/channels/${channelId}/production/${requestId}/artifacts/${artifactId}/media`;
+}
+
+export async function getProductionQAResult(channelId: string, requestId: string): Promise<ProductionQAResult> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/qa`);
+}
+
+
 

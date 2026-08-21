@@ -11,15 +11,18 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
@@ -105,6 +108,12 @@ class Channel(Base):
     )
     content_requests: Mapped[list[ContentGenerationRequest]] = relationship(
         "ContentGenerationRequest", back_populates="channel", cascade="all, delete-orphan"
+    )
+    production_requests: Mapped[list[ProductionRequest]] = relationship(
+        "ProductionRequest", back_populates="channel", cascade="all, delete-orphan"
+    )
+    production_assets: Mapped[list[ProductionAsset]] = relationship(
+        "ProductionAsset", back_populates="channel", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:
@@ -234,6 +243,9 @@ class MissionExecution(Base):
     )
     content_requests: Mapped[list[ContentGenerationRequest]] = relationship(
         "ContentGenerationRequest", back_populates="mission_execution"
+    )
+    production_requests: Mapped[list[ProductionRequest]] = relationship(
+        "ProductionRequest", back_populates="mission_execution"
     )
 
     def __repr__(self) -> str:
@@ -961,6 +973,9 @@ class ContentGenerationRequest(Base):
         cascade="all, delete-orphan",
         order_by="ScriptVersion.version.desc()",
     )
+    production_requests: Mapped[list[ProductionRequest]] = relationship(
+        "ProductionRequest", back_populates="content_request", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<ContentGenerationRequest id={self.id} channel_id={self.channel_id} status={self.status}>"
@@ -1168,6 +1183,9 @@ class ScriptVersion(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    production_requests: Mapped[list[ProductionRequest]] = relationship(
+        "ProductionRequest", back_populates="script_version", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<ScriptVersion id={self.id} request_id={self.content_request_id} v={self.version} current={self.is_current}>"
@@ -1313,3 +1331,583 @@ class ContentQAResult(Base):
 
     def __repr__(self) -> str:
         return f"<ContentQAResult id={self.id} script_version_id={self.script_version_id} status={self.status}>"
+
+
+# ── OMEGA-007 Production Engine Models ──
+
+
+class ProductionRequest(Base):
+    """ProductionRequest database model representing a request to produce media from a script."""
+
+    __tablename__ = "production_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    script_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("script_versions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    content_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_generation_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    channel_dna_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    mission_execution_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mission_executions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    mode: Mapped[str] = mapped_column(String(50), nullable=False, default="INTERACTIVE")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="DRAFT", index=True)
+    outcome: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+
+    target_width: Mapped[int] = mapped_column(Integer, nullable=False, default=1920)
+    target_height: Mapped[int] = mapped_column(Integer, nullable=False, default=1080)
+    fps: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+
+    video_codec: Mapped[str] = mapped_column(String(30), nullable=False, default="h264")
+    audio_codec: Mapped[str] = mapped_column(String(30), nullable=False, default="aac")
+    container_format: Mapped[str] = mapped_column(String(20), nullable=False, default="mp4")
+
+    voice_profile: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    failed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    channel: Mapped[Channel] = relationship("Channel", back_populates="production_requests")
+    script_version: Mapped[ScriptVersion] = relationship(
+        "ScriptVersion", back_populates="production_requests"
+    )
+    content_request: Mapped[ContentGenerationRequest] = relationship(
+        "ContentGenerationRequest", back_populates="production_requests"
+    )
+    channel_dna_revision: Mapped[ChannelDNARevision] = relationship("ChannelDNARevision")
+    mission_execution: Mapped[MissionExecution | None] = relationship(
+        "MissionExecution", back_populates="production_requests"
+    )
+
+    scenes: Mapped[list[ProductionScene]] = relationship(
+        "ProductionScene",
+        back_populates="production_request",
+        cascade="all, delete-orphan",
+        order_by="ProductionScene.scene_order.asc()",
+    )
+    assets: Mapped[list[ProductionAsset]] = relationship(
+        "ProductionAsset",
+        back_populates="production_request",
+        cascade="all, delete-orphan",
+    )
+    narration_segments: Mapped[list[NarrationSegment]] = relationship(
+        "NarrationSegment",
+        back_populates="production_request",
+        cascade="all, delete-orphan",
+        order_by="NarrationSegment.start_ms.asc()",
+    )
+    subtitle_cues: Mapped[list[SubtitleCue]] = relationship(
+        "SubtitleCue",
+        back_populates="production_request",
+        cascade="all, delete-orphan",
+        order_by="SubtitleCue.cue_order.asc()",
+    )
+    render_plans: Mapped[list[RenderPlan]] = relationship(
+        "RenderPlan",
+        back_populates="production_request",
+        cascade="all, delete-orphan",
+        order_by="RenderPlan.version.desc()",
+    )
+    render_jobs: Mapped[list[ProductionRenderJob]] = relationship(
+        "ProductionRenderJob",
+        back_populates="production_request",
+        cascade="all, delete-orphan",
+        order_by="ProductionRenderJob.created_at.desc()",
+    )
+    artifacts: Mapped[list[MediaArtifact]] = relationship(
+        "MediaArtifact",
+        back_populates="production_request",
+        cascade="all, delete-orphan",
+        order_by="MediaArtifact.version.desc()",
+    )
+    qa_results: Mapped[list[ProductionQAResult]] = relationship(
+        "ProductionQAResult",
+        back_populates="production_request",
+        cascade="all, delete-orphan",
+        order_by="ProductionQAResult.executed_at.desc()",
+    )
+
+    def __repr__(self) -> str:
+        return f"<ProductionRequest id={self.id} channel_id={self.channel_id} status={self.status}>"
+
+
+class ProductionScene(Base):
+    """ProductionScene database model representing an individual visual/auditory scene."""
+
+    __tablename__ = "production_scenes"
+    __table_args__ = (
+        UniqueConstraint("production_request_id", "scene_order", name="uq_production_scene_order"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    production_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scene_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    script_section_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("script_sections.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    start_statement_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("script_statements.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    end_statement_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("script_statements.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    scene_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    narration_text: Mapped[str] = mapped_column(Text, nullable=False)
+    estimated_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    visual_intent: Mapped[str | None] = mapped_column(Text, nullable=True)
+    transition_in: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    transition_out: Mapped[str | None] = mapped_column(String(50), nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    production_request: Mapped[ProductionRequest] = relationship(
+        "ProductionRequest", back_populates="scenes"
+    )
+    script_section: Mapped[ScriptSection | None] = relationship("ScriptSection")
+    asset_requirements: Mapped[list[AssetRequirement]] = relationship(
+        "AssetRequirement",
+        back_populates="scene",
+        cascade="all, delete-orphan",
+    )
+    narration_segments: Mapped[list[NarrationSegment]] = relationship(
+        "NarrationSegment",
+        back_populates="scene",
+        cascade="all, delete-orphan",
+    )
+    subtitle_cues: Mapped[list[SubtitleCue]] = relationship(
+        "SubtitleCue",
+        back_populates="scene",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<ProductionScene id={self.id} req_id={self.production_request_id} order={self.scene_order} type={self.scene_type}>"
+
+
+class AssetRequirement(Base):
+    """AssetRequirement database model storing asset needs for a scene."""
+
+    __tablename__ = "asset_requirements"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scene_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_scenes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    asset_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    purpose: Mapped[str] = mapped_column(String(100), nullable=False)
+    query_hint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    required: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING", index=True)
+    license_requirement: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="COMMERCIAL_ALLOWED"
+    )
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    scene: Mapped[ProductionScene] = relationship(
+        "ProductionScene", back_populates="asset_requirements"
+    )
+    assets: Mapped[list[ProductionAsset]] = relationship(
+        "ProductionAsset", back_populates="asset_requirement"
+    )
+
+    def __repr__(self) -> str:
+        return f"<AssetRequirement id={self.id} scene_id={self.scene_id} type={self.asset_type}>"
+
+
+class ProductionAsset(Base):
+    """ProductionAsset database model storing resolved visual and audio assets."""
+
+    __tablename__ = "production_assets"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    production_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    asset_requirement_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("asset_requirements.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    asset_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    provider_type: Mapped[str] = mapped_column(String(50), nullable=False, default="PLACEHOLDER")
+    storage_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    license_status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="GENERATED", index=True
+    )
+    source_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attribution: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    channel: Mapped[Channel] = relationship("Channel", back_populates="production_assets")
+    production_request: Mapped[ProductionRequest] = relationship(
+        "ProductionRequest", back_populates="assets"
+    )
+    asset_requirement: Mapped[AssetRequirement | None] = relationship(
+        "AssetRequirement", back_populates="assets"
+    )
+    narration_segments: Mapped[list[NarrationSegment]] = relationship(
+        "NarrationSegment", back_populates="audio_asset"
+    )
+
+    def __repr__(self) -> str:
+        return f"<ProductionAsset id={self.id} type={self.asset_type} uri={self.storage_uri!r}>"
+
+
+class NarrationSegment(Base):
+    """NarrationSegment database model storing spoken audio segment timeline boundaries."""
+
+    __tablename__ = "narration_segments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    production_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scene_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_scenes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    audio_asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_assets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    production_request: Mapped[ProductionRequest] = relationship(
+        "ProductionRequest", back_populates="narration_segments"
+    )
+    scene: Mapped[ProductionScene] = relationship(
+        "ProductionScene", back_populates="narration_segments"
+    )
+    audio_asset: Mapped[ProductionAsset | None] = relationship(
+        "ProductionAsset", back_populates="narration_segments"
+    )
+
+    def __repr__(self) -> str:
+        return f"<NarrationSegment id={self.id} start_ms={self.start_ms} end_ms={self.end_ms}>"
+
+
+class SubtitleCue(Base):
+    """SubtitleCue database model storing timed subtitle cue entries."""
+
+    __tablename__ = "subtitle_cues"
+    __table_args__ = (
+        UniqueConstraint("production_request_id", "cue_order", name="uq_subtitle_cue_order"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    production_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    scene_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_scenes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    cue_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    production_request: Mapped[ProductionRequest] = relationship(
+        "ProductionRequest", back_populates="subtitle_cues"
+    )
+    scene: Mapped[ProductionScene] = relationship("ProductionScene", back_populates="subtitle_cues")
+
+    def __repr__(self) -> str:
+        return f"<SubtitleCue id={self.id} order={self.cue_order} start_ms={self.start_ms}>"
+
+
+class RenderPlan(Base):
+    """RenderPlan database model storing deterministic compilation manifests."""
+
+    __tablename__ = "render_plans"
+    __table_args__ = (
+        UniqueConstraint("production_request_id", "version", name="uq_render_plan_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    production_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    width: Mapped[int] = mapped_column(Integer, nullable=False, default=1920)
+    height: Mapped[int] = mapped_column(Integer, nullable=False, default=1080)
+    fps: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    video_codec: Mapped[str] = mapped_column(String(30), nullable=False, default="h264")
+    audio_codec: Mapped[str] = mapped_column(String(30), nullable=False, default="aac")
+    container: Mapped[str] = mapped_column(String(20), nullable=False, default="mp4")
+    total_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    scene_manifest: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
+    audio_manifest: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
+    subtitle_manifest: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    production_request: Mapped[ProductionRequest] = relationship(
+        "ProductionRequest", back_populates="render_plans"
+    )
+    render_jobs: Mapped[list[ProductionRenderJob]] = relationship(
+        "ProductionRenderJob",
+        back_populates="render_plan",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<RenderPlan id={self.id} req_id={self.production_request_id} v={self.version}>"
+
+
+class ProductionRenderJob(Base):
+    """ProductionRenderJob database model representing an idempotent execution of a render plan."""
+
+    __tablename__ = "production_render_jobs"
+    __table_args__ = (
+        UniqueConstraint(
+            "production_request_id",
+            "idempotency_key",
+            name="uq_production_render_job_idempotency",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    production_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    render_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("render_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+
+    state: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING", index=True)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    sanitized_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    production_request: Mapped[ProductionRequest] = relationship(
+        "ProductionRequest", back_populates="render_jobs"
+    )
+    render_plan: Mapped[RenderPlan] = relationship("RenderPlan", back_populates="render_jobs")
+    artifact: Mapped[MediaArtifact | None] = relationship(
+        "MediaArtifact", back_populates="render_job", uselist=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<ProductionRenderJob id={self.id} state={self.state} attempt={self.attempt}>"
+
+
+class MediaArtifact(Base):
+    """MediaArtifact database model storing immutable rendered media files."""
+
+    __tablename__ = "media_artifacts"
+    __table_args__ = (
+        UniqueConstraint(
+            "production_request_id",
+            "artifact_type",
+            "version",
+            name="uq_media_artifact_version",
+        ),
+        Index(
+            "uq_media_artifact_current_video",
+            "production_request_id",
+            "artifact_type",
+            unique=True,
+            postgresql_where=text("is_current = true AND artifact_type = 'VIDEO'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    production_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    render_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_render_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    artifact_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+
+    storage_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    production_request: Mapped[ProductionRequest] = relationship(
+        "ProductionRequest", back_populates="artifacts"
+    )
+    render_job: Mapped[ProductionRenderJob | None] = relationship(
+        "ProductionRenderJob", back_populates="artifact"
+    )
+    qa_result: Mapped[ProductionQAResult | None] = relationship(
+        "ProductionQAResult",
+        back_populates="artifact",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
+
+    def __repr__(self) -> str:
+        return f"<MediaArtifact id={self.id} type={self.artifact_type} v={self.version} current={self.is_current}>"
+
+
+class ProductionQAResult(Base):
+    """ProductionQAResult database model storing local QA findings for a rendered media artifact."""
+
+    __tablename__ = "production_qa_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    production_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("media_artifacts.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING", index=True)
+    findings: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
+
+    executed_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    production_request: Mapped[ProductionRequest] = relationship(
+        "ProductionRequest", back_populates="qa_results"
+    )
+    artifact: Mapped[MediaArtifact] = relationship("MediaArtifact", back_populates="qa_result")
+
+    def __repr__(self) -> str:
+        return (
+            f"<ProductionQAResult id={self.id} artifact_id={self.artifact_id} status={self.status}>"
+        )

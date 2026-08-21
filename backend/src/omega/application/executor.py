@@ -134,6 +134,25 @@ class ContentEngineExecutor(TaskExecutor):
         }
 
 
+class ProductionEngineExecutor(TaskExecutor):
+    """Generic production engine executor for DAG scene planning, render, and QA stages."""
+
+    def execute(
+        self,
+        task_id: UUID,
+        task_type: str,
+        task_input: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "stage": task_type,
+            "status": "success",
+            "task_id": str(task_id),
+            "summary": f"Production Engine stage '{task_type}' executed successfully.",
+            "channel_dna_revision_id": context.get("channel_dna_revision_id"),
+        }
+
+
 class TaskExecutorRegistry:
     """Registry mapping task_type strings to TaskExecutor instances."""
 
@@ -154,6 +173,10 @@ class TaskExecutorRegistry:
         self.register("content.generate", ContentEngineExecutor())
         self.register("content.qa", ContentEngineExecutor())
         self.register("content.execute", ContentEngineExecutor())
+        self.register("production.prepare", ProductionEngineExecutor())
+        self.register("production.render", ProductionEngineExecutor())
+        self.register("production.qa", ProductionEngineExecutor())
+        self.register("production.execute", ProductionEngineExecutor())
 
     def register(self, task_type: str, executor: TaskExecutor) -> None:
         """Register an executor for a given task_type."""

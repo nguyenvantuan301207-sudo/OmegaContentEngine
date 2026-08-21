@@ -273,3 +273,43 @@ def evaluate_mission_task(self, mission_id: str, execution_id: str = "") -> dict
         return {"status": "error", "message": _sanitize_task_error(exc)}
     finally:
         session.close()
+
+
+@celery_app.task(bind=True, name="omega.production.render")
+def execute_production_render_task(
+    self,
+    channel_id: str,
+    request_id: str,
+    job_id: str,
+) -> dict:
+    """Asynchronous background rendering task using ProductionRenderService."""
+    import asyncio
+
+    from omega.application.render_service import ProductionRenderService
+    from omega.infrastructure.database import async_session_factory
+
+    logger.info(
+        "Starting background render task",
+        channel_id=channel_id,
+        request_id=request_id,
+        job_id=job_id,
+    )
+
+    async def _run():
+        async with async_session_factory() as session:
+            service = ProductionRenderService()
+            c_id = uuid.UUID(str(channel_id))
+            r_id = uuid.UUID(str(request_id))
+            j_id = uuid.UUID(str(job_id))
+            art, qa_status = await service.execute_render_job(session, c_id, r_id, j_id)
+            return {
+                "status": "success",
+                "artifact_id": str(art.id) if art else None,
+                "qa_status": str(qa_status.value),
+            }
+
+    try:
+        return asyncio.run(_run())
+    except Exception as exc:
+        logger.error("Background render task failed", job_id=job_id, exc_info=True)
+        return {"status": "failed", "error": _sanitize_task_error(exc)}
