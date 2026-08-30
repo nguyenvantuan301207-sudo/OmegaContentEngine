@@ -53,5 +53,15 @@ celery_app.conf.update(
             "schedule": 30.0,
             "options": {"expires": 60},
         },
+        "publisher-handoff-sweep": {
+            "task": "omega.publisher.handoff_sweep",
+            "schedule": 15.0,
+            "options": {"expires": 45},
+        },
+        "publisher-reconciliation-sweep": {
+            "task": "omega.publisher.reconciliation_sweep",
+            "schedule": 60.0,
+            "options": {"expires": 180},
+        },
     },
 )

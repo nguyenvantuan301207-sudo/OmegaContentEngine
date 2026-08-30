@@ -2002,3 +2002,168 @@ export async function releaseScheduleReservation(
 export async function getChannelScheduleTimeline(channelId: string): Promise<ChannelTimelineResponse> {
   return apiFetch(`/api/v1/scheduler/channels/${channelId}/timeline`);
 }
+
+// ── Publisher Types (OMEGA-011) ──
+
+export type PublishIntentState =
+  | "DRAFT"
+  | "APPROVED"
+  | "CLAIMED"
+  | "PUBLISHED"
+  | "FAILED"
+  | "SUPERSEDED"
+  | "CANCELLED";
+
+export type PublishAttemptState =
+  | "CREATED"
+  | "UPLOADING"
+  | "FINALIZING"
+  | "SUCCEEDED"
+  | "RETRYABLE_FAILED"
+  | "PERMANENT_FAILED"
+  | "UNKNOWN"
+  | "BLOCKED_GUARDIAN"
+  | "CANCELLED";
+
+export type PrivacyStatus = "PRIVATE" | "UNLISTED" | "PUBLIC";
+
+export interface PlatformAccount {
+  id: string;
+  channel_id: string;
+  platform: "YOUTUBE" | "TIKTOK" | "INSTAGRAM" | "X_TWITTER";
+  account_display_name: string;
+  external_account_id: string;
+  status: "ACTIVE" | "EXPIRED" | "REVOKED";
+  scopes: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublishIntent {
+  id: string;
+  mission_id: string;
+  task_id: string;
+  channel_id: string;
+  platform_account_id: string;
+  media_artifact_id: string;
+  media_artifact_checksum: string;
+  channel_dna_revision_id: string | null;
+  revision_number: number;
+  supersedes_intent_id: string | null;
+  title: string;
+  description: string;
+  tags: string[];
+  requested_privacy_status: PrivacyStatus;
+  category_id: string;
+  made_for_kids: boolean;
+  platform_custom_options: Record<string, unknown>;
+  intent_checksum: string;
+  state: PublishIntentState;
+  lease_expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+  superseded_at: string | null;
+}
+
+export interface PublishAttempt {
+  id: string;
+  publish_intent_id: string;
+  attempt_number: number;
+  idempotency_key: string;
+  state: PublishAttemptState;
+  provider_video_id: string | null;
+  provider_url: string | null;
+  effective_privacy_status: PrivacyStatus | null;
+  error_category: string | null;
+  error_message: string | null;
+  retry_after_seconds: number | null;
+  reconciliation_status: string | null;
+  started_at: string;
+  completed_at: string | null;
+}
+
+export interface UploadProgress {
+  publish_attempt_id: string;
+  total_bytes: number;
+  bytes_uploaded: number;
+  progress_percentage: number;
+  is_complete: boolean;
+  expires_at: string;
+}
+
+export async function listPlatformAccounts(channelId?: string): Promise<PlatformAccount[]> {
+  const q = channelId ? `?channel_id=${encodeURIComponent(channelId)}` : "";
+  return apiFetch(`/api/v1/publisher/accounts${q}`);
+}
+
+export async function createYouTubeAuthorizeUrl(channelId: string): Promise<{ authorization_url: string }> {
+  return apiFetch("/api/v1/publisher/accounts/youtube/authorize-url", {
+    method: "POST",
+    body: JSON.stringify({ channel_id: channelId, platform: "YOUTUBE" }),
+  });
+}
+
+export async function disconnectPlatformAccount(
+  accountId: string,
+  confirmDisconnect = true,
+): Promise<PlatformAccount> {
+  return apiFetch(`/api/v1/publisher/accounts/${accountId}/disconnect`, {
+    method: "POST",
+    body: JSON.stringify({ confirm_disconnect: confirmDisconnect }),
+  });
+}
+
+export async function createPublishIntent(payload: {
+  mission_id: string;
+  task_id: string;
+  channel_id: string;
+  platform_account_id: string;
+  media_artifact_id: string;
+  media_artifact_checksum: string;
+  channel_dna_revision_id?: string | null;
+  title: string;
+  description?: string;
+  tags?: string[];
+  requested_privacy_status?: PrivacyStatus;
+  category_id?: string;
+  made_for_kids: boolean;
+  platform_custom_options?: Record<string, unknown>;
+}): Promise<PublishIntent> {
+  return apiFetch("/api/v1/publisher/intents", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listPublishIntents(params?: {
+  channel_id?: string;
+  mission_id?: string;
+  state?: string;
+}): Promise<PublishIntent[]> {
+  const q = new URLSearchParams();
+  if (params?.channel_id) q.set("channel_id", params.channel_id);
+  if (params?.mission_id) q.set("mission_id", params.mission_id);
+  if (params?.state) q.set("state", params.state);
+  const qs = q.toString() ? `?${q.toString()}` : "";
+  return apiFetch(`/api/v1/publisher/intents${qs}`);
+}
+
+export async function getPublishIntent(intentId: string): Promise<PublishIntent> {
+  return apiFetch(`/api/v1/publisher/intents/${intentId}`);
+}
+
+export async function getPublishAttempt(attemptId: string): Promise<PublishAttempt> {
+  return apiFetch(`/api/v1/publisher/attempts/${attemptId}`);
+}
+
+export async function getUploadProgress(attemptId: string): Promise<UploadProgress> {
+  return apiFetch(`/api/v1/publisher/attempts/${attemptId}/progress`);
+}
+
+export async function executePublish(taskId: string): Promise<PublishAttempt> {
+  return apiFetch("/api/v1/publisher/execute", {
+    method: "POST",
+    body: JSON.stringify({ task_id: taskId }),
+  });
+}
+

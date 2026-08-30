@@ -11,6 +11,7 @@ from __future__ import annotations
 import time
 import uuid
 from datetime import UTC, datetime
+from typing import Any
 
 from omega.infrastructure.celery_app import celery_app
 from omega.logging import get_logger
@@ -465,3 +466,71 @@ def schedule_stale_dispatching_sweep_task() -> dict[str, int]:
     except Exception as exc:
         logger.error("Schedule stale dispatch recovery failed", error=str(exc), exc_info=True)
         return {"status": "error", "recovered": 0, "consumed": 0, "released": 0, "requeued": 0}
+
+
+@celery_app.task(name="omega.publisher.execute_publish")
+def execute_publish_task(task_id: str) -> dict[str, Any]:
+    """Execute external publication for an approved PublishIntent."""
+    import asyncio
+    from uuid import UUID
+
+    from omega.application.publisher.publish_service import PublishExecutionService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            attempt = await PublishExecutionService.execute_publish(session, UUID(task_id))
+            return {
+                "attempt_id": str(attempt.id),
+                "state": attempt.state,
+                "provider_video_id": attempt.provider_video_id,
+            }
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error(
+            "Publisher task execution failed", task_id=task_id, error=str(exc), exc_info=True
+        )
+        return {"status": "error", "error": str(exc)}
+
+
+@celery_app.task(name="omega.publisher.handoff_sweep")
+def publisher_handoff_sweep_task() -> dict[str, int]:
+    """Periodic sweep delivering retry handoffs to OMEGA-010 Scheduler."""
+    import asyncio
+
+    from omega.application.publisher.handoff_relay import HandoffRelayService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> int:
+        async with AsyncSessionLocal() as session:
+            return await HandoffRelayService.process_pending_handoffs(session)
+
+    try:
+        delivered = asyncio.run(_run())
+        return {"status": "success", "delivered": delivered}
+    except Exception as exc:
+        logger.error("Publisher handoff sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "delivered": 0}
+
+
+@celery_app.task(name="omega.publisher.reconciliation_sweep")
+def publisher_reconciliation_sweep_task() -> dict[str, int]:
+    """Periodic sweep reconciling ambiguous UNKNOWN publish attempts."""
+    import asyncio
+
+    from omega.application.publisher.reconciliation_service import ReconciliationService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> int:
+        async with AsyncSessionLocal() as session:
+            return await ReconciliationService.reconcile_pending_attempts_sweep(session)
+
+    try:
+        reconciled = asyncio.run(_run())
+        return {"status": "success", "reconciled": reconciled}
+    except Exception as exc:
+        logger.error("Publisher reconciliation sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "reconciled": 0}

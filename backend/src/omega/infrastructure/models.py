@@ -2963,3 +2963,434 @@ class SchedulerDispatchOutbox(Base):
 
     def __repr__(self) -> str:
         return f"<SchedulerDispatchOutbox {self.id} status={self.status}>"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OMEGA-011 Publisher Models
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class PlatformAccount(Base):
+    """Connected external platform account registry."""
+
+    __tablename__ = "platform_accounts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    account_display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    external_account_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE")
+    scopes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    channel: Mapped[Channel] = relationship("Channel")
+    vault_entry: Mapped[CredentialVault | None] = relationship(
+        "CredentialVault", back_populates="platform_account", uselist=False
+    )
+    publish_intents: Mapped[list[PublishIntent]] = relationship(
+        "PublishIntent", back_populates="platform_account"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("channel_id", "platform", name="uq_platform_accounts_channel_platform"),
+        CheckConstraint(
+            "status IN ('ACTIVE', 'EXPIRED', 'REVOKED')", name="chk_platform_accounts_status"
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PlatformAccount {self.id} platform={self.platform} status={self.status}>"
+
+
+class CredentialVault(Base):
+    """Encrypted OAuth refresh and access token storage."""
+
+    __tablename__ = "credential_vault"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    platform_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("platform_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    encrypted_access_token: Mapped[str] = mapped_column(Text, nullable=False)
+    access_token_expires_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    encrypted_refresh_token: Mapped[str] = mapped_column(Text, nullable=False)
+    token_type: Mapped[str] = mapped_column(String(32), nullable=False, default="Bearer")
+    key_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    platform_account: Mapped[PlatformAccount] = relationship(
+        "PlatformAccount", back_populates="vault_entry"
+    )
+
+    __table_args__ = (CheckConstraint("key_version > 0", name="chk_credential_vault_key_version"),)
+
+    def __repr__(self) -> str:
+        return f"<CredentialVault {self.id} account={self.platform_account_id} key_v={self.key_version}>"
+
+
+class OAuthAuthorizationSession(Base):
+    """OAuth state hash & PKCE challenge tracking."""
+
+    __tablename__ = "oauth_authorization_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    platform: Mapped[str] = mapped_column(String(32), nullable=False)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    state_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    encrypted_pkce_verifier: Mapped[str] = mapped_column(Text, nullable=False)
+    redirect_uri: Mapped[str] = mapped_column(String(512), nullable=False)
+    requested_scopes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    expires_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    channel: Mapped[Channel] = relationship("Channel")
+
+    __table_args__ = (
+        CheckConstraint("expires_at > created_at", name="chk_oauth_sessions_expiry"),
+        Index("idx_oauth_sessions_state", "state_hash", "expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<OAuthAuthorizationSession {self.id} platform={self.platform} consumed={self.consumed_at is not None}>"
+
+
+class PublishIntent(Base):
+    """Immutable publishing contract snapshot with claim fencing."""
+
+    __tablename__ = "publish_intents"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    platform_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("platform_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    media_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("media_artifacts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    media_artifact_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    channel_dna_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    supersedes_intent_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_intents.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    tags: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    requested_privacy_status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="PRIVATE"
+    )
+    category_id: Mapped[str] = mapped_column(String(32), nullable=False, default="28")
+    made_for_kids: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    platform_custom_options: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    intent_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="APPROVED")
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    attempt_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    claimed_by_worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    superseded_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    mission: Mapped[Mission] = relationship("Mission")
+    task: Mapped[Task] = relationship("Task")
+    channel: Mapped[Channel] = relationship("Channel")
+    platform_account: Mapped[PlatformAccount] = relationship(
+        "PlatformAccount", back_populates="publish_intents"
+    )
+    media_artifact: Mapped[MediaArtifact] = relationship("MediaArtifact")
+    channel_dna_revision: Mapped[ChannelDNARevision | None] = relationship("ChannelDNARevision")
+    attempts: Mapped[list[PublishAttempt]] = relationship(
+        "PublishAttempt", back_populates="publish_intent"
+    )
+    transitions: Mapped[list[PublishIntentTransition]] = relationship(
+        "PublishIntentTransition", back_populates="publish_intent"
+    )
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "revision_number", name="uq_publish_intents_task_revision"),
+        CheckConstraint(
+            "state IN ('DRAFT', 'APPROVED', 'CLAIMED', 'PUBLISHED', 'FAILED', 'SUPERSEDED', 'CANCELLED')",
+            name="chk_publish_intents_state",
+        ),
+        CheckConstraint("revision_number >= 1", name="chk_publish_intents_revision_number"),
+        CheckConstraint("attempt_generation >= 0", name="chk_publish_intents_attempt_generation"),
+        Index("idx_publish_intents_active_claim", "state", "lease_expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PublishIntent {self.id} task={self.task_id} state={self.state} rev={self.revision_number}>"
+
+
+class PublishIntentTransition(Base):
+    """Append-only audit history for PublishIntent state transitions."""
+
+    __tablename__ = "publish_intent_transitions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    publish_intent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_intents.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    from_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    to_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    publish_intent: Mapped[PublishIntent] = relationship(
+        "PublishIntent", back_populates="transitions"
+    )
+
+    __table_args__ = (Index("idx_intent_transitions_intent", "publish_intent_id", "created_at"),)
+
+    def __repr__(self) -> str:
+        return f"<PublishIntentTransition {self.from_state}->{self.to_state} intent={self.publish_intent_id}>"
+
+
+class PublishAttempt(Base):
+    """Authoritative record of an external publishing execution."""
+
+    __tablename__ = "publish_attempts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    publish_intent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_intents.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
+    provider_video_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    provider_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    effective_privacy_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    error_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    retry_after_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reconciliation_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    started_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    publish_intent: Mapped[PublishIntent] = relationship("PublishIntent", back_populates="attempts")
+    upload_session: Mapped[UploadSession | None] = relationship(
+        "UploadSession", back_populates="publish_attempt", uselist=False
+    )
+    transitions: Mapped[list[PublishAttemptTransition]] = relationship(
+        "PublishAttemptTransition", back_populates="publish_attempt"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('CREATED', 'UPLOADING', 'FINALIZING', 'SUCCEEDED', 'RETRYABLE_FAILED', 'PERMANENT_FAILED', 'UNKNOWN', 'BLOCKED_GUARDIAN', 'CANCELLED')",
+            name="chk_publish_attempts_state",
+        ),
+        Index("idx_publish_attempts_intent", "publish_intent_id", "attempt_number"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PublishAttempt {self.id} state={self.state} provider_id={self.provider_video_id}>"
+
+
+class PublishAttemptTransition(Base):
+    """Append-only audit history for PublishAttempt state transitions."""
+
+    __tablename__ = "publish_attempt_transitions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    publish_attempt_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    from_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    to_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    publish_attempt: Mapped[PublishAttempt] = relationship(
+        "PublishAttempt", back_populates="transitions"
+    )
+
+    __table_args__ = (Index("idx_attempt_transitions_attempt", "publish_attempt_id", "created_at"),)
+
+    def __repr__(self) -> str:
+        return f"<PublishAttemptTransition {self.from_state}->{self.to_state} attempt={self.publish_attempt_id}>"
+
+
+class UploadSession(Base):
+    """Resumable upload session URI and byte progress."""
+
+    __tablename__ = "upload_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    publish_attempt_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    session_uri: Mapped[str] = mapped_column(Text, nullable=False)
+    total_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    bytes_uploaded: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="0")
+    chunk_size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=8388608)
+    expires_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    publish_attempt: Mapped[PublishAttempt] = relationship(
+        "PublishAttempt", back_populates="upload_session"
+    )
+
+    __table_args__ = (
+        CheckConstraint("total_bytes > 0", name="chk_upload_sessions_total_bytes"),
+        CheckConstraint("bytes_uploaded >= 0", name="chk_upload_sessions_bytes_uploaded"),
+        Index("idx_upload_sessions_expires", "expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<UploadSession {self.id} uploaded={self.bytes_uploaded}/{self.total_bytes}>"
+
+
+class PublisherSchedulerHandoffOutbox(Base):
+    """Durable cross-service retry handoff outbox to OMEGA-010 Scheduler."""
+
+    __tablename__ = "publisher_scheduler_handoff_outbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    publish_intent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_intents.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    publish_attempt_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    earliest_retry_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    claimed_by_worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    claimed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    delivery_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    next_attempt_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    delivered_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    publish_intent: Mapped[PublishIntent] = relationship("PublishIntent")
+    publish_attempt: Mapped[PublishAttempt] = relationship("PublishAttempt")
+    task: Mapped[Task] = relationship("Task")
+    mission: Mapped[Mission] = relationship("Mission")
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'CLAIMED', 'DELIVERED', 'DEAD_LETTER')",
+            name="chk_pub_sched_outbox_status",
+        ),
+        Index("idx_pub_sched_outbox_sweep", "status", "next_attempt_at", "lease_expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<PublisherSchedulerHandoffOutbox {self.id} status={self.status} attempt={self.attempt_count}>"
