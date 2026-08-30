@@ -2167,3 +2167,90 @@ export async function executePublish(taskId: string): Promise<PublishAttempt> {
   });
 }
 
+// ── Analytics Engine Types & Functions (OMEGA-012) ──
+
+export interface MetricValue {
+  metric_name: string;
+  value: number | null;
+  quality: string;
+  classification: string;
+}
+
+export interface VideoAnalyticsSummary {
+  asset_id: string;
+  publish_intent_id: string;
+  provider_video_id: string;
+  asset_status: string;
+  lifecycle_phase: string;
+  published_at: string;
+  last_polled_at: string | null;
+  latest_metrics: Record<string, MetricValue>;
+}
+
+export interface TimelineWindowPoint {
+  window_type: string;
+  window_state: string;
+  window_start_utc: string;
+  window_end_utc: string;
+  metrics: Record<string, MetricValue>;
+}
+
+export interface VideoAnalyticsTimeline {
+  asset_id: string;
+  publish_intent_id: string;
+  provider_video_id: string;
+  timeline: TimelineWindowPoint[];
+}
+
+export interface ChannelAnalyticsSummary {
+  channel_id: string;
+  snapshot_date: string;
+  total_views: number;
+  subscriber_count: number;
+  video_count: number;
+  aggregate_watch_time_seconds: number | null;
+  revision_sequence: number;
+}
+
+export interface AnalyticsHealth {
+  status: string;
+  active_assets_count: number;
+  quota_buckets: Array<{
+    provider: string;
+    quota_bucket: string;
+    method: string;
+    configured_daily_limit: number | null;
+    internal_budget_limit: number | null;
+    provider_authoritative_usage: number | null;
+    estimated_internal_units: number;
+    utilization_percent: number | null;
+    next_reset_at_utc: string;
+  }>;
+}
+
+export async function getVideoAnalytics(publishIntentId: string): Promise<VideoAnalyticsSummary> {
+  return apiFetch(`/api/v1/analytics/videos/${publishIntentId}`);
+}
+
+export async function getVideoAnalyticsTimeline(publishIntentId: string): Promise<VideoAnalyticsTimeline> {
+  return apiFetch(`/api/v1/analytics/videos/${publishIntentId}/timeline`);
+}
+
+export async function getChannelAnalytics(channelId: string): Promise<ChannelAnalyticsSummary> {
+  return apiFetch(`/api/v1/analytics/channels/${channelId}`);
+}
+
+export async function refreshVideoAnalytics(publishIntentId: string): Promise<{
+  status: string;
+  manual_refresh_id: string;
+  asset_id: string;
+}> {
+  return apiFetch(`/api/v1/analytics/videos/${publishIntentId}/refresh`, {
+    method: "POST",
+  });
+}
+
+export async function getAnalyticsHealth(): Promise<AnalyticsHealth> {
+  return apiFetch("/api/v1/analytics/health");
+}
+

@@ -534,3 +534,117 @@ def publisher_reconciliation_sweep_task() -> dict[str, int]:
     except Exception as exc:
         logger.error("Publisher reconciliation sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "reconciled": 0}
+
+
+# ── OMEGA-012 Analytics Engine Tasks ──────────────────────────────────────────
+
+
+@celery_app.task(name="omega.analytics.poll_sweep")
+def analytics_poll_sweep_task() -> dict[str, Any]:
+    """Periodic sweep scanning due analytics assets and enqueuing poll batches."""
+    import asyncio
+
+    from sqlalchemy import func, select
+
+    from omega.application.analytics.poll_service import AnalyticsPollService
+    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.models import AnalyticsAsset
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(AnalyticsAsset.id)
+                .where(
+                    AnalyticsAsset.asset_status == "ACTIVE",
+                    AnalyticsAsset.next_poll_due_at <= func.now(),
+                )
+                .limit(50)
+            )
+            res = await session.execute(stmt)
+            due_ids = res.scalars().all()
+
+            processed = 0
+            for asset_id in due_ids:
+                try:
+                    await AnalyticsPollService.execute_asset_poll(
+                        session=session,
+                        asset_id=asset_id,
+                        worker_id="celery-poll-worker",
+                    )
+                    processed += 1
+                except Exception as poll_exc:
+                    logger.error("Asset poll failed", asset_id=str(asset_id), error=str(poll_exc))
+
+            await session.commit()
+            return {"due": len(due_ids), "processed": processed}
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Analytics poll sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "due": 0, "processed": 0}
+
+
+@celery_app.task(name="omega.analytics.fetch_video_batch")
+def analytics_fetch_video_batch_task(asset_id: str) -> dict[str, Any]:
+    """Execute video asset analytics poll for a single asset."""
+    import asyncio
+    from uuid import UUID
+
+    from omega.application.analytics.poll_service import AnalyticsPollService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            res = await AnalyticsPollService.execute_asset_poll(
+                session=session,
+                asset_id=UUID(asset_id),
+                worker_id="celery-batch-worker",
+            )
+            await session.commit()
+            return res
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error(
+            "Analytics fetch video batch failed", asset_id=asset_id, error=str(exc), exc_info=True
+        )
+        return {"status": "error", "error": str(exc)}
+
+
+@celery_app.task(name="omega.analytics.fetch_analytics_report")
+def analytics_fetch_analytics_report_task(asset_id: str) -> dict[str, Any]:
+    """Fetch deep report for a video asset."""
+    return analytics_fetch_video_batch_task(asset_id)
+
+
+@celery_app.task(name="omega.analytics.daily_reconciliation_sweep")
+def analytics_daily_reconciliation_sweep_task() -> dict[str, Any]:
+    """Periodic sweep checking for finalized daily windows and reconciling stale data."""
+    import asyncio
+
+    from sqlalchemy import select
+
+    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.models import AnalyticsWindow
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(AnalyticsWindow)
+                .where(AnalyticsWindow.window_state == "PROVISIONAL")
+                .limit(20)
+            )
+            res = await session.execute(stmt)
+            windows = res.scalars().all()
+            return {"checked_windows": len(windows)}
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Analytics daily reconciliation sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "checked_windows": 0}

@@ -63,5 +63,15 @@ celery_app.conf.update(
             "schedule": 60.0,
             "options": {"expires": 180},
         },
+        "analytics-poll-sweep": {
+            "task": "omega.analytics.poll_sweep",
+            "schedule": 60.0,
+            "options": {"expires": 120},
+        },
+        "analytics-daily-reconciliation-sweep": {
+            "task": "omega.analytics.daily_reconciliation_sweep",
+            "schedule": 3600.0,
+            "options": {"expires": 1800},
+        },
     },
 )
