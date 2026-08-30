@@ -40,6 +40,7 @@ DEFAULT_YOUTUBE_SCOPES = [
     "https://www.googleapis.com/auth/youtube.upload",
     "https://www.googleapis.com/auth/youtube.readonly",
 ]
+YOUTUBE_ANALYTICS_SCOPE = "https://www.googleapis.com/auth/yt-analytics.readonly"
 
 
 class OAuthServiceError(Exception):
@@ -65,6 +66,8 @@ class OAuthService:
         session: AsyncSession,
         channel_id: UUID,
         platform: Platform = Platform.YOUTUBE,
+        include_analytics: bool = False,
+        custom_scopes: list[str] | None = None,
     ) -> str:
         """Create a protected OAuth authorization session and return the authorization redirect URL."""
         settings = get_settings()
@@ -75,6 +78,14 @@ class OAuthService:
         channel = chan_res.scalar_one_or_none()
         if not channel:
             raise OAuthServiceError(f"Channel {channel_id} not found.")
+
+        # Determine target scopes
+        if custom_scopes is not None:
+            scopes = custom_scopes
+        elif include_analytics:
+            scopes = DEFAULT_YOUTUBE_SCOPES + [YOUTUBE_ANALYTICS_SCOPE]
+        else:
+            scopes = DEFAULT_YOUTUBE_SCOPES
 
         # 2. Generate random state & PKCE
         raw_state = secrets.token_urlsafe(32)
@@ -92,7 +103,7 @@ class OAuthService:
             state_hash=state_hash,
             encrypted_pkce_verifier=encrypted_verifier,
             redirect_uri=settings.google_redirect_uri,
-            requested_scopes=DEFAULT_YOUTUBE_SCOPES,
+            requested_scopes=scopes,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             consumed_at=None,
         )
@@ -104,7 +115,7 @@ class OAuthService:
             "client_id": settings.google_client_id,
             "redirect_uri": settings.google_redirect_uri,
             "response_type": "code",
-            "scope": " ".join(DEFAULT_YOUTUBE_SCOPES),
+            "scope": " ".join(scopes),
             "access_type": "offline",
             "prompt": "consent",
             "state": raw_state,
@@ -112,6 +123,31 @@ class OAuthService:
             "code_challenge_method": "S256",
         }
         return f"{GOOGLE_OAUTH_AUTH_URL}?{urlencode(params)}"
+
+    @classmethod
+    async def create_scope_upgrade_url(
+        cls,
+        session: AsyncSession,
+        platform_account_id: UUID,
+    ) -> str:
+        """Generate an explicit consent OAuth upgrade URL with analytics scopes."""
+        stmt = select(PlatformAccount).where(PlatformAccount.id == platform_account_id)
+        res = await session.execute(stmt)
+        account = res.scalar_one_or_none()
+        if not account:
+            raise OAuthServiceError(f"Platform account {platform_account_id} not found.")
+        return await cls.create_authorization_url(
+            session=session,
+            channel_id=account.channel_id,
+            platform=Platform(account.platform),
+            include_analytics=True,
+        )
+
+    @classmethod
+    def has_analytics_scope(cls, account: PlatformAccount) -> bool:
+        """Check if a platform account contains the required Analytics scope."""
+        scopes = account.scopes or []
+        return YOUTUBE_ANALYTICS_SCOPE in scopes
 
     @classmethod
     async def handle_oauth_callback(

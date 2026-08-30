@@ -9,12 +9,15 @@ ResearchConflicts, and ResearchBriefs.
 from __future__ import annotations
 
 import uuid
+from datetime import date
 from decimal import Decimal
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -3394,3 +3397,581 @@ class PublisherSchedulerHandoffOutbox(Base):
 
     def __repr__(self) -> str:
         return f"<PublisherSchedulerHandoffOutbox {self.id} status={self.status} attempt={self.attempt_count}>"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OMEGA-012 Analytics Engine Models
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class AnalyticsAsset(Base):
+    """Authoritative entity binding PublishIntent and PublishAttempt to analytics tracking."""
+
+    __tablename__ = "analytics_assets"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    platform_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("platform_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    publish_intent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_intents.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    publish_attempt_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    media_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("media_artifacts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    channel_dna_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    provider: Mapped[str] = mapped_column(String(32), nullable=False, default="YOUTUBE")
+    provider_video_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    published_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    asset_status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE")
+    lifecycle_phase: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="ACTIVE_HOURLY"
+    )
+    next_poll_due_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    last_polled_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    poll_error_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    channel: Mapped[Channel] = relationship("Channel")
+    platform_account: Mapped[PlatformAccount] = relationship("PlatformAccount")
+    publish_intent: Mapped[PublishIntent] = relationship("PublishIntent")
+    publish_attempt: Mapped[PublishAttempt] = relationship("PublishAttempt")
+    media_artifact: Mapped[MediaArtifact] = relationship("MediaArtifact")
+    channel_dna_revision: Mapped[ChannelDNARevision | None] = relationship("ChannelDNARevision")
+
+    windows: Mapped[list[AnalyticsWindow]] = relationship(
+        "AnalyticsWindow", back_populates="asset", cascade="all, delete-orphan"
+    )
+    observations: Mapped[list[AnalyticsMetricObservation]] = relationship(
+        "AnalyticsMetricObservation", back_populates="asset"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider", "provider_video_id", name="uq_analytics_assets_provider_video"
+        ),
+        CheckConstraint(
+            "asset_status IN ('ACTIVE', 'MATURE', 'ARCHIVED', 'PROVIDER_DELETED', 'UNAVAILABLE', 'FAILED')",
+            name="chk_analytics_assets_status",
+        ),
+        CheckConstraint(
+            "lifecycle_phase IN ('ACTIVE_HOURLY', 'MATURE_DAILY', 'STABLE_WEEKLY', 'ARCHIVED_MONTHLY', 'PAUSED')",
+            name="chk_analytics_assets_lifecycle",
+        ),
+        Index("idx_analytics_assets_poll_due", "asset_status", "next_poll_due_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsAsset {self.id} provider_video_id={self.provider_video_id} status={self.asset_status}>"
+
+
+class AnalyticsMetricCapability(Base):
+    """Static registry of supported metric/dimension/report combinations and scope gates."""
+
+    __tablename__ = "analytics_metric_capabilities"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    canonical_metric_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_metric_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    api_source: Mapped[str] = mapped_column(String(64), nullable=False)
+    supported_report_types: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    compatible_dimensions: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    required_scopes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    availability_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False, default="COUNT")
+    aggregation_semantics: Mapped[str] = mapped_column(String(32), nullable=False, default="SUM")
+    capability_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "canonical_metric_name",
+            "api_source",
+            "capability_version",
+            name="uq_analytics_metric_capabilities",
+        ),
+        CheckConstraint(
+            "availability_class IN ('UNIVERSAL', 'DIMENSION_RESTRICTED', 'PRIVACY_GATED', 'PROVIDER_GATED', 'CHANNEL_ONLY', 'DEPRECATED')",
+            name="chk_metric_capabilities_class",
+        ),
+        Index("idx_metric_capabilities_lookup", "provider", "canonical_metric_name"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsMetricCapability {self.canonical_metric_name} ({self.api_source})>"
+
+
+class AnalyticsQuotaBucket(Base):
+    """Dynamic tracking of provider quota consumption and internal budget thresholds."""
+
+    __tablename__ = "analytics_quota_buckets"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    quota_bucket: Mapped[str] = mapped_column(String(64), nullable=False)
+    method: Mapped[str] = mapped_column(String(64), nullable=False)
+    configured_daily_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    internal_budget_limit: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    provider_authoritative_usage: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    estimated_internal_units: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    provider_timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="America/Los_Angeles"
+    )
+    last_reset_at_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    next_reset_at_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    evidence_source: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="DEFAULT_ESTIMATE"
+    )
+    last_verified_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("provider", "quota_bucket", "method", name="uq_analytics_quota_buckets"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsQuotaBucket {self.provider}:{self.quota_bucket} est={self.estimated_internal_units}>"
+
+
+class AnalyticsPollJob(Base):
+    """Lease coordination and fencing for background polling tasks."""
+
+    __tablename__ = "analytics_poll_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
+    poll_execution_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    target_asset_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    claimed_by_worker_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_expires_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'CLAIMED', 'COMPLETED', 'FAILED', 'EXPIRED')",
+            name="chk_analytics_poll_jobs_status",
+        ),
+        Index("idx_poll_jobs_lease", "status", "lease_expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsPollJob {self.id} status={self.status} gen={self.claim_generation}>"
+
+
+class AnalyticsProviderSnapshot(Base):
+    """Single authoritative append-only store for raw HTTP responses (both video and channel)."""
+
+    __tablename__ = "analytics_provider_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_assets.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    platform_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("platform_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    api_endpoint: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_params: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    raw_payload: Mapped[Any] = mapped_column(JSON, nullable=False)
+    payload_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    logical_query_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    poll_execution_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    snapshot_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    retrieval_timestamp: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    http_status: Mapped[int] = mapped_column(Integer, nullable=False, default=200)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    asset: Mapped[AnalyticsAsset | None] = relationship("AnalyticsAsset")
+    channel: Mapped[Channel] = relationship("Channel")
+    platform_account: Mapped[PlatformAccount] = relationship("PlatformAccount")
+
+    __table_args__ = (
+        Index("idx_provider_snapshots_asset_time", "asset_id", "retrieval_timestamp"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsProviderSnapshot {self.id} dedupe={self.snapshot_dedupe_key[:8]}>"
+
+
+class AnalyticsWindow(Base):
+    """Temporal anchor for evaluation windows (relative elapsed and Pacific calendar days)."""
+
+    __tablename__ = "analytics_windows"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_assets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    window_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    provider_timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="America/Los_Angeles"
+    )
+    window_start_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_state: Mapped[str] = mapped_column(String(32), nullable=False, default="PROVISIONAL")
+    finalized_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    asset: Mapped[AnalyticsAsset] = relationship("AnalyticsAsset", back_populates="windows")
+    observations: Mapped[list[AnalyticsMetricObservation]] = relationship(
+        "AnalyticsMetricObservation", back_populates="window", cascade="all, delete-orphan"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "asset_id",
+            "window_type",
+            "window_start_utc",
+            name="uq_analytics_windows_asset_type_start",
+        ),
+        CheckConstraint(
+            "window_state IN ('PENDING', 'PROVISIONAL', 'FINALIZED', 'REVISED')",
+            name="chk_analytics_windows_state",
+        ),
+        Index("idx_analytics_windows_state", "asset_id", "window_state"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsWindow {self.id} type={self.window_type} state={self.window_state}>"
+
+
+class AnalyticsMetricObservation(Base):
+    """Normalized, unit-standardized provider facts (immutable append-only)."""
+
+    __tablename__ = "analytics_metric_observations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_assets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    window_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_windows.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_provider_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    metric_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    classification: Mapped[str] = mapped_column(String(32), nullable=False, default="PROVIDER_FACT")
+    metric_quality: Mapped[str] = mapped_column(String(32), nullable=False)
+    numeric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    integer_value: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    string_value: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    dimensions: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    dimensions_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    normalization_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    observation_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    revision_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    preceding_observation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_metric_observations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    observation_timestamp: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    asset: Mapped[AnalyticsAsset] = relationship("AnalyticsAsset", back_populates="observations")
+    window: Mapped[AnalyticsWindow] = relationship("AnalyticsWindow", back_populates="observations")
+    snapshot: Mapped[AnalyticsProviderSnapshot] = relationship("AnalyticsProviderSnapshot")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "window_id",
+            "metric_name",
+            "dimensions_hash",
+            "revision_sequence",
+            name="uq_metric_obs_window_metric_dim_rev",
+        ),
+        CheckConstraint(
+            "classification = 'PROVIDER_FACT'",
+            name="chk_metric_obs_classification",
+        ),
+        CheckConstraint(
+            "metric_quality IN ('AVAILABLE', 'ZERO_CONFIRMED', 'NOT_READY', 'NOT_AVAILABLE', 'SUPPRESSED', 'PERMISSION_DENIED', 'PROVIDER_ERROR', 'STALE', 'REVISED', 'UNKNOWN_MISSING')",
+            name="chk_metric_obs_quality",
+        ),
+        Index("idx_metric_obs_asset_metric", "asset_id", "metric_name"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsMetricObservation {self.id} {self.metric_name} rev={self.revision_sequence}>"
+
+
+class AnalyticsMetricLatestPointer(Base):
+    """Mutable query projection tracking current observation state per metric/window/dimensions."""
+
+    __tablename__ = "analytics_metric_latest_pointer"
+
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_assets.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    window_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_windows.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    metric_name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    dimensions_hash: Mapped[str] = mapped_column(String(64), primary_key=True, default="")
+    current_observation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_metric_observations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    current_revision_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    current_observation: Mapped[AnalyticsMetricObservation] = relationship(
+        "AnalyticsMetricObservation"
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsMetricLatestPointer {self.metric_name} rev={self.current_revision_sequence}>"
+
+
+class AnalyticsComputedMetric(Base):
+    """Derived and heuristic metrics with multi-source observation lineage (immutable history)."""
+
+    __tablename__ = "analytics_computed_metrics"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_assets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    window_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_windows.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    metric_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    classification: Mapped[str] = mapped_column(String(32), nullable=False)
+    formula_identifier: Mapped[str] = mapped_column(String(64), nullable=False)
+    formula_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_observation_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    source_computed_metric_ids: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    source_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    computation_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    numeric_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    metric_quality: Mapped[str] = mapped_column(String(32), nullable=False, default="AVAILABLE")
+    computation_revision_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    computed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    asset: Mapped[AnalyticsAsset] = relationship("AnalyticsAsset")
+    window: Mapped[AnalyticsWindow] = relationship("AnalyticsWindow")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "window_id",
+            "metric_name",
+            "formula_version",
+            "computation_revision_sequence",
+            name="uq_computed_metrics_window_name_ver_rev",
+        ),
+        CheckConstraint(
+            "classification IN ('DETERMINISTIC_DERIVED', 'HEURISTIC_FEATURE')",
+            name="chk_computed_metrics_classification",
+        ),
+        CheckConstraint(
+            "metric_quality IN ('AVAILABLE', 'ZERO_CONFIRMED', 'NOT_READY', 'NOT_AVAILABLE', 'SUPPRESSED', 'PERMISSION_DENIED', 'PROVIDER_ERROR', 'STALE', 'REVISED', 'UNKNOWN_MISSING')",
+            name="chk_computed_metrics_quality",
+        ),
+        Index("idx_computed_metrics_lookup", "asset_id", "metric_name", "classification"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsComputedMetric {self.metric_name} ({self.classification})={self.numeric_value}>"
+
+
+class AnalyticsChannelSnapshot(Base):
+    """Normalized channel metric snapshots referencing raw provider evidence."""
+
+    __tablename__ = "analytics_channel_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    platform_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("platform_accounts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_provider_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    provider_timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="America/Los_Angeles"
+    )
+    window_start_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    total_views: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    subscriber_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    video_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    aggregate_watch_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    revision_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    preceding_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_channel_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    channel: Mapped[Channel] = relationship("Channel")
+    platform_account: Mapped[PlatformAccount] = relationship("PlatformAccount")
+    snapshot: Mapped[AnalyticsProviderSnapshot] = relationship("AnalyticsProviderSnapshot")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "channel_id",
+            "snapshot_date",
+            "revision_sequence",
+            name="uq_channel_snapshots_channel_date_rev",
+        ),
+        Index("idx_channel_snapshots_date", "channel_id", "snapshot_date"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsChannelSnapshot {self.id} date={self.snapshot_date} rev={self.revision_sequence}>"
+
+
+class AnalyticsChannelLatestPointer(Base):
+    """Mutable query projection tracking current channel snapshot per date."""
+
+    __tablename__ = "analytics_channel_latest_pointer"
+
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    snapshot_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    current_channel_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("analytics_channel_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    current_revision_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    current_snapshot: Mapped[AnalyticsChannelSnapshot] = relationship("AnalyticsChannelSnapshot")
+
+    def __repr__(self) -> str:
+        return f"<AnalyticsChannelLatestPointer {self.channel_id}:{self.snapshot_date} rev={self.current_revision_sequence}>"
