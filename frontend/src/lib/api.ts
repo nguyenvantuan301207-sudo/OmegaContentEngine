@@ -319,7 +319,7 @@ export interface TopicMemory {
   semantic_tags: string[];
   first_seen_at: string;
   last_seen_at: string;
-  times_discovered: int;
+  times_discovered: number;
   times_selected: number;
   times_produced: number;
   times_rejected: number;
@@ -548,6 +548,22 @@ export async function getTopicCandidates(
   if (sourceType) params.set("source_type", sourceType);
   const q = params.toString() ? `?${params.toString()}` : "";
   return apiFetch(`/api/v1/channels/${channelId}/topics/candidates${q}`);
+}
+
+export async function listTopics(
+  channelId: string,
+  status?: string,
+  sourceType?: string,
+): Promise<TopicCandidate[]> {
+  return getTopicCandidates(channelId, status, sourceType);
+}
+
+export async function listCandidates(
+  channelId: string,
+  status?: string,
+  sourceType?: string,
+): Promise<TopicCandidate[]> {
+  return getTopicCandidates(channelId, status, sourceType);
 }
 
 export async function getTopicCandidate(channelId: string, candidateId: string): Promise<TopicCandidate> {
@@ -853,6 +869,7 @@ export interface ResearchBriefSummary {
   is_current: boolean;
   outcome: ResearchOutcome;
   overall_confidence: number;
+  title?: string;
   verified_claims_count: number;
   contradictions_count: number;
   created_at: string;
@@ -1829,4 +1846,159 @@ export async function executeNetworkPreflight(
       mission_id: missionId,
     }),
   });
+}
+
+// ── Smart Scheduler Types (OMEGA-010) ──
+
+export type ScheduleAction =
+  | "RUN_NOW"
+  | "SCHEDULE"
+  | "DEFER"
+  | "WAITING_DEPENDENCY"
+  | "WAITING_CAPACITY"
+  | "WAITING_GUARDIAN"
+  | "WAITING_NETWORK"
+  | "BLOCKED_SCHEDULE";
+
+export type ReservationState =
+  | "ACTIVE"
+  | "DISPATCHING"
+  | "CONSUMED"
+  | "RELEASED"
+  | "EXPIRED"
+  | "CANCELLED";
+
+export interface SchedulePolicy {
+  id: string;
+  workload_category: string;
+  version: string;
+  status: "DRAFT" | "ACTIVE" | "RETIRED";
+  policy_config: Record<string, unknown>;
+  checksum: string;
+  effective_at: string | null;
+  retired_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduleDecision {
+  id: string;
+  mission_id: string;
+  task_id: string | null;
+  channel_id: string | null;
+  target_type: string;
+  target_id: string;
+  workload_category: string;
+  action: ScheduleAction;
+  scheduled_start_at: string | null;
+  scheduled_end_at: string | null;
+  reason: string;
+  policy_id: string;
+  policy_version: string;
+  policy_checksum: string;
+  channel_dna_revision_id: string | null;
+  reservation_id: string | null;
+  guardian_epoch: number;
+  idempotency_key: string;
+  diagnostic_context: Record<string, unknown> | null;
+  evaluated_at: string;
+  expires_at: string | null;
+}
+
+export interface ScheduleReservation {
+  id: string;
+  decision_id: string;
+  channel_id: string | null;
+  mission_id: string;
+  target_type: string;
+  target_id: string;
+  workload_category: string;
+  scheduled_start_at: string;
+  scheduled_end_at: string;
+  state: ReservationState;
+  priority_score: number;
+  policy_id: string;
+  policy_version: string;
+  policy_checksum: string;
+  channel_dna_revision_id: string | null;
+  guardian_epoch: number;
+  version: number;
+  created_at: string;
+  updated_at: string;
+  dispatching_at: string | null;
+  consumed_at: string | null;
+  released_at: string | null;
+  expires_at: string | null;
+}
+
+export interface ChannelTimelineResponse {
+  channel_id: string;
+  timezone: string;
+  reservations: ScheduleReservation[];
+  capacity_used_today: number;
+  capacity_limit_today: number;
+}
+
+export async function listSchedulePolicies(workloadCategory?: string): Promise<SchedulePolicy[]> {
+  const query = workloadCategory ? `?workload_category=${encodeURIComponent(workloadCategory)}` : "";
+  return apiFetch(`/api/v1/scheduler/policies${query}`);
+}
+
+export async function createSchedulePolicy(payload: {
+  workload_category: string;
+  version: string;
+  policy_config: Record<string, unknown>;
+  activate?: boolean;
+}): Promise<SchedulePolicy> {
+  return apiFetch("/api/v1/scheduler/policies", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function activateSchedulePolicy(policyId: string): Promise<SchedulePolicy> {
+  return apiFetch(`/api/v1/scheduler/policies/${policyId}/activate`, {
+    method: "POST",
+  });
+}
+
+export async function evaluateSchedule(payload: Record<string, unknown>): Promise<ScheduleDecision> {
+  return apiFetch("/api/v1/scheduler/evaluate", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getScheduleDecision(decisionId: string): Promise<ScheduleDecision> {
+  return apiFetch(`/api/v1/scheduler/decisions/${decisionId}`);
+}
+
+export async function listScheduleReservations(params?: {
+  channel_id?: string;
+  state?: string;
+  workload_category?: string;
+}): Promise<ScheduleReservation[]> {
+  const q = new URLSearchParams();
+  if (params?.channel_id) q.set("channel_id", params.channel_id);
+  if (params?.state) q.set("state", params.state);
+  if (params?.workload_category) q.set("workload_category", params.workload_category);
+  const qs = q.toString() ? `?${q.toString()}` : "";
+  return apiFetch(`/api/v1/scheduler/reservations${qs}`);
+}
+
+export async function getScheduleReservation(reservationId: string): Promise<ScheduleReservation> {
+  return apiFetch(`/api/v1/scheduler/reservations/${reservationId}`);
+}
+
+export async function releaseScheduleReservation(
+  reservationId: string,
+  reason = "Manual release from dashboard",
+): Promise<ScheduleReservation> {
+  return apiFetch(`/api/v1/scheduler/reservations/${reservationId}/release?reason=${encodeURIComponent(reason)}`, {
+    method: "POST",
+  });
+}
+
+export async function getChannelScheduleTimeline(channelId: string): Promise<ChannelTimelineResponse> {
+  return apiFetch(`/api/v1/scheduler/channels/${channelId}/timeline`);
 }

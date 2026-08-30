@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 
 from omega.domain.decision import Actor, DecisionType
 from omega.domain.mission import AutonomyLevel, ExecutionState, MissionState
+from omega.domain.scheduler import ScheduleWorkloadCategory
 from omega.domain.task import TaskState
 from omega.infrastructure.models import DecisionLog, Mission, MissionExecution, Task, TaskDependency
 from omega.logging import get_logger
@@ -34,6 +35,22 @@ def _sanitize_error(error: Exception) -> str:
     if len(first_line) > 500:
         first_line = first_line[:500] + "..."
     return f"{error_type}: {first_line}"
+
+
+def _map_task_to_workload_category(task_type: str) -> ScheduleWorkloadCategory:
+    """Map a task type string to its corresponding scheduling workload category."""
+    tt = task_type.lower()
+    if any(k in tt for k in ["render", "ffmpeg", "transcode", "encode"]):
+        return ScheduleWorkloadCategory.HEAVY_RENDER
+    elif any(k in tt for k in ["publish", "upload", "distribute", "social"]):
+        return ScheduleWorkloadCategory.EXTERNAL_PUBLISH
+    elif any(
+        k in tt for k in ["ai_", "script", "scene", "generate", "research", "outline", "prompt"]
+    ):
+        return ScheduleWorkloadCategory.AI_GENERATION
+    elif any(k in tt for k in ["cleanup", "vacuum", "sweep", "maintenance"]):
+        return ScheduleWorkloadCategory.MAINTENANCE
+    return ScheduleWorkloadCategory.LIGHT_API
 
 
 # ── Async Orchestrator (FastAPI application layer) ──
@@ -220,6 +237,14 @@ async def evaluate_mission(
     )
     tasks = list(tasks_res.scalars().all())
 
+    from omega.application.scheduler.evaluation_engine import ScheduleEvaluationEngine
+    from omega.application.scheduler.policy_service import SchedulePolicyService
+    from omega.domain.scheduler import (
+        ScheduleAction,
+        ScheduleRequest,
+        ScheduleTargetType,
+    )
+
     for task in tasks:
         if task.state == TaskState.READY.value:
             should_dispatch = autonomy in (
@@ -230,23 +255,85 @@ async def evaluate_mission(
             )
 
             if should_dispatch:
-                task.state = TaskState.QUEUED.value
-                task.dispatched_epoch = mission.guardian_epoch
-                task.queued_at = now
-                task.updated_at = now
-                tasks_to_dispatch.append(task)
+                category = _map_task_to_workload_category(task.task_type)
+                policy = await SchedulePolicyService.get_active_policy(session, category.value)
 
-                session.add(
-                    DecisionLog(
+                if policy:
+                    sched_req = ScheduleRequest(
                         mission_id=mission_id,
-                        execution_id=current_execution_id,
                         task_id=task.id,
-                        decision_type=DecisionType.TASK_DISPATCH.value,
-                        decision=f"Queue task {task.title}",
-                        reason="All dependencies satisfied, eligible for dispatch",
-                        actor=Actor.ORCHESTRATOR.value,
+                        target_type=ScheduleTargetType.TASK_EXECUTION,
+                        target_id=task.id,
+                        workload_category=category,
+                        channel_id=mission.channel_id,
+                        earliest_start_at=now,
+                        priority=mission.priority,
+                        caller_key=f"orch:{str(task.id)}:{mission.guardian_epoch}",
                     )
-                )
+                    sched_decision = await ScheduleEvaluationEngine.evaluate_schedule(
+                        session, sched_req, now=now
+                    )
+
+                    if sched_decision.action == ScheduleAction.RUN_NOW:
+                        task.state = TaskState.QUEUED.value
+                        task.dispatched_epoch = mission.guardian_epoch
+                        task.queued_at = now
+                        task.updated_at = now
+                        tasks_to_dispatch.append(task)
+                        session.add(
+                            DecisionLog(
+                                mission_id=mission_id,
+                                execution_id=current_execution_id,
+                                task_id=task.id,
+                                decision_type=DecisionType.TASK_DISPATCH.value,
+                                decision=f"Queue task {task.title} (RUN_NOW)",
+                                reason=f"Scheduler RUN_NOW: {sched_decision.reason}",
+                                actor=Actor.ORCHESTRATOR.value,
+                            )
+                        )
+                    elif sched_decision.action == ScheduleAction.SCHEDULE:
+                        session.add(
+                            DecisionLog(
+                                mission_id=mission_id,
+                                execution_id=current_execution_id,
+                                task_id=task.id,
+                                decision_type=DecisionType.TASK_DISPATCH.value,
+                                decision=f"Schedule task {task.title} for {sched_decision.scheduled_start_at.isoformat() if sched_decision.scheduled_start_at else 'future'}",
+                                reason=f"Scheduled slot allocated: {sched_decision.reason}",
+                                actor=Actor.ORCHESTRATOR.value,
+                            )
+                        )
+                    else:
+                        session.add(
+                            DecisionLog(
+                                mission_id=mission_id,
+                                execution_id=current_execution_id,
+                                task_id=task.id,
+                                decision_type=DecisionType.TASK_DISPATCH.value,
+                                decision=f"Hold task {task.title} ({sched_decision.action.value})",
+                                reason=f"Scheduler hold: {sched_decision.reason}",
+                                actor=Actor.ORCHESTRATOR.value,
+                            )
+                        )
+                else:
+                    # Default immediate dispatch if no active policy for category
+                    task.state = TaskState.QUEUED.value
+                    task.dispatched_epoch = mission.guardian_epoch
+                    task.queued_at = now
+                    task.updated_at = now
+                    tasks_to_dispatch.append(task)
+
+                    session.add(
+                        DecisionLog(
+                            mission_id=mission_id,
+                            execution_id=current_execution_id,
+                            task_id=task.id,
+                            decision_type=DecisionType.TASK_DISPATCH.value,
+                            decision=f"Queue task {task.title}",
+                            reason="All dependencies satisfied, eligible for dispatch",
+                            actor=Actor.ORCHESTRATOR.value,
+                        )
+                    )
 
     await session.commit()
 

@@ -235,7 +235,7 @@ export default function MissionDetailPage({
         <GuardianPanel
           missionId={mission.id}
           isPaused={mission.state === "PAUSED"}
-          onStateChanged={fetchData}
+          onStateChanged={loadData}
         />
 
         {/* Main Content Grid: Tasks DAG & Decision Log */}
