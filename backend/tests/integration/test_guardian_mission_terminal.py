@@ -33,7 +33,7 @@ async def _create_ready_mission_with_tasks(client: AsyncClient) -> tuple[str, li
         json={
             "title": f"Terminal Gate Test Mission {uuid.uuid4().hex[:6]}",
             "objective": "Test MISSION_TERMINAL gate semantics",
-            "autonomy_level": "AUTONOMOUS",
+            "autonomy_level": "SUPERVISED",
             "priority": 1,
         },
     )
@@ -43,8 +43,9 @@ async def _create_ready_mission_with_tasks(client: AsyncClient) -> tuple[str, li
     plan_res = await client.post(f"/api/v1/missions/{mission_id}/plan")
     assert plan_res.status_code == 200
 
-    start_res = await client.post(f"/api/v1/missions/{mission_id}/start")
-    assert start_res.status_code == 200
+    with patch("omega.worker.tasks.execute_task.delay"):
+        start_res = await client.post(f"/api/v1/missions/{mission_id}/start")
+        assert start_res.status_code == 200
 
     tasks_res = await client.get(f"/api/v1/missions/{mission_id}/tasks")
     assert tasks_res.status_code == 200

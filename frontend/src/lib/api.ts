@@ -1741,5 +1741,92 @@ export async function listMissionCosts(missionId: string): Promise<CostRecord[]>
   return apiFetch(`/api/v1/guardian/missions/${missionId}/costs`);
 }
 
+// ── Network Manager Types (OMEGA-009) ──
 
+export interface NetworkProfile {
+  id: string;
+  name: string;
+  description: string | null;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
 
+export interface NetworkRoute {
+  id: string;
+  profile_id: string;
+  name: string;
+  route_type: string;
+  endpoint_url: string | null;
+  credential_ref: string | null;
+  allowed_service_categories: string[];
+  tls_verify: boolean;
+  connect_timeout_seconds: number;
+  read_timeout_seconds: number;
+  max_retries: number;
+  priority_weight: number;
+  is_enabled: boolean;
+  config_version: number;
+  config_checksum: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RouteHealth {
+  route_id: string;
+  service_category: string;
+  circuit_state: "CLOSED" | "OPEN" | "HALF_OPEN";
+  consecutive_failures: number;
+  half_open_successes: number;
+  cooldown_until: string | null;
+  last_failure_at: string | null;
+  last_success_at: string | null;
+}
+
+export interface NetworkPreflightResponse {
+  id: string;
+  mission_id: string | null;
+  task_id: string | null;
+  route_id: string;
+  route_config_version: number;
+  service_category: string;
+  canonical_destination: string;
+  idempotency_key: string;
+  status: string;
+  decision: {
+    id: string;
+    action: "ALLOW" | "ALLOW_DEGRADED" | "WAITING_NETWORK" | "BLOCKED_NETWORK";
+    resulting_health_state: "HEALTHY" | "DEGRADED" | "UNHEALTHY" | "UNKNOWN";
+    reason: string;
+    actor: string;
+    created_at: string;
+  } | null;
+}
+
+export async function listNetworkProfiles(): Promise<NetworkProfile[]> {
+  return apiFetch("/api/v1/network/profiles");
+}
+
+export async function listNetworkRoutes(profileId?: string): Promise<NetworkRoute[]> {
+  const query = profileId ? `?profile_id=${profileId}` : "";
+  return apiFetch(`/api/v1/network/routes${query}`);
+}
+
+export async function getRouteHealth(routeId: string, serviceCategory = "GENERAL_HTTP"): Promise<RouteHealth> {
+  return apiFetch(`/api/v1/network/routes/${routeId}/health?service_category=${serviceCategory}`);
+}
+
+export async function executeNetworkPreflight(
+  destinationUrl: string,
+  serviceCategory = "GENERAL_HTTP",
+  missionId?: string,
+): Promise<NetworkPreflightResponse> {
+  return apiFetch("/api/v1/network/preflight", {
+    method: "POST",
+    body: JSON.stringify({
+      destination_url: destinationUrl,
+      service_category: serviceCategory,
+      mission_id: missionId,
+    }),
+  });
+}

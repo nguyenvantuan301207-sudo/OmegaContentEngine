@@ -2405,3 +2405,278 @@ class GuardianStateTransition(Base):
 
     def __repr__(self) -> str:
         return f"<GuardianStateTransition {self.from_gate_state} -> {self.to_gate_state} epoch={self.guardian_epoch}>"
+
+
+# ══════════════════════════════════════════════════════════════════
+# OMEGA-009: Network Manager Models
+# ══════════════════════════════════════════════════════════════════
+
+
+class NetworkProfile(Base):
+    """Grouping of network routes for operational contexts (e.g. production default)."""
+
+    __tablename__ = "network_profiles"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    routes: Mapped[list[NetworkRoute]] = relationship(
+        "NetworkRoute", back_populates="profile", cascade="all, delete-orphan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<NetworkProfile id={self.id} name={self.name} default={self.is_default}>"
+
+
+class NetworkRoute(Base):
+    """Concrete outbound egress route with operational fencing and credential reference."""
+
+    __tablename__ = "network_routes"
+    __table_args__ = (
+        CheckConstraint("tls_verify = true", name="ck_network_route_tls_verify_mandatory"),
+        CheckConstraint(
+            "route_type IN ('DIRECT', 'HTTPS_CONNECT_PROXY', 'SOCKS5', 'SYSTEM_DEFAULT')",
+            name="ck_network_route_allowed_types",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    profile_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("network_profiles.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    route_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    endpoint_url: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    credential_ref: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    allowed_service_categories: Mapped[list] = mapped_column(
+        JSON, nullable=False, server_default="[]"
+    )
+    tls_verify: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    connect_timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=5.0)
+    read_timeout_seconds: Mapped[float] = mapped_column(Float, nullable=False, default=10.0)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    priority_weight: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    config_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    config_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    profile: Mapped[NetworkProfile] = relationship("NetworkProfile", back_populates="routes")
+    circuit_states: Mapped[list[NetworkCircuitState]] = relationship(
+        "NetworkCircuitState", back_populates="route"
+    )
+    checks: Mapped[list[NetworkCheck]] = relationship("NetworkCheck", back_populates="route")
+
+    def __repr__(self) -> str:
+        return f"<NetworkRoute id={self.id} name={self.name} type={self.route_type} v={self.config_version}>"
+
+
+class NetworkPolicy(Base):
+    """Immutable, versioned network policy for a specific service category."""
+
+    __tablename__ = "network_policies"
+    __table_args__ = (
+        UniqueConstraint("service_category", "version", name="uq_network_policy_category_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    service_category: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="DRAFT", index=True)
+    effective_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    policy_config: Mapped[dict] = mapped_column(JSON, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    checks: Mapped[list[NetworkCheck]] = relationship("NetworkCheck", back_populates="policy")
+
+    def __repr__(self) -> str:
+        return f"<NetworkPolicy id={self.id} category={self.service_category} v={self.version} status={self.status}>"
+
+
+class NetworkCircuitState(Base):
+    """Authoritative persistent circuit breaker state per (route_id, service_category)."""
+
+    __tablename__ = "network_circuit_states"
+
+    route_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("network_routes.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    service_category: Mapped[str] = mapped_column(String(50), primary_key=True)
+    state: Mapped[str] = mapped_column(String(50), nullable=False, default="CLOSED", index=True)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    half_open_successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    opened_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cooldown_until: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_failure_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_success_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    half_open_lease_token: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    half_open_lease_expires_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    route: Mapped[NetworkRoute] = relationship("NetworkRoute", back_populates="circuit_states")
+
+    def __repr__(self) -> str:
+        return f"<NetworkCircuitState route={self.route_id} cat={self.service_category} state={self.state}>"
+
+
+class NetworkCheck(Base):
+    """Authoritative preflight evaluation event binding exact pinned configurations."""
+
+    __tablename__ = "network_checks"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    route_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("network_routes.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    route_config_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    route_config_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("network_policies.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    policy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    policy_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    service_category: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    canonical_destination: Mapped[str] = mapped_column(String(500), nullable=False, index=True)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING", index=True)
+    started_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    route: Mapped[NetworkRoute] = relationship("NetworkRoute", back_populates="checks")
+    policy: Mapped[NetworkPolicy] = relationship("NetworkPolicy", back_populates="checks")
+    decision: Mapped[NetworkDecision | None] = relationship(
+        "NetworkDecision", back_populates="check", uselist=False
+    )
+    probe_runs: Mapped[list[NetworkProbeRun]] = relationship(
+        "NetworkProbeRun", back_populates="check"
+    )
+
+    def __repr__(self) -> str:
+        return f"<NetworkCheck id={self.id} dest={self.canonical_destination} status={self.status}>"
+
+
+class NetworkProbeRun(Base):
+    """Evidence record of an individual probe step executed during a NetworkCheck."""
+
+    __tablename__ = "network_probe_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    check_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("network_checks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    probe_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False)
+    latency_ms: Mapped[float] = mapped_column(Float, nullable=False)
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    check: Mapped[NetworkCheck] = relationship("NetworkCheck", back_populates="probe_runs")
+
+    def __repr__(self) -> str:
+        return f"<NetworkProbeRun id={self.id} probe={self.probe_type} status={self.status}>"
+
+
+class NetworkDecision(Base):
+    """Immutable authoritative decision event for a NetworkCheck. Exactly one decision per check."""
+
+    __tablename__ = "network_decisions"
+    __table_args__ = (UniqueConstraint("network_check_id", name="uq_network_decision_check"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    network_check_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("network_checks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    resulting_health_state: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False, default="NETWORK_MANAGER")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    check: Mapped[NetworkCheck] = relationship("NetworkCheck", back_populates="decision")
+
+    def __repr__(self) -> str:
+        return f"<NetworkDecision id={self.id} check={self.network_check_id} action={self.action}>"
+
+
+class NetworkCircuitTransition(Base):
+    """Immutable append-only audit trail of circuit state transitions."""
+
+    __tablename__ = "network_circuit_transitions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    route_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("network_routes.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    service_category: Mapped[str] = mapped_column(String(50), nullable=False)
+    from_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    to_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    trigger_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<NetworkCircuitTransition {self.from_state} -> {self.to_state}>"
