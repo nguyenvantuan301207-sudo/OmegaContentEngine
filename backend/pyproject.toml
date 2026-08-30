@@ -19,6 +19,7 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "structlog>=24.0.0",
     "httpx>=0.27.0",
+    "cryptography>=43.0.0",
 ]
 
 [project.optional-dependencies]
@@ -45,6 +46,18 @@ pythonpath = ["src"]
 src = ["src", "tests"]
 target-version = "py312"
 line-length = 100
+extend-exclude = [
+    "alembic/versions/001_*.py",
+    "alembic/versions/002_*.py",
+    "alembic/versions/003_*.py",
+    "alembic/versions/004_*.py",
+    "alembic/versions/005_*.py",
+    "alembic/versions/006_*.py",
+    "alembic/versions/007_*.py",
+    "alembic/versions/008_*.py",
+    "alembic/versions/009_*.py",
+    "alembic/versions/010_*.py",
+]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W", "UP", "B", "SIM"]

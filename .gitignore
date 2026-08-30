@@ -55,3 +55,4 @@ docker-compose.override.yml
 .DS_Store
 Thumbs.db
 backend/celerybeat-schedule*
+backend/data/

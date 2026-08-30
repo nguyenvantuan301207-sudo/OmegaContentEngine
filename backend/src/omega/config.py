@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     # ── Worker health ──
     worker_health_timeout: float = 3.0
 
+    # ── OMEGA-011 Publisher & Vault ──
+    omega_secret_encryption_key: str | None = None
+    google_client_id: str | None = None
+    google_client_secret: str | None = None
+    google_redirect_uri: str = "http://localhost:8000/api/v1/publisher/accounts/youtube/callback"
+    media_storage_root: str = "storage/media"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, v: object) -> list[str]:

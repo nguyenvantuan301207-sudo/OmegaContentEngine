@@ -39,3 +39,21 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 
     async with AsyncSessionLocal() as session:
         yield session
+
+
+@pytest.fixture
+def publisher_test_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Inject deterministic test-only Publisher secrets into environment."""
+    monkeypatch.setenv(
+        "OMEGA_SECRET_ENCRYPTION_KEY",
+        "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=",
+    )
+    monkeypatch.setenv("GOOGLE_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+    monkeypatch.setenv("GOOGLE_CLIENT_SECRET", "test-client-secret")
+    monkeypatch.setenv(
+        "GOOGLE_REDIRECT_URI",
+        "http://localhost:8000/api/v1/publisher/accounts/youtube/callback",
+    )
+    import omega.infrastructure.vault as vault_module
+
+    monkeypatch.setattr(vault_module, "_default_vault", None)
