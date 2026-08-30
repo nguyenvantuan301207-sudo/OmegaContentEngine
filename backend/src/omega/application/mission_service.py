@@ -322,6 +322,7 @@ async def pause_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
     validate_mission_transition(MissionState(mission.state), MissionState.PAUSED)
     now = datetime.now(UTC)
 
+    mission.guardian_epoch += 1
     mission.state = MissionState.PAUSED.value
     mission.paused_at = now
     mission.updated_at = now
@@ -346,26 +347,128 @@ async def pause_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
             execution_id=execution.id if execution else None,
             decision_type=DecisionType.MISSION_PAUSE.value,
             decision="Pause mission execution",
-            reason="User requested execution pause; no further tasks will be dispatched",
+            reason="User requested execution pause; guardian epoch bumped to invalidate in-flight tasks",
             actor=Actor.USER.value,
         )
     )
 
     await session.commit()
-    logger.info("Mission paused", mission_id=str(mission.id))
+    logger.info("Mission paused", mission_id=str(mission.id), guardian_epoch=mission.guardian_epoch)
     return MissionResponse.model_validate(mission)
 
 
-async def resume_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
-    """Resume a paused mission."""
+async def resume_mission(
+    session: AsyncSession,
+    mission_id: UUID,
+    actor: str = "OPERATOR",
+    reason: str = "Operator requested safe resume",
+) -> MissionResponse | None:
+    """Resume a paused mission using two-phase safe resume protocol."""
+    from uuid import uuid4
+
+    from omega.application.guardian.engine import GuardianEngine
+    from omega.domain.guardian import (
+        CheckTriggerType,
+        GuardianAction,
+        GuardianCheckCreate,
+        GuardianCheckpoint,
+        GuardianGateState,
+        GuardianResolutionType,
+    )
+    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.models import (
+        GuardianCheck,
+        GuardianDecision,
+        GuardianResolutionEvent,
+    )
+
     res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
     mission = res.scalar_one_or_none()
     if not mission:
         return None
 
     validate_mission_transition(MissionState(mission.state), MissionState.RUNNING)
-    now = datetime.now(UTC)
 
+    # 1. Identify which checkpoints caused the block / pause
+    stmt = (
+        select(GuardianCheck.checkpoint, GuardianDecision.id)
+        .join(GuardianDecision, GuardianDecision.guardian_check_id == GuardianCheck.id)
+        .where(
+            GuardianCheck.mission_id == mission_id,
+            GuardianDecision.resulting_gate_state == GuardianGateState.BLOCKED.value,
+        )
+    )
+    blocking_res = await session.execute(stmt)
+    blocking_rows = list(blocking_res.all())
+    blocking_cps = list({GuardianCheckpoint(r[0]) for r in blocking_rows})
+    if not blocking_cps:
+        blocking_cps = [GuardianCheckpoint.PRE_TASK_DISPATCH]
+
+    # Find the latest decision for this mission to link to the resolution event
+    dec_stmt = (
+        select(GuardianDecision.id)
+        .join(GuardianCheck, GuardianCheck.id == GuardianDecision.guardian_check_id)
+        .where(GuardianCheck.mission_id == mission_id)
+        .order_by(GuardianDecision.created_at.desc())
+        .limit(1)
+    )
+    dec_res = await session.execute(dec_stmt)
+    latest_decision_id = dec_res.scalar_one_or_none()
+
+    # 2. Phase 1: Record and commit the resolution action BEFORE running resume re-checks
+    now = datetime.now(UTC)
+    if latest_decision_id:
+        res_event = GuardianResolutionEvent(
+            id=uuid4(),
+            decision_id=latest_decision_id,
+            resolution_type=GuardianResolutionType.OVERRIDE_APPROVED.value,
+            actor=actor,
+            reason=f"Resume requested: {reason}",
+            created_at=now,
+        )
+        session.add(res_event)
+    await session.commit()
+
+    # 3. Phase 2: Run fresh Guardian checks for all blocking checkpoints
+    guardian_engine = GuardianEngine(session_factory=AsyncSessionLocal)
+    for cp in blocking_cps:
+        check_res = await guardian_engine.execute_check(
+            GuardianCheckCreate(
+                mission_id=mission_id,
+                checkpoint=cp,
+                trigger_type=CheckTriggerType.RESUME_RECHECK,
+                diagnostic_context={"resume_recheck": True, "actor": actor, "reason": reason},
+                caller_key=f"resume:{str(uuid4())[:8]}",
+            )
+        )
+        if not check_res.decision or check_res.decision.action not in (
+            GuardianAction.ALLOW,
+            GuardianAction.ALLOW_WITH_WARNING,
+        ):
+            # Record failed resume attempt
+            if latest_decision_id:
+                fail_event = GuardianResolutionEvent(
+                    id=uuid4(),
+                    decision_id=latest_decision_id,
+                    resolution_type=GuardianResolutionType.OVERRIDE_APPROVED.value,
+                    actor=actor,
+                    reason=f"Resume recheck failed at {cp.value}: {check_res.decision.reason if check_res.decision else 'NO_DECISION'}",
+                    created_at=datetime.now(UTC),
+                )
+                session.add(fail_event)
+                await session.commit()
+            raise ValueError(
+                f"Safe resume blocked: checkpoint {cp.value} rejected with {check_res.decision.action.value if check_res.decision else 'NO_DECISION'}."
+            )
+
+    # 4. All rechecks passed: lock Mission and execute state transition under fresh epoch
+    mission_res = await session.execute(
+        select(Mission).where(Mission.id == mission_id).with_for_update()
+    )
+    mission = mission_res.scalar_one()
+
+    now = datetime.now(UTC)
+    mission.guardian_epoch += 1
     mission.state = MissionState.RUNNING.value
     mission.paused_at = None
     mission.updated_at = now
@@ -388,14 +491,16 @@ async def resume_mission(session: AsyncSession, mission_id: UUID) -> MissionResp
             mission_id=mission.id,
             execution_id=execution.id if execution else None,
             decision_type=DecisionType.MISSION_RESUME.value,
-            decision="Resume mission execution",
-            reason="User requested resume; evaluating DAG for next eligible tasks",
-            actor=Actor.USER.value,
+            decision=f"Resume mission execution at epoch {mission.guardian_epoch}",
+            reason=f"All {len(blocking_cps)} blocking checkpoints verified. {reason}",
+            actor=actor,
         )
     )
 
     await session.commit()
-    logger.info("Mission resumed", mission_id=str(mission.id))
+    logger.info(
+        "Mission safely resumed", mission_id=str(mission.id), guardian_epoch=mission.guardian_epoch
+    )
 
     # Trigger orchestrator evaluation
     await evaluate_mission(session, mission.id, execution.id if execution else None)

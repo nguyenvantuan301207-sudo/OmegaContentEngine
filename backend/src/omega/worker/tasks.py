@@ -111,20 +111,65 @@ def execute_task(self, task_id: str) -> dict:
     """
     from omega.application.executor import default_executor_registry
     from omega.domain.decision import Actor, DecisionType
+    from omega.domain.mission import MissionState
     from omega.domain.task import TaskState
     from omega.infrastructure.database_sync import SyncSessionLocal
-    from omega.infrastructure.models import DecisionLog, Task
+    from omega.infrastructure.models import DecisionLog, Mission, Task
 
     logger.info("Executing task", task_id=task_id)
     session = SyncSessionLocal()
     parsed_id = uuid.UUID(str(task_id))
 
     try:
-        # Atomic lock & transition QUEUED -> RUNNING
-        task = session.query(Task).filter(Task.id == parsed_id).with_for_update().first()
-        if not task:
+        # 1. Inspect mission_id for lock hierarchy
+        initial_task = session.query(Task.mission_id).filter(Task.id == parsed_id).first()
+        if not initial_task:
             logger.error("Task not found in database", task_id=task_id)
             return {"status": "error", "message": "Task not found"}
+
+        mission_id = initial_task.mission_id
+
+        # 2. Lock Mission FIRST, Task SECOND
+        mission = session.query(Mission).filter(Mission.id == mission_id).with_for_update().first()
+        task = session.query(Task).filter(Task.id == parsed_id).with_for_update().first()
+
+        if not mission or not task:
+            logger.error("Mission or Task disappeared under lock", task_id=task_id)
+            return {"status": "error", "message": "Record missing under lock"}
+
+        if mission.state != MissionState.RUNNING.value:
+            logger.warning(
+                "Mission not in RUNNING state, refusing execution",
+                task_id=task_id,
+                mission_state=mission.state,
+            )
+            return {"status": "skipped", "reason": "mission_not_running"}
+
+        # Validate fencing token
+        if task.dispatched_epoch is not None and task.dispatched_epoch != mission.guardian_epoch:
+            logger.warning(
+                "Stale task epoch detected. Refusing execution without side effects.",
+                task_id=task_id,
+                dispatched_epoch=task.dispatched_epoch,
+                mission_epoch=mission.guardian_epoch,
+            )
+            session.add(
+                DecisionLog(
+                    mission_id=mission.id,
+                    execution_id=task.execution_id,
+                    task_id=task.id,
+                    decision_type=DecisionType.TASK_FAILED.value,
+                    decision=f"Worker refused stale task '{task.title}'",
+                    reason=f"Epoch mismatch: dispatched={task.dispatched_epoch}, current={mission.guardian_epoch}",
+                    actor=Actor.WORKER.value,
+                )
+            )
+            session.commit()
+            return {
+                "status": "stale_epoch_refused",
+                "dispatched_epoch": task.dispatched_epoch,
+                "current_epoch": mission.guardian_epoch,
+            }
 
         if task.state != TaskState.QUEUED.value:
             logger.warning(
@@ -157,6 +202,7 @@ def execute_task(self, task_id: str) -> dict:
 
         # Mark SUCCEEDED under lock
         now = datetime.now(UTC)
+        mission = session.query(Mission).filter(Mission.id == mission_id).with_for_update().first()
         task = session.query(Task).filter(Task.id == parsed_id).with_for_update().first()
         if task:
             task.state = TaskState.SUCCEEDED.value
@@ -199,6 +245,9 @@ def execute_task(self, task_id: str) -> dict:
 
         try:
             now = datetime.now(UTC)
+            mission = (
+                session.query(Mission).filter(Mission.id == mission_id).with_for_update().first()
+            )
             task = session.query(Task).filter(Task.id == parsed_id).with_for_update().first()
             if task:
                 if task.retry_count < task.max_retries:
@@ -313,3 +362,23 @@ def execute_production_render_task(
     except Exception as exc:
         logger.error("Background render task failed", job_id=job_id, exc_info=True)
         return {"status": "failed", "error": _sanitize_task_error(exc)}
+
+
+@celery_app.task(name="omega.guardian.process_alert_outbox")
+def process_guardian_alert_outbox() -> dict[str, int]:
+    """Process pending alerts from the transactional guardian outbox."""
+    import asyncio
+
+    from omega.application.guardian.outbox import AlertOutboxService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> int:
+        async with AsyncSessionLocal() as session:
+            return await AlertOutboxService.process_outbox_items(session)
+
+    try:
+        processed = asyncio.run(_run())
+        return {"status": "success", "processed": processed}
+    except Exception as exc:
+        logger.error("Failed to process guardian alert outbox", error=str(exc), exc_info=True)
+        return {"status": "error", "processed": 0}

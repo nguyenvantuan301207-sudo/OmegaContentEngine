@@ -17,6 +17,7 @@ import {
   startMission,
   Task,
 } from "@/lib/api";
+import { GuardianPanel } from "@/components/guardian/GuardianPanel";
 
 const STATE_COLORS: Record<string, string> = {
   DRAFT: "bg-zinc-700 text-zinc-300 border-zinc-600",
@@ -229,6 +230,13 @@ export default function MissionDetailPage({
             {error}
           </div>
         )}
+
+        {/* OMEGA-008 Guardian Subsystem Panel */}
+        <GuardianPanel
+          missionId={mission.id}
+          isPaused={mission.state === "PAUSED"}
+          onStateChanged={fetchData}
+        />
 
         {/* Main Content Grid: Tasks DAG & Decision Log */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">

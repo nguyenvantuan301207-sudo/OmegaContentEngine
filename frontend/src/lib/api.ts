@@ -1573,5 +1573,173 @@ export async function getProductionQAResult(channelId: string, requestId: string
   return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/qa`);
 }
 
+// ── OMEGA-008 Guardian Subsystem Types & API ──
+
+export type GuardianGateState = "OPEN" | "RESTRICTED" | "BLOCKED" | "WAITING_GUARDIAN";
+export type GuardianAction = "ALLOW" | "ALLOW_WITH_WARNING" | "PAUSE" | "REQUIRE_REVIEW" | "FORCE_FAIL";
+
+export interface GuardianFinding {
+  id: string;
+  guardian_check_id: string;
+  detector_run_id: string;
+  detector_type: string;
+  detector_version: string;
+  rule_id: string;
+  severity: string;
+  risk_type: string;
+  confidence: number;
+  evidence: Record<string, unknown>;
+  location_reference: Record<string, unknown>;
+  message: string;
+  created_at: string;
+}
+
+export interface GuardianDetectorRun {
+  id: string;
+  guardian_check_id: string;
+  detector_type: string;
+  detector_version: string;
+  status: string;
+  failure_policy: string;
+  attempt: number;
+  max_attempts: number;
+  idempotency_key: string;
+  error_data?: Record<string, unknown>;
+  started_at: string;
+  completed_at?: string;
+  created_at: string;
+}
+
+export interface GuardianDecision {
+  id: string;
+  guardian_check_id: string;
+  action: GuardianAction;
+  reason: string;
+  resulting_gate_state: GuardianGateState;
+  actor: string;
+  created_at: string;
+}
+
+export interface GuardianCheck {
+  id: string;
+  mission_id: string;
+  task_id?: string;
+  production_request_id?: string;
+  media_artifact_id?: string;
+  trigger_type: string;
+  checkpoint: string;
+  ruleset_id: string;
+  ruleset_version: string;
+  ruleset_checksum: string;
+  status: string;
+  idempotency_key: string;
+  guardian_epoch: number;
+  diagnostic_context: Record<string, unknown>;
+  started_at: string;
+  completed_at?: string;
+  created_at: string;
+  decision?: GuardianDecision;
+  findings: GuardianFinding[];
+  detector_runs: GuardianDetectorRun[];
+}
+
+export interface GuardianConsolidatedStatus {
+  mission_id: string;
+  guardian_epoch: number;
+  overall_gate_state: GuardianGateState;
+  checkpoint_states: Record<string, GuardianGateState>;
+  blocking_checkpoints: string[];
+  open_findings_count: number;
+  accumulated_cost_usd: number;
+  budget_ceiling_usd: number;
+  remaining_budget_usd: number;
+}
+
+export interface GuardianException {
+  id: string;
+  rule_id?: string;
+  risk_type?: string;
+  channel_id?: string;
+  mission_id?: string;
+  expires_at: string;
+  created_by: string;
+  created_reason: string;
+  revoked_at?: string;
+  revoked_by?: string;
+  revocation_reason?: string;
+  is_active: boolean;
+  created_at: string;
+}
+
+export interface CostRecord {
+  id: string;
+  mission_id: string;
+  task_id?: string;
+  production_request_id?: string;
+  cost_type: string;
+  amount_usd: number;
+  units: number;
+  source_type: string;
+  source_id: string;
+  idempotency_key: string;
+  recorded_at: string;
+  created_at: string;
+}
+
+export async function getMissionGuardianStatus(missionId: string): Promise<GuardianConsolidatedStatus> {
+  return apiFetch(`/api/v1/guardian/missions/${missionId}/status`);
+}
+
+export async function listMissionGuardianChecks(missionId: string): Promise<GuardianCheck[]> {
+  return apiFetch(`/api/v1/guardian/missions/${missionId}/checks`);
+}
+
+export async function listGuardianExceptions(activeOnly = true): Promise<GuardianException[]> {
+  return apiFetch(`/api/v1/guardian/exceptions?active_only=${activeOnly}`);
+}
+
+export async function createGuardianException(payload: {
+  rule_id?: string;
+  risk_type?: string;
+  channel_id?: string;
+  mission_id?: string;
+  expires_at: string;
+  created_by: string;
+  created_reason: string;
+}): Promise<GuardianException> {
+  return apiFetch(`/api/v1/guardian/exceptions`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function revokeGuardianException(
+  exceptionId: string,
+  revokedBy: string,
+  revocationReason: string,
+): Promise<GuardianException> {
+  return apiFetch(`/api/v1/guardian/exceptions/${exceptionId}/revoke`, {
+    method: "POST",
+    body: JSON.stringify({ revoked_by: revokedBy, revocation_reason: revocationReason }),
+  });
+}
+
+export async function triggerSafeResume(
+  missionId: string,
+  actor = "OPERATOR",
+  reason = "Safe resume triggered via Dashboard",
+): Promise<Mission> {
+  return apiFetch(
+    `/api/v1/guardian/missions/${missionId}/resume?actor=${encodeURIComponent(actor)}&reason=${encodeURIComponent(reason)}`,
+    {
+      method: "POST",
+    },
+  );
+}
+
+export async function listMissionCosts(missionId: string): Promise<CostRecord[]> {
+  return apiFetch(`/api/v1/guardian/missions/${missionId}/costs`);
+}
+
 
 

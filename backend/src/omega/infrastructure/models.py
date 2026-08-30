@@ -9,15 +9,18 @@ ResearchConflicts, and ResearchBriefs.
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -115,6 +118,9 @@ class Channel(Base):
     production_assets: Mapped[list[ProductionAsset]] = relationship(
         "ProductionAsset", back_populates="channel", cascade="all, delete-orphan"
     )
+    guardian_exceptions: Mapped[list[GuardianException]] = relationship(
+        "GuardianException", back_populates="channel"
+    )
 
     def __repr__(self) -> str:
         return f"<Channel id={self.id} slug={self.slug!r} state={self.state}>"
@@ -188,6 +194,7 @@ class Mission(Base):
     paused_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cancelled_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    guardian_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
 
     channel: Mapped[Channel | None] = relationship("Channel", back_populates="missions")
     executions: Mapped[list[MissionExecution]] = relationship(
@@ -199,6 +206,13 @@ class Mission(Base):
     decision_logs: Mapped[list[DecisionLog]] = relationship(
         "DecisionLog", back_populates="mission", cascade="all, delete-orphan"
     )
+    guardian_checks: Mapped[list[GuardianCheck]] = relationship(
+        "GuardianCheck", back_populates="mission"
+    )
+    guardian_state_transitions: Mapped[list[GuardianStateTransition]] = relationship(
+        "GuardianStateTransition", back_populates="mission"
+    )
+    cost_records: Mapped[list[CostRecord]] = relationship("CostRecord", back_populates="mission")
 
     def __repr__(self) -> str:
         return f"<Mission id={self.id} title={self.title!r} state={self.state}>"
@@ -290,11 +304,16 @@ class Task(Base):
     queued_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dispatched_epoch: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     mission: Mapped[Mission] = relationship("Mission", back_populates="tasks")
     execution: Mapped[MissionExecution | None] = relationship(
         "MissionExecution", back_populates="tasks"
     )
+    guardian_checks: Mapped[list[GuardianCheck]] = relationship(
+        "GuardianCheck", back_populates="task"
+    )
+    cost_records: Mapped[list[CostRecord]] = relationship("CostRecord", back_populates="task")
 
     upstream_dependencies: Mapped[list[TaskDependency]] = relationship(
         "TaskDependency",
@@ -1454,6 +1473,12 @@ class ProductionRequest(Base):
         cascade="all, delete-orphan",
         order_by="ProductionQAResult.executed_at.desc()",
     )
+    guardian_checks: Mapped[list[GuardianCheck]] = relationship(
+        "GuardianCheck", back_populates="production_request"
+    )
+    cost_records: Mapped[list[CostRecord]] = relationship(
+        "CostRecord", back_populates="production_request"
+    )
 
     def __repr__(self) -> str:
         return f"<ProductionRequest id={self.id} channel_id={self.channel_id} status={self.status}>"
@@ -1871,6 +1896,9 @@ class MediaArtifact(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    guardian_checks: Mapped[list[GuardianCheck]] = relationship(
+        "GuardianCheck", back_populates="media_artifact"
+    )
 
     def __repr__(self) -> str:
         return f"<MediaArtifact id={self.id} type={self.artifact_type} v={self.version} current={self.is_current}>"
@@ -1911,3 +1939,469 @@ class ProductionQAResult(Base):
         return (
             f"<ProductionQAResult id={self.id} artifact_id={self.artifact_id} status={self.status}>"
         )
+
+
+# ── OMEGA-008 QA + Guardian Subsystem Models ──
+
+
+class GuardianRuleSet(Base):
+    """Versioned rule configuration for Guardian subsystem."""
+
+    __tablename__ = "guardian_rulesets"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    version: Mapped[str] = mapped_column(String(50), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="DRAFT", index=True)
+    effective_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    rules_config: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    checks: Mapped[list[GuardianCheck]] = relationship("GuardianCheck", back_populates="ruleset")
+
+    def __repr__(self) -> str:
+        return f"<GuardianRuleSet version={self.version} status={self.status}>"
+
+
+class GuardianCheck(Base):
+    """Authoritative evaluation event at a protected workflow checkpoint."""
+
+    __tablename__ = "guardian_checks"
+    __table_args__ = (
+        UniqueConstraint(
+            "mission_id", "checkpoint", "idempotency_key", name="uq_guardian_check_idempotency"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    production_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    media_artifact_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("media_artifacts.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    trigger_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    checkpoint: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    ruleset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_rulesets.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    ruleset_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    ruleset_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    guardian_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    diagnostic_context: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    started_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    mission: Mapped[Mission] = relationship("Mission", back_populates="guardian_checks")
+    task: Mapped[Task | None] = relationship("Task", back_populates="guardian_checks")
+    production_request: Mapped[ProductionRequest | None] = relationship(
+        "ProductionRequest", back_populates="guardian_checks"
+    )
+    media_artifact: Mapped[MediaArtifact | None] = relationship(
+        "MediaArtifact", back_populates="guardian_checks"
+    )
+    ruleset: Mapped[GuardianRuleSet] = relationship("GuardianRuleSet", back_populates="checks")
+    decision: Mapped[GuardianDecision | None] = relationship(
+        "GuardianDecision", back_populates="check", uselist=False
+    )
+    findings: Mapped[list[GuardianFinding]] = relationship(
+        "GuardianFinding", back_populates="check"
+    )
+    detector_runs: Mapped[list[GuardianDetectorRun]] = relationship(
+        "GuardianDetectorRun", back_populates="check"
+    )
+
+    def __repr__(self) -> str:
+        return f"<GuardianCheck id={self.id} checkpoint={self.checkpoint} status={self.status}>"
+
+
+class GuardianDetectorRun(Base):
+    """Lifecycle and execution tracking for an individual detector within a check."""
+
+    __tablename__ = "guardian_detector_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "guardian_check_id",
+            "detector_type",
+            "detector_version",
+            name="uq_guardian_detector_run",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    guardian_check_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_checks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    detector_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    detector_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING", index=True)
+    failure_policy: Mapped[str] = mapped_column(String(50), nullable=False)
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    error_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    started_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    check: Mapped[GuardianCheck] = relationship("GuardianCheck", back_populates="detector_runs")
+    findings: Mapped[list[GuardianFinding]] = relationship(
+        "GuardianFinding", back_populates="detector_run"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<GuardianDetectorRun id={self.id} detector={self.detector_type} status={self.status}>"
+        )
+
+
+class GuardianFinding(Base):
+    """Immutable finding emitted by a detector run."""
+
+    __tablename__ = "guardian_findings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    guardian_check_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_checks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    detector_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_detector_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    detector_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    detector_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    rule_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    severity: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    risk_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    evidence: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    location_reference: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    check: Mapped[GuardianCheck] = relationship("GuardianCheck", back_populates="findings")
+    detector_run: Mapped[GuardianDetectorRun] = relationship(
+        "GuardianDetectorRun", back_populates="findings"
+    )
+    decision_associations: Mapped[list[GuardianDecisionFinding]] = relationship(
+        "GuardianDecisionFinding", back_populates="finding"
+    )
+    resolution_events: Mapped[list[GuardianResolutionEvent]] = relationship(
+        "GuardianResolutionEvent", back_populates="finding"
+    )
+
+    def __repr__(self) -> str:
+        return f"<GuardianFinding id={self.id} rule={self.rule_id} severity={self.severity}>"
+
+
+class GuardianDecision(Base):
+    """Immutable authoritative decision event for a GuardianCheck. Exactly one decision per check."""
+
+    __tablename__ = "guardian_decisions"
+    __table_args__ = (UniqueConstraint("guardian_check_id", name="uq_guardian_decision_check"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    guardian_check_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_checks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    action: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    resulting_gate_state: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False, default="GUARDIAN_ENGINE")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    check: Mapped[GuardianCheck] = relationship("GuardianCheck", back_populates="decision")
+    finding_associations: Mapped[list[GuardianDecisionFinding]] = relationship(
+        "GuardianDecisionFinding", back_populates="decision"
+    )
+    resolution_events: Mapped[list[GuardianResolutionEvent]] = relationship(
+        "GuardianResolutionEvent", back_populates="decision"
+    )
+
+    def __repr__(self) -> str:
+        return f"<GuardianDecision id={self.id} check_id={self.guardian_check_id} action={self.action}>"
+
+
+class GuardianDecisionFinding(Base):
+    """Association table linking decisions to findings and applied exceptions."""
+
+    __tablename__ = "guardian_decision_findings"
+
+    decision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_decisions.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    finding_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_findings.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    applied_exception_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_exceptions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+
+    decision: Mapped[GuardianDecision] = relationship(
+        "GuardianDecision", back_populates="finding_associations"
+    )
+    finding: Mapped[GuardianFinding] = relationship(
+        "GuardianFinding", back_populates="decision_associations"
+    )
+    applied_exception: Mapped[GuardianException | None] = relationship("GuardianException")
+
+
+class GuardianResolutionEvent(Base):
+    """Append-only audit event recording operator actions on findings or decisions."""
+
+    __tablename__ = "guardian_resolution_events"
+    __table_args__ = (
+        CheckConstraint(
+            "finding_id IS NOT NULL OR decision_id IS NOT NULL", name="ck_resolution_target"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    finding_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_findings.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    decision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_decisions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    resolution_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    actor: Mapped[str] = mapped_column(String(100), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    finding: Mapped[GuardianFinding | None] = relationship(
+        "GuardianFinding", back_populates="resolution_events"
+    )
+    decision: Mapped[GuardianDecision | None] = relationship(
+        "GuardianDecision", back_populates="resolution_events"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<GuardianResolutionEvent id={self.id} type={self.resolution_type} actor={self.actor}>"
+        )
+
+
+class GuardianException(Base):
+    """Scoped, auditable policy or rule exception with append-only revocation metadata."""
+
+    __tablename__ = "guardian_exceptions"
+    __table_args__ = (
+        CheckConstraint("rule_id IS NOT NULL OR risk_type IS NOT NULL", name="ck_exception_scope"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    rule_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    risk_type: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    mission_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    expires_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    created_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    revoked_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    revoked_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    revocation_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    channel: Mapped[Channel | None] = relationship("Channel", back_populates="guardian_exceptions")
+    mission: Mapped[Mission | None] = relationship("Mission")
+
+    def __repr__(self) -> str:
+        return f"<GuardianException id={self.id} rule={self.rule_id} revoked={self.revoked_at is not None}>"
+
+
+class GuardianAlertOutbox(Base):
+    """Transactional outbox for alerts generated by Guardian decisions."""
+
+    __tablename__ = "guardian_alert_outbox"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    guardian_check_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_checks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    decision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_decisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    channel: Mapped[str] = mapped_column(String(50), nullable=False)
+    destination: Mapped[str] = mapped_column(String(255), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True, index=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="PENDING", index=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scheduled_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    sent_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    check: Mapped[GuardianCheck] = relationship("GuardianCheck")
+    decision: Mapped[GuardianDecision] = relationship("GuardianDecision")
+
+    def __repr__(self) -> str:
+        return f"<GuardianAlertOutbox id={self.id} status={self.status} channel={self.channel}>"
+
+
+class CostRecord(Base):
+    """Idempotent operational resource cost tracking."""
+
+    __tablename__ = "cost_records"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    production_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("production_requests.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    cost_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    units: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    source_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(255), nullable=False, unique=True, index=True
+    )
+    recorded_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    mission: Mapped[Mission] = relationship("Mission", back_populates="cost_records")
+    task: Mapped[Task | None] = relationship("Task", back_populates="cost_records")
+    production_request: Mapped[ProductionRequest | None] = relationship(
+        "ProductionRequest", back_populates="cost_records"
+    )
+
+    def __repr__(self) -> str:
+        return f"<CostRecord id={self.id} type={self.cost_type} amount={self.amount_usd}>"
+
+
+class GuardianStateTransition(Base):
+    """Audit log of gate state transitions."""
+
+    __tablename__ = "guardian_state_transitions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    checkpoint: Mapped[str] = mapped_column(String(50), nullable=False)
+    from_gate_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    to_gate_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    decision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("guardian_decisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    guardian_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    mission: Mapped[Mission] = relationship("Mission", back_populates="guardian_state_transitions")
+    decision: Mapped[GuardianDecision] = relationship("GuardianDecision")
+
+    def __repr__(self) -> str:
+        return f"<GuardianStateTransition {self.from_gate_state} -> {self.to_gate_state} epoch={self.guardian_epoch}>"

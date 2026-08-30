@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
+import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from sqlalchemy import select
@@ -44,6 +45,8 @@ from omega.infrastructure.models import (
     RenderPlan,
     SubtitleCue,
 )
+
+logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1/channels/{channel_id}/production", tags=["Production Engine"])
 
@@ -317,7 +320,8 @@ async def render_production(
                 job_id=job.id,
             )
             await session.refresh(job)
-        except Exception:
+        except Exception as exc:
+            logger.error("Render failed synchronously", error=str(exc), exc_info=True)
             await session.refresh(job)
 
     return job

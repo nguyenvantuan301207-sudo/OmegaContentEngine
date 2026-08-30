@@ -148,9 +148,77 @@ async def evaluate_mission(
                     task.state = TaskState.READY.value
                     task.updated_at = now
 
+    # Commit initial task readiness and DAG evaluation updates before running decoupled Guardian check
+    await session.commit()
+
     # 5. Determine tasks to dispatch based on Autonomy Level
     tasks_to_dispatch: list[Task] = []
     autonomy = mission.autonomy_level
+
+    ready_tasks = [t for t in tasks if t.state == TaskState.READY.value]
+    if ready_tasks:
+        # Check Guardian gate at PRE_TASK_DISPATCH
+        try:
+            from omega.application.guardian.engine import GuardianEngine
+            from omega.domain.guardian import (
+                CheckTriggerType,
+                GuardianAction,
+                GuardianCheckCreate,
+                GuardianCheckpoint,
+            )
+            from omega.infrastructure.database import AsyncSessionLocal
+
+            guardian_engine = GuardianEngine(session_factory=AsyncSessionLocal)
+            check_res = await guardian_engine.execute_check(
+                GuardianCheckCreate(
+                    mission_id=mission_id,
+                    checkpoint=GuardianCheckpoint.PRE_TASK_DISPATCH,
+                    trigger_type=CheckTriggerType.PRE_TASK_DISPATCH,
+                    diagnostic_context={"autonomy_level": autonomy},
+                )
+            )
+
+            if check_res.decision and check_res.decision.action not in (
+                GuardianAction.ALLOW,
+                GuardianAction.ALLOW_WITH_WARNING,
+            ):
+                logger.warning(
+                    "Guardian gate held at PRE_TASK_DISPATCH",
+                    mission_id=str(mission_id),
+                    action=check_res.decision.action.value,
+                    gate_state=check_res.decision.resulting_gate_state.value,
+                    reason=check_res.decision.reason,
+                )
+                return {
+                    "status": "held_by_guardian",
+                    "mission_id": str(mission_id),
+                    "action": check_res.decision.action.value,
+                    "gate_state": check_res.decision.resulting_gate_state.value,
+                    "reason": check_res.decision.reason,
+                }
+        except Exception as exc:
+            logger.error(
+                "Guardian subsystem unavailable at PRE_TASK_DISPATCH. Holding execution.",
+                mission_id=str(mission_id),
+                error=str(exc),
+                exc_info=True,
+            )
+            return {
+                "status": "waiting_guardian",
+                "mission_id": str(mission_id),
+                "gate_state": "WAITING_GUARDIAN",
+                "reason": "Guardian subsystem unreachable at protected boundary",
+            }
+
+    # Re-acquire short lock for task dispatch phase
+    mission_res = await session.execute(
+        select(Mission).where(Mission.id == mission_id).with_for_update()
+    )
+    mission = mission_res.scalar_one()
+    tasks_res = await session.execute(
+        select(Task).where(Task.mission_id == mission_id).with_for_update()
+    )
+    tasks = list(tasks_res.scalars().all())
 
     for task in tasks:
         if task.state == TaskState.READY.value:
@@ -163,6 +231,7 @@ async def evaluate_mission(
 
             if should_dispatch:
                 task.state = TaskState.QUEUED.value
+                task.dispatched_epoch = mission.guardian_epoch
                 task.queued_at = now
                 task.updated_at = now
                 tasks_to_dispatch.append(task)
@@ -278,14 +347,83 @@ async def evaluate_mission(
         logger.info("Mission marked as FAILED", mission_id=str(mission_id))
 
     elif all_succeeded and not has_active_tasks:
+        # Protected boundary: MISSION_TERMINAL Guardian gate
+        try:
+            from omega.application.guardian.engine import GuardianEngine
+            from omega.domain.guardian import (
+                CheckTriggerType,
+                GuardianAction,
+                GuardianCheckCreate,
+                GuardianCheckpoint,
+            )
+            from omega.infrastructure.database import AsyncSessionLocal
+
+            # Commit current transaction to release row locks before Guardian check
+            await session.commit()
+
+            guardian_engine = GuardianEngine(session_factory=AsyncSessionLocal)
+            terminal_check = await guardian_engine.execute_check(
+                GuardianCheckCreate(
+                    mission_id=mission_id,
+                    checkpoint=GuardianCheckpoint.MISSION_TERMINAL,
+                    trigger_type=CheckTriggerType.MISSION_TERMINAL,
+                    diagnostic_context={"all_tasks_succeeded": True},
+                )
+            )
+
+            if terminal_check.decision and terminal_check.decision.action not in (
+                GuardianAction.ALLOW,
+                GuardianAction.ALLOW_WITH_WARNING,
+            ):
+                logger.warning(
+                    "Guardian gate held at MISSION_TERMINAL",
+                    mission_id=str(mission_id),
+                    action=terminal_check.decision.action.value,
+                    gate_state=terminal_check.decision.resulting_gate_state.value,
+                    reason=terminal_check.decision.reason,
+                )
+                return {
+                    "status": "held_by_guardian",
+                    "mission_id": str(mission_id),
+                    "action": terminal_check.decision.action.value,
+                    "gate_state": terminal_check.decision.resulting_gate_state.value,
+                    "reason": terminal_check.decision.reason,
+                }
+        except Exception as exc:
+            logger.error(
+                "Guardian subsystem unavailable at MISSION_TERMINAL. Holding terminal transition.",
+                mission_id=str(mission_id),
+                error=str(exc),
+                exc_info=True,
+            )
+            return {
+                "status": "waiting_guardian",
+                "mission_id": str(mission_id),
+                "gate_state": "WAITING_GUARDIAN",
+                "reason": "Guardian subsystem unreachable at terminal protected boundary",
+            }
+
+        # Re-acquire lock to perform terminal state transition
+        m_term_res = await session.execute(
+            select(Mission).where(Mission.id == mission_id).with_for_update()
+        )
+        mission_to_update = m_term_res.scalar_one()
+
         mission_to_update.state = MissionState.SUCCEEDED.value
         mission_to_update.completed_at = datetime.now(UTC)
         mission_to_update.updated_at = datetime.now(UTC)
 
         if active_execution:
-            active_execution.state = ExecutionState.SUCCEEDED.value
-            active_execution.completed_at = datetime.now(UTC)
-            active_execution.updated_at = datetime.now(UTC)
+            exec_res = await session.execute(
+                select(MissionExecution)
+                .where(MissionExecution.id == active_execution.id)
+                .with_for_update()
+            )
+            active_exec_locked = exec_res.scalar_one_or_none()
+            if active_exec_locked:
+                active_exec_locked.state = ExecutionState.SUCCEEDED.value
+                active_exec_locked.completed_at = datetime.now(UTC)
+                active_exec_locked.updated_at = datetime.now(UTC)
 
         session.add(
             DecisionLog(
@@ -293,7 +431,7 @@ async def evaluate_mission(
                 execution_id=current_execution_id,
                 decision_type=DecisionType.MISSION_COMPLETE.value,
                 decision="Mark mission SUCCEEDED",
-                reason="All DAG tasks in active execution completed successfully",
+                reason="All DAG tasks completed and passed MISSION_TERMINAL Guardian check",
                 actor=Actor.ORCHESTRATOR.value,
             )
         )
@@ -408,9 +546,84 @@ def evaluate_mission_sync(
                     task.state = TaskState.READY.value
                     task.updated_at = now
 
+    # Commit initial task readiness and DAG evaluation updates before running decoupled Guardian check
+    session.commit()
+
     # 5. Determine tasks to dispatch
     tasks_to_dispatch: list[Task] = []
     autonomy = mission.autonomy_level
+
+    ready_tasks = [t for t in tasks if t.state == TaskState.READY.value]
+    if ready_tasks:
+        try:
+            import asyncio
+
+            from omega.application.guardian.engine import GuardianEngine
+            from omega.domain.guardian import (
+                CheckTriggerType,
+                GuardianAction,
+                GuardianCheckCreate,
+                GuardianCheckpoint,
+            )
+
+            async def _run_sync_guardian_check() -> Any:
+                from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+                from sqlalchemy.pool import NullPool
+
+                from omega.config import get_settings
+
+                settings = get_settings()
+                temp_engine = create_async_engine(settings.database_url, poolclass=NullPool)
+                temp_session_factory = async_sessionmaker(temp_engine, expire_on_commit=False)
+                try:
+                    engine = GuardianEngine(session_factory=temp_session_factory)
+                    return await engine.execute_check(
+                        GuardianCheckCreate(
+                            mission_id=mission_id,
+                            checkpoint=GuardianCheckpoint.PRE_TASK_DISPATCH,
+                            trigger_type=CheckTriggerType.PRE_TASK_DISPATCH,
+                            diagnostic_context={"autonomy_level": autonomy, "sync_worker": True},
+                        )
+                    )
+                finally:
+                    await temp_engine.dispose()
+
+            check_res = asyncio.run(_run_sync_guardian_check())
+            if check_res.decision and check_res.decision.action not in (
+                GuardianAction.ALLOW,
+                GuardianAction.ALLOW_WITH_WARNING,
+            ):
+                logger.warning(
+                    "Guardian gate held at PRE_TASK_DISPATCH (sync)",
+                    mission_id=str(mission_id),
+                    action=check_res.decision.action.value,
+                    gate_state=check_res.decision.resulting_gate_state.value,
+                    reason=check_res.decision.reason,
+                )
+                return {
+                    "status": "held_by_guardian",
+                    "mission_id": str(mission_id),
+                    "action": check_res.decision.action.value,
+                    "gate_state": check_res.decision.resulting_gate_state.value,
+                    "reason": check_res.decision.reason,
+                }
+        except Exception as exc:
+            logger.error(
+                "Guardian subsystem unavailable at PRE_TASK_DISPATCH (sync). Holding execution.",
+                mission_id=str(mission_id),
+                error=str(exc),
+                exc_info=True,
+            )
+            return {
+                "status": "waiting_guardian",
+                "mission_id": str(mission_id),
+                "gate_state": "WAITING_GUARDIAN",
+                "reason": "Guardian subsystem unreachable at protected boundary",
+            }
+
+    # Re-acquire lock for task dispatch phase
+    mission = session.query(Mission).filter(Mission.id == mission_id).with_for_update().first()
+    tasks = session.query(Task).filter(Task.mission_id == mission_id).with_for_update().all()
 
     for task in tasks:
         if task.state == TaskState.READY.value:
@@ -423,6 +636,7 @@ def evaluate_mission_sync(
 
             if should_dispatch:
                 task.state = TaskState.QUEUED.value
+                task.dispatched_epoch = mission.guardian_epoch
                 task.queued_at = now
                 task.updated_at = now
                 tasks_to_dispatch.append(task)
@@ -524,14 +738,93 @@ def evaluate_mission_sync(
         logger.info("Mission marked as FAILED (sync)", mission_id=str(mission_id))
 
     elif all_succeeded and not has_active_tasks:
+        try:
+            import asyncio
+
+            from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+            from sqlalchemy.pool import NullPool
+
+            from omega.application.guardian.engine import GuardianEngine
+            from omega.config import get_settings
+            from omega.domain.guardian import (
+                CheckTriggerType,
+                GuardianAction,
+                GuardianCheckCreate,
+                GuardianCheckpoint,
+            )
+
+            session.commit()
+
+            async def _run_sync_terminal_guardian_check() -> Any:
+                settings = get_settings()
+                temp_engine = create_async_engine(settings.database_url, poolclass=NullPool)
+                temp_session_factory = async_sessionmaker(temp_engine, expire_on_commit=False)
+                try:
+                    engine = GuardianEngine(session_factory=temp_session_factory)
+                    return await engine.execute_check(
+                        GuardianCheckCreate(
+                            mission_id=mission_id,
+                            checkpoint=GuardianCheckpoint.MISSION_TERMINAL,
+                            trigger_type=CheckTriggerType.MISSION_TERMINAL,
+                            diagnostic_context={"all_tasks_succeeded": True, "sync_worker": True},
+                        )
+                    )
+                finally:
+                    await temp_engine.dispose()
+
+            terminal_check = asyncio.run(_run_sync_terminal_guardian_check())
+            if terminal_check.decision and terminal_check.decision.action not in (
+                GuardianAction.ALLOW,
+                GuardianAction.ALLOW_WITH_WARNING,
+            ):
+                logger.warning(
+                    "Guardian gate held at MISSION_TERMINAL (sync)",
+                    mission_id=str(mission_id),
+                    action=terminal_check.decision.action.value,
+                    gate_state=terminal_check.decision.resulting_gate_state.value,
+                    reason=terminal_check.decision.reason,
+                )
+                return {
+                    "status": "held_by_guardian",
+                    "mission_id": str(mission_id),
+                    "action": terminal_check.decision.action.value,
+                    "gate_state": terminal_check.decision.resulting_gate_state.value,
+                    "reason": terminal_check.decision.reason,
+                }
+        except Exception as exc:
+            logger.error(
+                "Guardian subsystem unavailable at MISSION_TERMINAL (sync). Holding terminal transition.",
+                mission_id=str(mission_id),
+                error=str(exc),
+                exc_info=True,
+            )
+            return {
+                "status": "waiting_guardian",
+                "mission_id": str(mission_id),
+                "gate_state": "WAITING_GUARDIAN",
+                "reason": "Guardian subsystem unreachable at terminal protected boundary",
+            }
+
+        # Re-acquire lock to perform terminal state transition
+        mission_to_update = (
+            session.query(Mission).filter(Mission.id == mission_id).with_for_update().first()
+        )
+
         mission_to_update.state = MissionState.SUCCEEDED.value
         mission_to_update.completed_at = datetime.now(UTC)
         mission_to_update.updated_at = datetime.now(UTC)
 
         if active_execution:
-            active_execution.state = ExecutionState.SUCCEEDED.value
-            active_execution.completed_at = datetime.now(UTC)
-            active_execution.updated_at = datetime.now(UTC)
+            active_exec_locked = (
+                session.query(MissionExecution)
+                .filter(MissionExecution.id == active_execution.id)
+                .with_for_update()
+                .first()
+            )
+            if active_exec_locked:
+                active_exec_locked.state = ExecutionState.SUCCEEDED.value
+                active_exec_locked.completed_at = datetime.now(UTC)
+                active_exec_locked.updated_at = datetime.now(UTC)
 
         session.add(
             DecisionLog(
@@ -539,7 +832,7 @@ def evaluate_mission_sync(
                 execution_id=current_execution_id,
                 decision_type=DecisionType.MISSION_COMPLETE.value,
                 decision="Mark mission SUCCEEDED",
-                reason="All DAG tasks in active execution completed successfully",
+                reason="All DAG tasks completed and passed MISSION_TERMINAL Guardian check",
                 actor=Actor.ORCHESTRATOR.value,
             )
         )

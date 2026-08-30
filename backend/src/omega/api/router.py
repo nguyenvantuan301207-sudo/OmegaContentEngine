@@ -17,6 +17,7 @@ from fastapi import APIRouter
 
 from omega.api.channels import router as channels_router
 from omega.api.content import router as content_router
+from omega.api.guardian import router as guardian_router
 from omega.api.health import router as health_router
 from omega.api.jobs import router as jobs_router
 from omega.api.missions import router as missions_router
@@ -37,3 +38,4 @@ api_router.include_router(topics_router)
 api_router.include_router(research_router)
 api_router.include_router(content_router)
 api_router.include_router(production_router)
+api_router.include_router(guardian_router)
