@@ -27,4 +27,31 @@ celery_app.conf.update(
     task_track_started=True,
     worker_hijack_root_logger=False,
     broker_connection_retry_on_startup=True,
+    beat_schedule={
+        "schedule-dispatch-sweep": {
+            "task": "omega.scheduler.dispatch_sweep",
+            "schedule": 10.0,
+            "options": {"expires": 30},
+        },
+        "schedule-outbox-relay": {
+            "task": "omega.scheduler.outbox_relay",
+            "schedule": 5.0,
+            "options": {"expires": 15},
+        },
+        "schedule-expiration-sweep": {
+            "task": "omega.scheduler.expiration_sweep",
+            "schedule": 60.0,
+            "options": {"expires": 120},
+        },
+        "schedule-stale-dispatching-sweep": {
+            "task": "omega.scheduler.stale_dispatching_sweep",
+            "schedule": 120.0,
+            "options": {"expires": 240},
+        },
+        "guardian-alert-outbox": {
+            "task": "omega.guardian.process_alert_outbox",
+            "schedule": 30.0,
+            "options": {"expires": 60},
+        },
+    },
 )

@@ -92,6 +92,30 @@ services:
       - omega-media-data:/app/data
     restart: unless-stopped
 
+  # ── Celery Beat Scheduler ──
+  omega-beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: omega-beat
+    command: celery -A omega.infrastructure.celery_app:celery_app beat --loglevel=info
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:omega_dev@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:omega_dev@omega-postgres:5432/omega}
+      REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
+      ENVIRONMENT: ${ENVIRONMENT:-development}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      SERVICE_NAME: omega-beat
+    depends_on:
+      omega-postgres:
+        condition: service_healthy
+      omega-redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+      - omega-media-data:/app/data
+    restart: unless-stopped
+
   # ── Next.js Frontend ──
   omega-web:
     build:

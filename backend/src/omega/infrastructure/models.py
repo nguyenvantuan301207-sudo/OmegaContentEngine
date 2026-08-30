@@ -2680,3 +2680,286 @@ class NetworkCircuitTransition(Base):
 
     def __repr__(self) -> str:
         return f"<NetworkCircuitTransition {self.from_state} -> {self.to_state}>"
+
+
+# ── OMEGA-010 Smart Scheduler Models ──
+
+
+class SchedulePolicy(Base):
+    """Versioned, immutable scheduling policy configuration."""
+
+    __tablename__ = "schedule_policies"
+    __table_args__ = (
+        UniqueConstraint(
+            "workload_category", "version", name="uq_schedule_policy_category_version"
+        ),
+        CheckConstraint(
+            "status IN ('DRAFT', 'ACTIVE', 'RETIRED')",
+            name="ck_schedule_policies_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workload_category: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    version: Mapped[str] = mapped_column(String(50), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default="DRAFT", index=True
+    )
+    policy_config: Mapped[dict] = mapped_column(JSON, nullable=False)
+    checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    effective_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    retired_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    decisions: Mapped[list[ScheduleDecision]] = relationship(
+        "ScheduleDecision", back_populates="policy"
+    )
+    reservations: Mapped[list[ScheduleReservation]] = relationship(
+        "ScheduleReservation", back_populates="policy"
+    )
+
+    def __repr__(self) -> str:
+        return f"<SchedulePolicy {self.workload_category} v{self.version} [{self.status}]>"
+
+
+class ScheduleDecision(Base):
+    """Authoritative, immutable scheduling decision record."""
+
+    __tablename__ = "schedule_decisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tasks.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    target_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    workload_category: Mapped[str] = mapped_column(String(50), nullable=False)
+    action: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    scheduled_start_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    scheduled_end_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    policy_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("schedule_policies.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    policy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    policy_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    channel_dna_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    reservation_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    guardian_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    diagnostic_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    evaluated_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    policy: Mapped[SchedulePolicy] = relationship("SchedulePolicy", back_populates="decisions")
+    mission: Mapped[Mission] = relationship("Mission")
+    task: Mapped[Task | None] = relationship("Task")
+    channel: Mapped[Channel | None] = relationship("Channel")
+
+    def __repr__(self) -> str:
+        return f"<ScheduleDecision {self.id} action={self.action}>"
+
+
+class ScheduleReservation(Base):
+    """Authoritative slot allocation with state machine lifecycle."""
+
+    __tablename__ = "schedule_reservations"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('ACTIVE', 'DISPATCHING', 'CONSUMED', 'RELEASED', 'EXPIRED', 'CANCELLED')",
+            name="ck_schedule_reservations_state",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    decision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("schedule_decisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    channel_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    target_type: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    workload_category: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    scheduled_start_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    scheduled_end_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default="ACTIVE", index=True
+    )
+    priority_score: Mapped[float] = mapped_column(Float, nullable=False, server_default="0.0")
+    policy_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("schedule_policies.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    policy_version: Mapped[str] = mapped_column(String(50), nullable=False)
+    policy_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    channel_dna_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    guardian_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+    dispatching_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+
+    decision: Mapped[ScheduleDecision] = relationship("ScheduleDecision")
+    policy: Mapped[SchedulePolicy] = relationship("SchedulePolicy", back_populates="reservations")
+    mission: Mapped[Mission] = relationship("Mission")
+    state_transitions: Mapped[list[ScheduleStateTransition]] = relationship(
+        "ScheduleStateTransition", back_populates="reservation"
+    )
+    outbox_items: Mapped[list[SchedulerDispatchOutbox]] = relationship(
+        "SchedulerDispatchOutbox", back_populates="reservation"
+    )
+
+    def __repr__(self) -> str:
+        return f"<ScheduleReservation {self.id} state={self.state}>"
+
+
+class ScheduleStateTransition(Base):
+    """Append-only audit trail for reservation state transitions."""
+
+    __tablename__ = "schedule_state_transitions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reservation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("schedule_reservations.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    from_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    to_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(String(50), nullable=False, server_default="SCHEDULER")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    reservation: Mapped[ScheduleReservation] = relationship(
+        "ScheduleReservation", back_populates="state_transitions"
+    )
+
+    def __repr__(self) -> str:
+        return f"<ScheduleStateTransition {self.from_state} -> {self.to_state}>"
+
+
+class SchedulerDispatchOutbox(Base):
+    """Transactional outbox for crash-safe dispatch to Celery broker."""
+
+    __tablename__ = "scheduler_dispatch_outbox"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'SENT', 'RETRY', 'DEAD_LETTER')",
+            name="ck_scheduler_dispatch_outbox_status",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reservation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("schedule_reservations.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    task_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tasks.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    celery_task_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    celery_args: Mapped[dict] = mapped_column(JSON, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(
+        String(64), nullable=False, unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False, server_default="PENDING", index=True
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, server_default="5")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scheduled_send_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    sent_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_retry_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    reservation: Mapped[ScheduleReservation] = relationship(
+        "ScheduleReservation", back_populates="outbox_items"
+    )
+    task: Mapped[Task] = relationship("Task")
+
+    def __repr__(self) -> str:
+        return f"<SchedulerDispatchOutbox {self.id} status={self.status}>"

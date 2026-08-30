@@ -382,3 +382,86 @@ def process_guardian_alert_outbox() -> dict[str, int]:
     except Exception as exc:
         logger.error("Failed to process guardian alert outbox", error=str(exc), exc_info=True)
         return {"status": "error", "processed": 0}
+
+
+# ── OMEGA-010 Scheduler Background Worker Tasks ──
+
+
+@celery_app.task(name="omega.scheduler.dispatch_sweep")
+def schedule_dispatch_sweep_task() -> dict[str, int]:
+    """Execute periodic dispatch sweep for due ACTIVE reservations."""
+    import asyncio
+
+    from omega.application.scheduler.sweep_service import SchedulerSweepService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> dict[str, int]:
+        async with AsyncSessionLocal() as session:
+            return await SchedulerSweepService.run_dispatch_sweep(session)
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Schedule dispatch sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "claimed": 0, "dispatched": 0, "rejected": 0}
+
+
+@celery_app.task(name="omega.scheduler.outbox_relay")
+def schedule_outbox_relay_task() -> dict[str, int]:
+    """Execute periodic outbox relay for pending/retry dispatch outbox items."""
+    import asyncio
+
+    from omega.application.scheduler.outbox_relay import OutboxRelayService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> dict[str, int]:
+        async with AsyncSessionLocal() as session:
+            return await OutboxRelayService.process_outbox_batch(session)
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Schedule outbox relay failed", error=str(exc), exc_info=True)
+        return {"status": "error", "claimed": 0, "sent": 0, "retried": 0, "dead_letter": 0}
+
+
+@celery_app.task(name="omega.scheduler.expiration_sweep")
+def schedule_expiration_sweep_task() -> dict[str, int]:
+    """Execute periodic expiration sweep for expired ACTIVE reservations."""
+    import asyncio
+
+    from omega.application.scheduler.sweep_service import SchedulerSweepService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> int:
+        async with AsyncSessionLocal() as session:
+            return await SchedulerSweepService.run_expiration_sweep(session)
+
+    try:
+        expired = asyncio.run(_run())
+        return {"status": "success", "expired": expired}
+    except Exception as exc:
+        logger.error("Schedule expiration sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "expired": 0}
+
+
+@celery_app.task(name="omega.scheduler.stale_dispatching_sweep")
+def schedule_stale_dispatching_sweep_task() -> dict[str, int]:
+    """Execute periodic stale DISPATCHING recovery sweep."""
+    import asyncio
+
+    from omega.application.scheduler.sweep_service import SchedulerSweepService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> dict[str, int]:
+        async with AsyncSessionLocal() as session:
+            return await SchedulerSweepService.run_stale_dispatching_recovery_sweep(session)
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Schedule stale dispatch recovery failed", error=str(exc), exc_info=True)
+        return {"status": "error", "recovered": 0, "consumed": 0, "released": 0, "requeued": 0}
