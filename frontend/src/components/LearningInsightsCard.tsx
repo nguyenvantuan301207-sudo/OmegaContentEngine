@@ -8,6 +8,7 @@ import {
   getChannelHypotheses,
   triggerLearningRefresh,
 } from "@/lib/api";
+import { formatDecimal, toFiniteNumber } from "@/lib/formatters";
 
 interface Props {
   channelId: string;
@@ -182,20 +183,20 @@ export function LearningInsightsCard({ channelId }: Props) {
                   <div>
                     <span className="text-zinc-500">Effect:</span>{" "}
                     <span className="font-mono text-zinc-200">
-                      {item.effect_size_absolute > 0 ? "+" : ""}
-                      {item.effect_size_absolute.toFixed(1)}
+                      {(toFiniteNumber(item.effect_size_absolute) ?? 0) > 0 ? "+" : ""}
+                      {formatDecimal(item.effect_size_absolute, 1)}
                     </span>
                     {item.effect_size_relative_percent !== null && (
                       <span className="text-zinc-400 font-mono ml-1">
-                        ({item.effect_size_relative_percent > 0 ? "+" : ""}
-                        {item.effect_size_relative_percent.toFixed(1)}%)
+                        ({(toFiniteNumber(item.effect_size_relative_percent) ?? 0) > 0 ? "+" : ""}
+                        {formatDecimal(item.effect_size_relative_percent, 1)}%)
                       </span>
                     )}
                   </div>
                   <div>
                     <span className="text-zinc-500">Cliff&apos;s Delta:</span>{" "}
                     <span className="font-mono text-zinc-200">
-                      {item.cliffs_delta.toFixed(2)}
+                      {formatDecimal(item.cliffs_delta, 2)}
                     </span>
                   </div>
                   <div>

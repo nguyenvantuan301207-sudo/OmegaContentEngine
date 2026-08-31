@@ -64,180 +64,168 @@ export default function NewChannelPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-8">
-      <div className="max-w-2xl mx-auto space-y-6">
+    <div>
+      {/* Header */}
+      <div className="page-header" style={{ maxWidth: "840px", margin: "0 auto 2rem auto" }}>
         <div>
-          <Link
-            href="/channels"
-            className="text-xs text-indigo-400 hover:text-indigo-300 transition-colors"
-          >
-            ← Back to Channels
-          </Link>
-          <h1 className="text-2xl font-bold text-slate-100 mt-2">
-            Create Operating Channel
-          </h1>
-          <p className="text-sm text-slate-400 mt-1">
+          <div style={{ marginBottom: "0.5rem" }}>
+            <Link
+              href="/channels"
+              style={{ fontSize: "0.78rem", color: "var(--accent-secondary)", textDecoration: "none" }}
+            >
+              ← Back to Channels
+            </Link>
+          </div>
+          <h1 className="page-title">Create Operating Channel</h1>
+          <p className="page-subtitle">
             Initialize a new autonomous channel workspace and its default DNA profile.
           </p>
         </div>
+      </div>
 
+      <div className="form-card">
         {error && (
-          <div className="p-4 bg-rose-500/10 border border-rose-500/30 rounded-xl text-rose-400 text-sm">
+          <div style={{ padding: "1rem", background: "var(--status-danger-bg)", border: "1px solid var(--status-danger-border)", borderRadius: "var(--radius-sm)", color: "var(--status-danger)", marginBottom: "1.5rem", fontSize: "0.85rem" }}>
             {error}
           </div>
         )}
 
-        <form
-          onSubmit={handleSubmit}
-          className="space-y-6 bg-slate-900/60 border border-slate-800 rounded-2xl p-6"
-        >
-          {/* Identity */}
-          <div className="space-y-4">
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+        <form onSubmit={handleSubmit}>
+          {/* Identity Section */}
+          <div style={{ marginBottom: "1.5rem" }}>
+            <div className="section-title" style={{ marginBottom: "1rem" }}>
               1. Identity & Routing
-            </h2>
+            </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
-                Channel Name *
-              </label>
+            <div className="form-group">
+              <label className="form-label">Channel Name *</label>
               <input
                 type="text"
                 required
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="e.g. NextGen AI Digest"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500"
+                className="input"
+                style={{ width: "100%" }}
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
-                Slug (Optional - auto-generated if empty)
-              </label>
+            <div className="form-group">
+              <label className="form-label">Slug (Optional - auto-generated if empty)</label>
               <input
                 type="text"
                 value={slug}
                 onChange={(e) => setSlug(e.target.value.toLowerCase())}
                 placeholder="e.g. nextgen-ai-digest"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono text-slate-100 focus:outline-none focus:border-indigo-500"
+                className="input text-mono"
+                style={{ width: "100%" }}
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
-                Description
-              </label>
+            <div className="form-group">
+              <label className="form-label">Description (Optional)</label>
               <textarea
                 rows={2}
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
-                placeholder="Brief summary of channel purpose..."
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500"
+                placeholder="Brief summary of channel editorial purpose and audience..."
               />
             </div>
           </div>
 
-          {/* Localization */}
-          <div className="space-y-4 pt-4 border-t border-slate-800">
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+          {/* Localization Section */}
+          <div style={{ padding: "1.5rem 0", borderTop: "1px solid var(--border-subtle)", borderBottom: "1px solid var(--border-subtle)", marginBottom: "1.5rem" }}>
+            <div className="section-title" style={{ marginBottom: "1rem" }}>
               2. Target Market & Localization
-            </h2>
+            </div>
 
-            <div className="grid grid-cols-3 gap-4">
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Primary Language
-                </label>
+            <div className="grid grid-cols-3" style={{ gap: "1rem" }}>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Primary Language</label>
                 <input
                   type="text"
                   required
                   value={primaryLanguage}
                   onChange={(e) => setPrimaryLanguage(e.target.value)}
-                  placeholder="en, vi, en-US"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono text-slate-100 focus:outline-none focus:border-indigo-500"
+                  placeholder="en, vi, ja"
+                  className="input text-mono"
+                  style={{ width: "100%" }}
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Target Region
-                </label>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Target Region</label>
                 <input
                   type="text"
                   required
                   value={targetRegion}
                   onChange={(e) => setTargetRegion(e.target.value.toUpperCase())}
-                  placeholder="US, VN"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono text-slate-100 focus:outline-none focus:border-indigo-500"
+                  placeholder="US, VN, JP"
+                  className="input text-mono"
+                  style={{ width: "100%" }}
                 />
               </div>
 
-              <div>
-                <label className="block text-xs font-medium text-slate-300 mb-1">
-                  Timezone
-                </label>
+              <div className="form-group" style={{ marginBottom: 0 }}>
+                <label className="form-label">Timezone</label>
                 <input
                   type="text"
                   required
                   value={timezone}
                   onChange={(e) => setTimezone(e.target.value)}
                   placeholder="UTC, America/New_York"
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm font-mono text-slate-100 focus:outline-none focus:border-indigo-500"
+                  className="input text-mono"
+                  style={{ width: "100%" }}
                 />
               </div>
             </div>
           </div>
 
-          {/* Initial Strategy */}
-          <div className="space-y-4 pt-4 border-t border-slate-800">
-            <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
+          {/* Content Strategy Foundation */}
+          <div style={{ marginBottom: "1.5rem" }}>
+            <div className="section-title" style={{ marginBottom: "1rem" }}>
               3. Content Strategy Foundation
-            </h2>
+            </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
-                Content Niche
-              </label>
+            <div className="form-group">
+              <label className="form-label">Content Niche *</label>
               <input
                 type="text"
                 required
                 value={niche}
                 onChange={(e) => setNiche(e.target.value)}
                 placeholder="e.g. AI & Machine Learning"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500"
+                className="input"
+                style={{ width: "100%" }}
               />
             </div>
 
-            <div>
-              <label className="block text-xs font-medium text-slate-300 mb-1">
-                Content Pillars (comma-separated)
-              </label>
+            <div className="form-group">
+              <label className="form-label">Content Pillars (Comma-separated)</label>
               <input
                 type="text"
                 required
                 value={pillars}
                 onChange={(e) => setPillars(e.target.value)}
-                placeholder="News, Tutorials, Deep Dives"
-                className="w-full bg-slate-950 border border-slate-800 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-indigo-500"
+                placeholder="News, Tutorials, Deep Dives, Case Studies"
+                className="input"
+                style={{ width: "100%" }}
               />
+              <span className="form-helper">Core editorial topics used to guide automated topic discovery.</span>
             </div>
           </div>
 
-          {/* Submit Buttons */}
-          <div className="pt-6 border-t border-slate-800 flex items-center justify-end space-x-3">
-            <Link
-              href="/channels"
-              className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm font-medium rounded-lg transition-colors"
-            >
+          {/* Form Actions */}
+          <div className="form-actions">
+            <Link href="/channels" className="btn btn-secondary">
               Cancel
             </Link>
             <button
               type="submit"
               disabled={loading}
-              className="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-sm font-medium rounded-lg shadow-lg shadow-indigo-600/30 transition-all"
+              className="btn btn-primary"
             >
-              {loading ? "Creating..." : "Create Channel"}
+              {loading ? "Creating..." : "Create Operating Channel"}
             </button>
           </div>
         </form>

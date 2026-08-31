@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import { refreshVideoAnalytics, VideoAnalyticsSummary } from "@/lib/api";
+import { toFiniteNumber } from "@/lib/formatters";
 
 interface AnalyticsPerformanceCardProps {
   analytics: VideoAnalyticsSummary | null;
@@ -47,7 +48,11 @@ export function AnalyticsPerformanceCard({
     if (item.value === null || item.value === undefined) {
       return { valueText: item.quality, quality: item.quality, isMissing: true };
     }
-    const formatted = formatFn ? formatFn(item.value) : item.value.toLocaleString();
+    const num = toFiniteNumber(item.value);
+    if (num === null) {
+      return { valueText: String(item.value), quality: item.quality, isMissing: false };
+    }
+    const formatted = formatFn ? formatFn(num) : num.toLocaleString();
     return { valueText: formatted, quality: item.quality, isMissing: false };
   };
 
