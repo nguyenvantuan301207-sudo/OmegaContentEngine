@@ -21,6 +21,7 @@ from omega.api.content import router as content_router
 from omega.api.guardian import router as guardian_router
 from omega.api.health import router as health_router
 from omega.api.jobs import router as jobs_router
+from omega.api.learning import router as learning_router
 from omega.api.missions import router as missions_router
 from omega.api.network import router as network_router
 from omega.api.production import router as production_router
@@ -47,3 +48,4 @@ api_router.include_router(network_router)
 api_router.include_router(scheduler_router)
 api_router.include_router(publisher_router)
 api_router.include_router(analytics_router)
+api_router.include_router(learning_router)

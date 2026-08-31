@@ -73,5 +73,10 @@ celery_app.conf.update(
             "schedule": 3600.0,
             "options": {"expires": 1800},
         },
+        "learning-ingest-sweep": {
+            "task": "omega.learning.ingest_observations_sweep",
+            "schedule": 120.0,
+            "options": {"expires": 240},
+        },
     },
 )
