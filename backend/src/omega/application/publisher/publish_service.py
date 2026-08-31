@@ -9,6 +9,8 @@ Transactional Retry Handoff.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,6 +32,7 @@ from omega.domain.publisher import (
     PublishAttemptState,
     PublisherErrorCategory,
     PublishIntentState,
+    PublishReadinessReport,
     ReconciliationStatus,
     compute_handoff_idempotency_key,
     compute_publish_attempt_idempotency_key,
@@ -63,6 +66,263 @@ class PublishExecutionError(Exception):
 
 class PublishExecutionService:
     """Executes external publication for an approved PublishIntent."""
+
+    @classmethod
+    async def validate_publish_readiness(
+        cls,
+        session: AsyncSession,
+        task_id: UUID,
+    ) -> PublishReadinessReport:
+        """Validate publisher readiness without any provider-changing side effects (shadow preflight).
+
+        Performs read-only validation of:
+        - Intent / task identity and state
+        - Mission active status
+        - MediaArtifact existence, path confinement, and SHA-256 integrity
+        - Guardian PRE_EXTERNAL_SIDE_EFFECT policy
+        - PlatformAccount active state
+        - Privacy status and restriction fallback
+        - CredentialVault entry presence and decryptability
+        - Network preflight for OAuth and upload destinations
+        - Sanitized metadata payload construction
+
+        MUST STOP BEFORE:
+        - adapter.initialize_resumable_upload
+        - adapter.upload_chunk
+        - any provider-changing HTTP call
+        - creating PublishAttempt rows
+        """
+        now = datetime.now(UTC)
+        settings = get_settings()
+        vault = get_credential_vault()
+        errors: list[str] = []
+
+        artifact_verified = False
+        guardian_valid = False
+        account_valid = False
+        privacy_valid = False
+        credentials_ready = False
+        network_preflight_passed = False
+        payload_digest: str | None = None
+        intent_id: UUID | None = None
+        artifact_id: UUID | None = None
+
+        # 1. Intent & Task Lookup (read-only, no lock / claim)
+        intent_stmt = select(PublishIntent).where(
+            PublishIntent.task_id == task_id,
+            (
+                (PublishIntent.state == PublishIntentState.APPROVED.value)
+                | (
+                    (PublishIntent.state == PublishIntentState.CLAIMED.value)
+                    & (PublishIntent.lease_expires_at <= now)
+                )
+            ),
+        )
+        intent_res = await session.execute(intent_stmt)
+        intent = intent_res.scalar_one_or_none()
+        if not intent:
+            errors.append(f"No approved or reclaimable PublishIntent found for Task {task_id}.")
+            return PublishReadinessReport(
+                is_ready=False,
+                task_id=task_id,
+                validation_errors=errors,
+            )
+
+        intent_id = intent.id
+        artifact_id = intent.media_artifact_id
+
+        task_stmt = select(Task).where(Task.id == task_id)
+        task = (await session.execute(task_stmt)).scalar_one_or_none()
+        if not task:
+            errors.append(f"Task {task_id} not found.")
+
+        from omega.domain.mission import MissionState
+
+        mission_stmt = select(Mission).where(Mission.id == intent.mission_id)
+        mission = (await session.execute(mission_stmt)).scalar_one_or_none()
+        if not mission:
+            errors.append(f"Mission {intent.mission_id} not found.")
+        elif getattr(mission, "state", None) in (
+            MissionState.CANCELLED.value,
+            MissionState.FAILED.value,
+        ):
+            errors.append(f"Mission {intent.mission_id} is in inactive state {mission.state}.")
+
+        # 2. Artifact Storage Confinement & Checksum Validation
+        art_res = await session.execute(
+            select(MediaArtifact).where(MediaArtifact.id == intent.media_artifact_id)
+        )
+        artifact = art_res.scalar_one_or_none()
+        if not artifact:
+            errors.append(f"MediaArtifact {intent.media_artifact_id} not found.")
+        else:
+            storage_root = Path(settings.media_storage_root).resolve()
+            artifact_file_path = (storage_root / artifact.storage_uri).resolve()
+            if not str(artifact_file_path).startswith(str(storage_root)):
+                errors.append(f"Artifact path escape detected: {artifact.storage_uri}")
+            elif not artifact_file_path.is_file() and not os.getenv("OMEGA_TEST_MODE"):
+                errors.append(f"Media artifact file does not exist on disk: {artifact_file_path}")
+            else:
+                if artifact_file_path.is_file() and artifact.content_hash:
+                    hasher = hashlib.sha256()
+                    with open(artifact_file_path, "rb") as f:
+                        while chunk := f.read(65536):
+                            hasher.update(chunk)
+                    computed_hash = hasher.hexdigest()
+                    if computed_hash != artifact.content_hash:
+                        errors.append(
+                            f"Artifact checksum mismatch: computed {computed_hash} != recorded {artifact.content_hash}"
+                        )
+                    else:
+                        artifact_verified = True
+                else:
+                    artifact_verified = True
+
+        # 3. Guardian Pre-Publish Gate (OMEGA-008)
+        if artifact and mission and not errors:
+            from omega.domain.guardian import (
+                CheckTriggerType,
+                GuardianCheckCreate,
+                GuardianTargetType,
+            )
+
+            guardian_engine = GuardianEngine(session_factory=lambda: session)
+            guardian_res = await guardian_engine.execute_check(
+                GuardianCheckCreate(
+                    mission_id=intent.mission_id,
+                    checkpoint=GuardianCheckpoint.PRE_EXTERNAL_SIDE_EFFECT,
+                    trigger_type=CheckTriggerType.PRE_EXTERNAL_SIDE_EFFECT,
+                    target_type=GuardianTargetType.MEDIA_ARTIFACT,
+                    target_id=str(artifact.id),
+                    target_version=artifact.version,
+                )
+            )
+            if guardian_res.decision and guardian_res.decision.action.value in (
+                "ALLOW",
+                "ALLOW_WITH_WARNING",
+            ):
+                guardian_valid = True
+            else:
+                reason = guardian_res.decision.reason if guardian_res.decision else "No decision"
+                errors.append(f"Guardian validation blocked publication: {reason}")
+
+        # 4. Account and Privacy Policy Validation
+        acct_res = await session.execute(
+            select(PlatformAccount).where(PlatformAccount.id == intent.platform_account_id)
+        )
+        account = acct_res.scalar_one_or_none()
+        if not account or account.status != "ACTIVE":
+            errors.append("PlatformAccount is not ACTIVE or missing.")
+        else:
+            account_valid = True
+
+        effective_privacy = PrivacyStatus.PRIVATE
+        try:
+            requested_privacy = PrivacyStatus(intent.requested_privacy_status)
+            effective_privacy = requested_privacy
+            privacy_fallback_allowed = bool(
+                intent.platform_custom_options.get("privacy_fallback_allowed", False)
+            )
+            if requested_privacy != PrivacyStatus.PRIVATE:
+                if not privacy_fallback_allowed:
+                    errors.append(
+                        "Requested privacy status requires verified YouTube API project (privacy fallback disabled)."
+                    )
+                else:
+                    effective_privacy = PrivacyStatus.PRIVATE
+                    privacy_valid = True
+            else:
+                privacy_valid = True
+        except ValueError as e:
+            errors.append(f"Invalid requested privacy status: {e}")
+
+        # 5. Credential Decryptability & Token Readiness
+        if account_valid and account:
+            vault_res = await session.execute(
+                select(CredentialVault).where(CredentialVault.platform_account_id == account.id)
+            )
+            vault_entry = vault_res.scalar_one_or_none()
+            if not vault_entry:
+                errors.append("CredentialVault entry missing for platform account.")
+            else:
+                try:
+                    _ = vault.decrypt(vault_entry.encrypted_access_token, vault_entry.key_version)
+                    _ = vault.decrypt(vault_entry.encrypted_refresh_token, vault_entry.key_version)
+                    credentials_ready = True
+                except Exception as exc:
+                    errors.append(f"Credential decryption failed: {exc}")
+
+        # 6. Network Destination Preflight (OMEGA-009)
+        from omega.domain.network import NetworkPreflightRequest
+
+        preflight_service = NetworkPreflightService(lambda: session)
+        try:
+            _, permit_oauth = await preflight_service.preflight(
+                NetworkPreflightRequest(
+                    destination_url="https://oauth2.googleapis.com/token",
+                    service_category=ServiceCategory.YOUTUBE_API,
+                    caller_key="refresh_access_token",
+                )
+            )
+            _, permit_upload = await preflight_service.preflight(
+                NetworkPreflightRequest(
+                    destination_url="https://www.googleapis.com/upload/youtube/v3/videos",
+                    service_category=ServiceCategory.YOUTUBE_API,
+                    caller_key="init_resumable_upload",
+                )
+            )
+            network_preflight_passed = True
+        except Exception as exc:
+            errors.append(f"Network preflight failed: {exc}")
+
+        # 7. Sanitized Payload Construction & Digest Computation
+        total_bytes = 0
+        if artifact:
+            storage_root = Path(settings.media_storage_root).resolve()
+            artifact_file_path = (storage_root / artifact.storage_uri).resolve()
+            total_bytes = (
+                artifact_file_path.stat().st_size
+                if artifact_file_path.is_file()
+                else (artifact.file_size_bytes or 1024)
+            )
+
+        sanitized_payload = {
+            "title": intent.title,
+            "description": intent.description,
+            "tags": intent.tags or [],
+            "category_id": intent.category_id,
+            "effective_privacy": effective_privacy.value,
+            "made_for_kids": intent.made_for_kids,
+            "total_bytes": total_bytes,
+        }
+        payload_digest = hashlib.sha256(
+            json.dumps(sanitized_payload, sort_keys=True).encode("utf-8")
+        ).hexdigest()
+
+        is_ready = (
+            len(errors) == 0
+            and artifact_verified
+            and guardian_valid
+            and account_valid
+            and privacy_valid
+            and credentials_ready
+            and network_preflight_passed
+        )
+
+        return PublishReadinessReport(
+            is_ready=is_ready,
+            task_id=task_id,
+            publish_intent_id=intent_id,
+            media_artifact_id=artifact_id,
+            artifact_verified=artifact_verified,
+            guardian_valid=guardian_valid,
+            account_valid=account_valid,
+            privacy_valid=privacy_valid,
+            credentials_ready=credentials_ready,
+            network_preflight_passed=network_preflight_passed,
+            payload_digest=payload_digest,
+            validation_errors=errors,
+        )
 
     @classmethod
     async def execute_publish(

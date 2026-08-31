@@ -261,6 +261,33 @@ class AutonomyDispatchService:
                     "status": "QA_REQUESTED",
                     "checkpoint": plan.parameters.get("checkpoint"),
                 }
+            elif plan.action_type in (
+                ActionType.REQUEST_PUBLISH.value,
+                ActionType.CREATE_PUBLISH_INTENT.value,
+            ) and (
+                plan.parameters.get("validate_readiness_only")
+                or plan.parameters.get("is_shadow_mode")
+            ):
+                from omega.application.publisher.publish_service import (
+                    PublishExecutionService,
+                )
+
+                readiness = await PublishExecutionService.validate_publish_readiness(
+                    session=session,
+                    task_id=plan.target_entity_id,
+                )
+                subsystem_result = {
+                    "operation": "PUBLISH_READINESS_VALIDATION",
+                    "provider_side_effect": False,
+                    "provider_upload_performed": False,
+                    "is_ready": readiness.is_ready,
+                    "report": readiness.model_dump(mode="json"),
+                }
+                if readiness.is_ready:
+                    final_status = ActionAttemptOutcomeStatus.RESULT_CONFIRMED
+                else:
+                    final_status = ActionAttemptOutcomeStatus.DETERMINISTIC_FAILURE
+                    error_msg = "; ".join(readiness.validation_errors)
             elif plan.action_type == ActionType.CREATE_PUBLISH_INTENT.value:
                 subsystem_result = {
                     "status": "PUBLISH_INTENT_STAGED",
