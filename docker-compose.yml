@@ -51,6 +51,11 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       AUTO_MIGRATE: ${AUTO_MIGRATE:-true}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      MEDIA_STORAGE_ROOT: ${MEDIA_STORAGE_ROOT:-/app/data}
+      OMEGA_SECRET_ENCRYPTION_KEY: ${OMEGA_SECRET_ENCRYPTION_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/publisher/accounts/youtube/callback}
       SERVICE_NAME: omega-api
     depends_on:
       omega-postgres:
@@ -81,6 +86,11 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MEDIA_STORAGE_ROOT: ${MEDIA_STORAGE_ROOT:-/app/data}
+      OMEGA_SECRET_ENCRYPTION_KEY: ${OMEGA_SECRET_ENCRYPTION_KEY}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/publisher/accounts/youtube/callback}
       SERVICE_NAME: omega-worker
     depends_on:
       omega-postgres:
