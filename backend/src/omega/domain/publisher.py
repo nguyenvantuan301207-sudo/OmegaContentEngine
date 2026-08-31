@@ -306,3 +306,25 @@ class UploadProgressResponse(BaseModel):
     expires_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class PublishReadinessReport(BaseModel):
+    """Sanitized, deterministic readiness report for publish preflight and shadow validation.
+
+    Contains only operational audit evidence; excludes secrets, tokens, and raw credentials.
+    """
+
+    is_ready: bool
+    task_id: UUID
+    publish_intent_id: UUID | None = None
+    media_artifact_id: UUID | None = None
+    artifact_verified: bool = False
+    guardian_valid: bool = False
+    account_valid: bool = False
+    privacy_valid: bool = False
+    credentials_ready: bool = False
+    network_preflight_passed: bool = False
+    payload_digest: str | None = None
+    validation_errors: list[str] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
