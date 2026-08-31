@@ -57,3 +57,7 @@ docker-compose.override.yml
 Thumbs.db
 backend/celerybeat-schedule*
 backend/data/
+
+# ── Local DB snapshots / backups (never commit) ──
+*_pre_v1_decommission.sql
+*_vault_backup.sql
