@@ -936,6 +936,9 @@ class ContentGenerationRequest(Base):
         nullable=True,
         index=True,
     )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
+    )
 
     mode: Mapped[str] = mapped_column(String(50), nullable=False, default="INTERACTIVE")
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="DRAFT", index=True)
@@ -1393,6 +1396,9 @@ class ProductionRequest(Base):
         ForeignKey("mission_executions.id", ondelete="SET NULL"),
         nullable=True,
         index=True,
+    )
+    idempotency_key: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, unique=True, index=True
     )
 
     mode: Mapped[str] = mapped_column(String(50), nullable=False, default="INTERACTIVE")
@@ -4619,3 +4625,549 @@ class LearningJob(Base):
 
     def __repr__(self) -> str:
         return f"<LearningJob {self.id} type={self.job_type} status={self.status}>"
+
+
+# ── OMEGA-014 Autonomous Loop Models ──
+
+
+class AutonomyLoop(Base):
+    """AutonomyLoop model for identity and configuration binding."""
+
+    __tablename__ = "autonomy_loops"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    autonomy_level: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="SUPERVISED", index=True
+    )
+    loop_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    mission: Mapped[Mission] = relationship("Mission")
+    channel: Mapped[Channel] = relationship("Channel")
+    policy_snapshots: Mapped[list[AutonomyPolicySnapshot]] = relationship(
+        "AutonomyPolicySnapshot", back_populates="loop"
+    )
+    observation_snapshots: Mapped[list[AutonomyObservationSnapshot]] = relationship(
+        "AutonomyObservationSnapshot", back_populates="loop"
+    )
+    iterations: Mapped[list[AutonomyLoopIteration]] = relationship(
+        "AutonomyLoopIteration", back_populates="loop"
+    )
+    approval_requests: Mapped[list[AutonomyApprovalRequest]] = relationship(
+        "AutonomyApprovalRequest", back_populates="loop"
+    )
+    events: Mapped[list[AutonomyEvent]] = relationship("AutonomyEvent", back_populates="loop")
+    budget_ledger: Mapped[AutonomyBudgetLedger | None] = relationship(
+        "AutonomyBudgetLedger", back_populates="loop", uselist=False
+    )
+    latest_pointer: Mapped[AutonomyLoopLatestPointer | None] = relationship(
+        "AutonomyLoopLatestPointer", back_populates="loop", uselist=False
+    )
+
+    def __repr__(self) -> str:
+        return f"<AutonomyLoop id={self.id} level={self.autonomy_level}>"
+
+
+class AutonomyPolicySnapshot(Base):
+    """Immutable versioned governance rules and budget/rate limits."""
+
+    __tablename__ = "autonomy_policy_snapshots"
+    __table_args__ = (
+        UniqueConstraint("loop_id", "policy_version", name="uq_autonomy_policy_version"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    loop_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loops.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_iterations_per_hour: Mapped[int] = mapped_column(Integer, nullable=False, default=30)
+    min_iteration_interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    daily_budget_cap_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    lifetime_budget_cap_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    policy_rules: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    policy_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    loop: Mapped[AutonomyLoop] = relationship("AutonomyLoop", back_populates="policy_snapshots")
+
+    def __repr__(self) -> str:
+        return f"<AutonomyPolicySnapshot loop_id={self.loop_id} v={self.policy_version}>"
+
+
+class AutonomyObservationSnapshot(Base):
+    """Immutable world state capture for an iteration."""
+
+    __tablename__ = "autonomy_observation_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    loop_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loops.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    guardian_context_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    guardian_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    dna_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    raw_observation: Mapped[dict] = mapped_column(JSON, nullable=False)
+    observation_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    captured_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    loop: Mapped[AutonomyLoop] = relationship(
+        "AutonomyLoop", back_populates="observation_snapshots"
+    )
+    dna_revision: Mapped[ChannelDNARevision] = relationship("ChannelDNARevision")
+
+    def __repr__(self) -> str:
+        return f"<AutonomyObservationSnapshot id={self.id} epoch={self.guardian_epoch}>"
+
+
+class AutonomyLoopIteration(Base):
+    """Immutable iteration record with monotonic sequence numbering."""
+
+    __tablename__ = "autonomy_loop_iterations"
+    __table_args__ = (
+        UniqueConstraint("loop_id", "iteration_sequence", name="uq_autonomy_iteration_seq"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    loop_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loops.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    observation_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_observation_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    policy_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_policy_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    iteration_sequence: Mapped[int] = mapped_column(Integer, nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    iteration_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    started_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    stop_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    loop: Mapped[AutonomyLoop] = relationship("AutonomyLoop", back_populates="iterations")
+    observation_snapshot: Mapped[AutonomyObservationSnapshot] = relationship(
+        "AutonomyObservationSnapshot"
+    )
+    policy_snapshot: Mapped[AutonomyPolicySnapshot] = relationship("AutonomyPolicySnapshot")
+    action_plans: Mapped[list[AutonomyActionPlan]] = relationship(
+        "AutonomyActionPlan", back_populates="iteration"
+    )
+
+    def __repr__(self) -> str:
+        return f"<AutonomyLoopIteration loop_id={self.loop_id} seq={self.iteration_sequence}>"
+
+
+class AutonomyActionPlan(Base):
+    """Immutable action plan proposed during an iteration."""
+
+    __tablename__ = "autonomy_action_plans"
+    __table_args__ = (
+        UniqueConstraint("iteration_id", "plan_sequence", name="uq_autonomy_action_plan_seq"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    iteration_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loop_iterations.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    plan_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    action_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    risk_class: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    target_subsystem: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_entity_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True, index=True
+    )
+    parameters: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    estimated_cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4), nullable=False, default=Decimal("0.0000")
+    )
+    precondition_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    action_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    requires_approval: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    advisory_rationale: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    advisory_model_metadata: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    iteration: Mapped[AutonomyLoopIteration] = relationship(
+        "AutonomyLoopIteration", back_populates="action_plans"
+    )
+    attempts: Mapped[list[AutonomyActionAttempt]] = relationship(
+        "AutonomyActionAttempt", back_populates="action_plan"
+    )
+
+    def __repr__(self) -> str:
+        return f"<AutonomyActionPlan {self.id} type={self.action_type} seq={self.plan_sequence}>"
+
+
+class AutonomyActionAttempt(Base):
+    """Immutable action dispatch attempt definition."""
+
+    __tablename__ = "autonomy_action_attempts"
+    __table_args__ = (
+        UniqueConstraint(
+            "action_plan_id", "attempt_sequence", name="uq_autonomy_action_attempt_seq"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    action_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_action_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    attempt_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    subsystem_correlation_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    action_plan: Mapped[AutonomyActionPlan] = relationship(
+        "AutonomyActionPlan", back_populates="attempts"
+    )
+    outcomes: Mapped[list[AutonomyActionAttemptOutcome]] = relationship(
+        "AutonomyActionAttemptOutcome", back_populates="action_attempt"
+    )
+
+    def __repr__(self) -> str:
+        return f"<AutonomyActionAttempt {self.id} plan={self.action_plan_id} seq={self.attempt_sequence}>"
+
+
+class AutonomyActionAttemptOutcome(Base):
+    """Append-only attempt lifecycle evidence journal."""
+
+    __tablename__ = "autonomy_action_attempt_outcomes"
+    __table_args__ = (
+        UniqueConstraint(
+            "action_attempt_id", "outcome_sequence", name="uq_autonomy_attempt_outcome_seq"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    action_attempt_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_action_attempts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    outcome_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    worker_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    claim_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    subsystem_response: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    occurred_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    outcome_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+    action_attempt: Mapped[AutonomyActionAttempt] = relationship(
+        "AutonomyActionAttempt", back_populates="outcomes"
+    )
+
+    def __repr__(self) -> str:
+        return f"<AutonomyActionAttemptOutcome {self.id} status={self.status}>"
+
+
+class AutonomyApprovalRequest(Base):
+    """Immutable human/system approval request snapshot."""
+
+    __tablename__ = "autonomy_approval_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    loop_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loops.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    action_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_action_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    semantic_action_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    action_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    precondition_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    guardian_context_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    guardian_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    dna_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    policy_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_policy_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    mission_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    mission_execution_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mission_executions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    requested_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    request_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+    loop: Mapped[AutonomyLoop] = relationship("AutonomyLoop", back_populates="approval_requests")
+    action_plan: Mapped[AutonomyActionPlan] = relationship("AutonomyActionPlan")
+    decisions: Mapped[list[AutonomyApprovalDecision]] = relationship(
+        "AutonomyApprovalDecision", back_populates="approval_request"
+    )
+
+    def __repr__(self) -> str:
+        return f"<AutonomyApprovalRequest {self.id} semantic={self.semantic_action_key}>"
+
+
+class AutonomyApprovalDecision(Base):
+    """Append-only approval decision log."""
+
+    __tablename__ = "autonomy_approval_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "approval_request_id", "decision_sequence", name="uq_autonomy_approval_decision_seq"
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    approval_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_approval_requests.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    decision_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    decision: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    actor_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    reviewer_user_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    review_reason: Mapped[str] = mapped_column(Text, nullable=False)
+
+    action_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    precondition_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    guardian_context_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    guardian_epoch: Mapped[int] = mapped_column(Integer, nullable=False)
+    dna_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    policy_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_policy_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    mission_state: Mapped[str] = mapped_column(String(50), nullable=False)
+    mission_execution_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mission_executions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    decided_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    decision_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+
+    approval_request: Mapped[AutonomyApprovalRequest] = relationship(
+        "AutonomyApprovalRequest", back_populates="decisions"
+    )
+
+    def __repr__(self) -> str:
+        return f"<AutonomyApprovalDecision {self.id} dec={self.decision} actor={self.actor_type}>"
+
+
+class AutonomyBudgetLedger(Base):
+    """Authoritative aggregate financial account per loop."""
+
+    __tablename__ = "autonomy_budget_ledgers"
+
+    loop_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loops.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    lifetime_cap_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    daily_cap_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    lifetime_spend_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4), nullable=False, default=Decimal("0.0000")
+    )
+    daily_spend_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 4), nullable=False, default=Decimal("0.0000")
+    )
+    current_day_utc: Mapped[date] = mapped_column(Date, nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    loop: Mapped[AutonomyLoop] = relationship("AutonomyLoop", back_populates="budget_ledger")
+
+    def __repr__(self) -> str:
+        return f"<AutonomyBudgetLedger loop_id={self.loop_id} spent=${self.lifetime_spend_usd}>"
+
+
+class AutonomyBudgetReservation(Base):
+    """Durable per-action budget reservations with daily attribution."""
+
+    __tablename__ = "autonomy_budget_reservations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    loop_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loops.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    action_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_action_plans.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    semantic_action_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    reservation_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    estimated_amount: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    captured_amount: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="USD")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="RESERVED", index=True)
+    budget_day_utc: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    reserved_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    expires_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    captured_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    released_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    release_reason: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    provider_cost_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<AutonomyBudgetReservation {self.id} status={self.status} amt={self.estimated_amount}>"
+
+
+class AutonomyEvent(Base):
+    """Append-only audit trail with deterministic deduplication keys."""
+
+    __tablename__ = "autonomy_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    loop_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loops.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    iteration_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loop_iterations.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False, default="AUTONOMY_ENGINE")
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, server_default="{}")
+    event_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    occurred_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    loop: Mapped[AutonomyLoop] = relationship("AutonomyLoop", back_populates="events")
+
+    def __repr__(self) -> str:
+        return f"<AutonomyEvent {self.event_type} loop={self.loop_id}>"
+
+
+class AutonomyLoopLatestPointer(Base):
+    """Sole authoritative mutable operational projection with claim fencing."""
+
+    __tablename__ = "autonomy_loop_latest_pointers"
+
+    loop_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loops.id", ondelete="RESTRICT"),
+        primary_key=True,
+    )
+    operational_state: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="IDLE", index=True
+    )
+    current_iteration_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_loop_iterations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    current_iteration_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_action_attempt_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("autonomy_action_attempts.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    active_claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    active_claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lease_expires_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_iteration_finished_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    loop: Mapped[AutonomyLoop] = relationship("AutonomyLoop", back_populates="latest_pointer")
+
+    def __repr__(self) -> str:
+        return f"<AutonomyLoopLatestPointer loop={self.loop_id} state={self.operational_state}>"

@@ -16,6 +16,7 @@ from __future__ import annotations
 from fastapi import APIRouter
 
 from omega.api.analytics import router as analytics_router
+from omega.api.autonomy import router as autonomy_router
 from omega.api.channels import router as channels_router
 from omega.api.content import router as content_router
 from omega.api.guardian import router as guardian_router
@@ -49,3 +50,4 @@ api_router.include_router(scheduler_router)
 api_router.include_router(publisher_router)
 api_router.include_router(analytics_router)
 api_router.include_router(learning_router)
+api_router.include_router(autonomy_router)

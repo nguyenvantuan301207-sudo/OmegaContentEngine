@@ -78,5 +78,20 @@ celery_app.conf.update(
             "schedule": 120.0,
             "options": {"expires": 240},
         },
+        "autonomy-tick-sweep": {
+            "task": "omega.autonomy.tick_sweep",
+            "schedule": 60.0,
+            "options": {"expires": 120},
+        },
+        "autonomy-reconciliation-sweep": {
+            "task": "omega.autonomy.reconciliation_sweep",
+            "schedule": 300.0,
+            "options": {"expires": 600},
+        },
+        "autonomy-approval-expiry-sweep": {
+            "task": "omega.autonomy.approval_expiry_sweep",
+            "schedule": 600.0,
+            "options": {"expires": 1200},
+        },
     },
 )
