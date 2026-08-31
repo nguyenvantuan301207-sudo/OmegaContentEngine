@@ -472,10 +472,17 @@ export async function getJob(jobId: string): Promise<JobDetails> {
 
 // ── Channel Manager API Functions (OMEGA-003) ──
 
-export async function getChannels(state?: string, platform?: string): Promise<Channel[]> {
+export async function getChannels(
+  state?: string,
+  platform?: string,
+  limit?: number,
+  offset?: number
+): Promise<Channel[]> {
   const params = new URLSearchParams();
   if (state) params.set("state", state);
   if (platform) params.set("platform", platform);
+  if (limit !== undefined) params.set("limit", String(limit));
+  if (offset !== undefined) params.set("offset", String(offset));
   const queryStr = params.toString() ? `?${params.toString()}` : "";
   return apiFetch(`/api/v1/channels${queryStr}`);
 }
@@ -658,8 +665,15 @@ export async function getTopicMemoryRecord(channelId: string, memoryId: string):
 
 // ── Mission Engine API Functions (OMEGA-002) ──
 
-export async function getMissions(): Promise<Mission[]> {
-  return apiFetch("/api/v1/missions");
+export async function getMissions(
+  limit?: number,
+  offset?: number
+): Promise<Mission[]> {
+  const params = new URLSearchParams();
+  if (limit !== undefined) params.set("limit", String(limit));
+  if (offset !== undefined) params.set("offset", String(offset));
+  const queryStr = params.toString() ? `?${params.toString()}` : "";
+  return apiFetch(`/api/v1/missions${queryStr}`);
 }
 
 export async function getMission(missionId: string): Promise<Mission> {
@@ -1667,9 +1681,9 @@ export interface GuardianConsolidatedStatus {
   checkpoint_states: Record<string, GuardianGateState>;
   blocking_checkpoints: string[];
   open_findings_count: number;
-  accumulated_cost_usd: number;
-  budget_ceiling_usd: number;
-  remaining_budget_usd: number;
+  accumulated_cost_usd: number | string;
+  budget_ceiling_usd: number | string;
+  remaining_budget_usd: number | string;
 }
 
 export interface GuardianException {

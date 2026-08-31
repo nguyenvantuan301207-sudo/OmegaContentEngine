@@ -24,11 +24,12 @@ export default function Home() {
   const fetchStatus = useCallback(async () => {
     try {
       const [h, info, status] = await Promise.all([
-        getHealth().catch(() => ({ status: "error" })),
+        getHealth().catch(() => null),
         getSystemInfo().catch(() => null),
         getSystemStatus().catch(() => null),
       ]);
-      setHealth(h.status);
+      const effectiveHealth = h?.status === "ok" || status?.status === "healthy" ? "ok" : (h?.status || "error");
+      setHealth(effectiveHealth);
       setSystemInfo(info);
       setSystemStatus(status);
     } catch {
@@ -49,7 +50,6 @@ export default function Home() {
     setJobResult(null);
     try {
       const created = await createTestJob();
-      // Poll for completion
       for (let i = 0; i < 15; i++) {
         await new Promise((r) => setTimeout(r, 2000));
         const job = await getJob(created.job_id);
@@ -69,7 +69,7 @@ export default function Home() {
     <div className="check-row" key={name}>
       <div className="check-label">
         <span className={`status-dot ${check?.status || "loading"}`} />
-        {name}
+        <span>{name}</span>
       </div>
       <span className="check-meta">
         {check ? `${check.latency_ms ?? "—"}ms` : "..."}
@@ -78,112 +78,154 @@ export default function Home() {
   );
 
   return (
-    <div className="container">
-      <header className="header">
-        <div className="logo">
-          <div className="logo-icon">Ω</div>
-          <div>
-            <h1>OMEGA</h1>
-            <span>Autonomous Content Operating System</span>
-          </div>
+    <div>
+      {/* Page Header */}
+      <div className="page-header">
+        <div>
+          <h1 className="page-title">System Telemetry & Overview</h1>
+          <p className="page-subtitle">
+            Authoritative status of foundation services, distributed task workers, and persistent data engines.
+          </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-          <Link
-            href="/channels"
-            style={{
-              padding: "0.5rem 1rem",
-              borderRadius: "4px",
-              backgroundColor: "rgba(99, 102, 241, 0.15)",
-              color: "#818cf8",
-              border: "1px solid rgba(99, 102, 241, 0.3)",
-              fontSize: "0.85rem",
-              fontWeight: 600,
-              textDecoration: "none",
-            }}
+        <div style={{ display: "flex", gap: "0.75rem" }}>
+          <button
+            type="button"
+            onClick={fetchStatus}
+            className="btn btn-secondary"
           >
-            📺 Channels →
-          </Link>
-          <Link
-            href="/missions"
-            style={{
-              padding: "0.5rem 1rem",
-              borderRadius: "4px",
-              backgroundColor: "rgba(16, 185, 129, 0.15)",
-              color: "#10b981",
-              border: "1px solid rgba(16, 185, 129, 0.3)",
-              fontSize: "0.85rem",
-              fontWeight: 600,
-              textDecoration: "none",
-            }}
+            ↻ Refresh
+          </button>
+          <button
+            type="button"
+            onClick={handleTestJob}
+            disabled={jobLoading}
+            className="btn btn-primary"
           >
-            🚀 Missions →
-          </Link>
-          {systemInfo && (
-            <span className="env-badge">{systemInfo.environment}</span>
-          )}
-        </div>
-      </header>
-
-      <h2 className="section-title">System Overview</h2>
-      <div className="grid">
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">API Status</span>
-            <span className={`status-dot ${loading ? "loading" : health === "ok" ? "healthy" : "unhealthy"}`} />
-          </div>
-          <div className="card-value">{loading ? "..." : health === "ok" ? "Online" : "Offline"}</div>
-          <div className="card-subtitle">
-            {systemInfo ? `v${systemInfo.version}` : "Connecting..."}
-          </div>
-        </div>
-
-        <div className="card">
-          <div className="card-header">
-            <span className="card-title">System Health</span>
-            <span className={`status-dot ${systemStatus?.status === "healthy" ? "healthy" : systemStatus ? "unhealthy" : "loading"}`} />
-          </div>
-          <div className="card-value">
-            {systemStatus?.status === "healthy" ? "Healthy" : systemStatus ? "Degraded" : "..."}
-          </div>
-          <div className="card-subtitle">All dependencies</div>
+            {jobLoading ? "Processing Job..." : "+ Test Celery Worker"}
+          </button>
         </div>
       </div>
 
-      <h2 className="section-title">Dependency Checks</h2>
-      <div className="card" style={{ marginBottom: "2.5rem" }}>
-        {renderCheck("PostgreSQL", systemStatus?.checks?.postgres)}
-        {renderCheck("Redis", systemStatus?.checks?.redis)}
-        {renderCheck("Celery Worker", systemStatus?.checks?.worker)}
-      </div>
-
-      <h2 className="section-title">Test Job (OMEGA-001)</h2>
-      <div className="card">
-        <p style={{ marginBottom: "1rem", color: "var(--text-secondary)", fontSize: "0.85rem" }}>
-          Dispatch a test job to verify the worker pipeline.
-        </p>
-        <button
-          className="btn btn-primary"
-          onClick={handleTestJob}
-          disabled={jobLoading}
-          id="test-job-button"
-        >
-          {jobLoading ? "⏳ Running..." : "▶ Run Test Job"}
-        </button>
-
-        {jobResult && (
-          <div className="job-result">
-            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.75rem" }}>
-              <span className={`state-badge ${jobResult.state}`}>{jobResult.state}</span>
-              <span style={{ color: "var(--text-muted)" }}>{jobResult.id}</span>
+      {/* Primary Metrics Grid */}
+      <div className="grid grid-cols-3" style={{ marginBottom: "2rem" }}>
+        {/* Foundation Info Card */}
+        <div className="card">
+          <div className="card-header">
+            <h3 className="card-title">Core Foundation</h3>
+            <span className="env-badge">{systemInfo?.environment || "local"}</span>
+          </div>
+          <div className="card-body">
+            <div className="flex-between" style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border-subtle)" }}>
+              <span className="text-secondary">App Name</span>
+              <span className="text-mono" style={{ fontWeight: 600 }}>{systemInfo?.app || "omega-api"}</span>
             </div>
-            {JSON.stringify(jobResult, null, 2)}
+            <div className="flex-between" style={{ padding: "0.5rem 0", borderBottom: "1px solid var(--border-subtle)" }}>
+              <span className="text-secondary">Version</span>
+              <span className="text-mono">{systemInfo?.version || "0.1.0"}</span>
+            </div>
+            <div className="flex-between" style={{ padding: "0.5rem 0" }}>
+              <span className="text-secondary">API Health</span>
+              <span
+                className={`badge ${
+                  health === "ok"
+                    ? "badge-succeeded"
+                    : health === null
+                    ? "badge-ready"
+                    : "badge-failed"
+                }`}
+              >
+                {health === "ok" ? "OPERATIONAL" : health === null ? "CHECKING..." : "UNHEALTHY"}
+              </span>
+            </div>
           </div>
-        )}
+        </div>
+
+        {/* Subsystem Health Card */}
+        <div className="card">
+          <div className="card-header">
+            <h3 className="card-title">Subsystem Infrastructure</h3>
+            <span className="badge badge-ready">POSTGRESQL + REDIS</span>
+          </div>
+          <div className="card-body" style={{ gap: "0.5rem" }}>
+            {renderCheck("PostgreSQL", systemStatus?.checks?.postgres)}
+            {renderCheck("Redis Cache & Broker", systemStatus?.checks?.redis)}
+            {renderCheck("Celery Worker", systemStatus?.checks?.worker)}
+          </div>
+        </div>
+
+        {/* Quick Operations Card */}
+        <div className="card">
+          <div className="card-header">
+            <h3 className="card-title">Canary Fleet Workspace</h3>
+            <span className="badge badge-canary">DmYTB Active</span>
+          </div>
+          <div className="card-body">
+            <p style={{ fontSize: "0.85rem", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+              Canary YouTube account connected with upload, readonly, and analytics scopes.
+            </p>
+            <div style={{ display: "flex", gap: "0.75rem", marginTop: "auto", paddingTop: "0.5rem" }}>
+              <Link href="/channels" className="btn btn-secondary btn-sm" style={{ flex: 1 }}>
+                View Channels →
+              </Link>
+              <Link href="/missions" className="btn btn-secondary btn-sm" style={{ flex: 1 }}>
+                View Missions →
+              </Link>
+            </div>
+          </div>
+        </div>
       </div>
 
-      <footer className="footer">
-        OMEGA v{systemInfo?.version ?? "0.1.0"} · Channel Manager & Mission Engine Enabled
-      </footer>
+      {/* Asynchronous Celery Job Result */}
+      {jobResult && (
+        <div className="card" style={{ marginBottom: "2rem" }}>
+          <div className="card-header">
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+              <h3 className="card-title">Celery Execution Verification</h3>
+              <span
+                className={`badge ${
+                  jobResult.state === "SUCCEEDED"
+                    ? "badge-succeeded"
+                    : jobResult.state === "RUNNING"
+                    ? "badge-running"
+                    : "badge-failed"
+                }`}
+              >
+                {jobResult.state}
+              </span>
+            </div>
+            <span className="text-mono text-muted" style={{ fontSize: "0.75rem" }}>
+              Job ID: {jobResult.id}
+            </span>
+          </div>
+          <div className="card-body">
+            <div className="flex-between">
+              <span className="text-secondary">Task Type:</span>
+              <span className="text-mono">{jobResult.job_type}</span>
+            </div>
+            {jobResult.result && (
+              <div className="panel" style={{ marginTop: "0.5rem" }}>
+                <span className="text-muted" style={{ fontSize: "0.75rem", textTransform: "uppercase", fontWeight: 700, display: "block", marginBottom: "0.35rem" }}>
+                  Worker Output Payload
+                </span>
+                <pre style={{ margin: 0, fontSize: "0.8rem", color: "var(--accent-secondary)", overflowX: "auto" }}>
+                  {JSON.stringify(jobResult.result, null, 2)}
+                </pre>
+              </div>
+            )}
+            {jobResult.error && (
+              <div style={{ padding: "0.75rem", background: "var(--status-danger-bg)", border: "1px solid var(--status-danger-border)", borderRadius: "var(--radius-sm)", color: "var(--status-danger)", fontSize: "0.85rem" }}>
+                {jobResult.error}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {loading && (
+        <div style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+          Polling system telemetry...
+        </div>
+      )}
     </div>
   );
 }
