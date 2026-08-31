@@ -1,6 +1,8 @@
 """Async SQLAlchemy database engine and session (asyncpg).
 
-Used by the FastAPI application ONLY. Celery workers use database_sync.py.
+FastAPI application uses async_engine with connection pool.
+Celery worker tasks using asyncio.run use AsyncWorkerSessionLocal (NullPool)
+to avoid sharing connections across short-lived event loops.
 """
 
 from __future__ import annotations
@@ -8,6 +10,7 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from omega.config import get_settings
 
@@ -23,6 +26,18 @@ async_engine = create_async_engine(
 
 AsyncSessionLocal = async_sessionmaker(
     bind=async_engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+worker_async_engine = create_async_engine(
+    settings.database_url,
+    echo=False,
+    poolclass=NullPool,
+)
+
+AsyncWorkerSessionLocal = async_sessionmaker(
+    bind=worker_async_engine,
     class_=AsyncSession,
     expire_on_commit=False,
 )
