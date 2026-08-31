@@ -12,6 +12,8 @@ import {
   pauseChannel,
   updateChannelDNA,
 } from "@/lib/api";
+import { useOperatorContext } from "@/lib/operator-context";
+import { ChannelContextBar } from "@/components/ChannelContextBar";
 
 export default function ChannelDetailPage({
   params,
@@ -20,6 +22,7 @@ export default function ChannelDetailPage({
 }) {
   const resolvedParams = use(params);
   const channelId = resolvedParams.id;
+  const { setSelectedChannelId } = useOperatorContext();
 
   const [channel, setChannel] = useState<Channel | null>(null);
   const [revisions, setRevisions] = useState<ChannelDNARevision[]>([]);
@@ -36,6 +39,7 @@ export default function ChannelDetailPage({
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
+      setSelectedChannelId(channelId);
       const [chanData, revsData] = await Promise.all([
         getChannel(channelId),
         getChannelDNARevisions(channelId),
@@ -49,7 +53,7 @@ export default function ChannelDetailPage({
     } finally {
       setLoading(false);
     }
-  }, [channelId]);
+  }, [channelId, setSelectedChannelId]);
 
   useEffect(() => {
     loadData();
@@ -135,6 +139,9 @@ export default function ChannelDetailPage({
 
   return (
     <div>
+      {/* Universal Channel Context Bar */}
+      <ChannelContextBar currentTab="dna" />
+
       {/* Header & Breadcrumb */}
       <div className="page-header">
         <div>

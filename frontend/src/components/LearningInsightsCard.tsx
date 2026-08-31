@@ -8,13 +8,17 @@ import {
   getChannelHypotheses,
   triggerLearningRefresh,
 } from "@/lib/api";
-import { formatDecimal, toFiniteNumber } from "@/lib/formatters";
+import { useOperatorContext } from "@/lib/operator-context";
 
 interface Props {
   channelId: string;
+  isArchived?: boolean;
 }
 
-export function LearningInsightsCard({ channelId }: Props) {
+export function LearningInsightsCard({ channelId, isArchived: propIsArchived }: Props) {
+  const { selectedChannel } = useOperatorContext();
+  const isArchived = propIsArchived ?? (selectedChannel?.state === "ARCHIVED");
+
   const [knowledge, setKnowledge] = useState<LearningKnowledgeItem[]>([]);
   const [hypotheses, setHypotheses] = useState<LearningHypothesisSummary[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
@@ -45,6 +49,7 @@ export function LearningInsightsCard({ channelId }: Props) {
   }, [channelId]);
 
   const handleRefresh = async () => {
+    if (isArchived) return;
     try {
       setRefreshing(true);
       setRefreshSuccess(false);
@@ -58,205 +63,239 @@ export function LearningInsightsCard({ channelId }: Props) {
     }
   };
 
-  const getConfidenceBadge = (conf: string) => {
+  const getConfidenceBadgeClass = (conf: string) => {
     switch (conf) {
       case "VERY_HIGH":
-        return "bg-emerald-950/80 text-emerald-300 border-emerald-500/50";
       case "HIGH":
-        return "bg-teal-950/80 text-teal-300 border-teal-500/50";
+        return "badge-success";
       case "MODERATE":
-        return "bg-amber-950/80 text-amber-300 border-amber-500/50";
+        return "badge-active";
       case "LOW":
-        return "bg-slate-900/80 text-slate-300 border-slate-700";
+        return "badge-warning";
       default:
-        return "bg-zinc-900 text-zinc-400 border-zinc-700";
+        return "badge-draft";
     }
   };
 
-  const getStatusBadge = (status: string) => {
+  const getStatusBadgeClass = (status: string) => {
     switch (status) {
       case "SUPPORTED":
       case "ACTIVE":
-        return "bg-emerald-950/60 text-emerald-400 border-emerald-800";
+        return "badge-success";
       case "WEAKENED":
-        return "bg-amber-950/60 text-amber-400 border-amber-800";
+        return "badge-warning";
       case "CONTRADICTED":
-        return "bg-rose-950/60 text-rose-400 border-rose-800";
+        return "badge-failed";
       case "INCONCLUSIVE":
-        return "bg-blue-950/60 text-blue-400 border-blue-800";
+        return "badge-draft";
       default:
-        return "bg-zinc-900 text-zinc-400 border-zinc-800";
+        return "badge-neutral";
     }
   };
 
   if (loading) {
     return (
-      <div className="rounded-xl border border-zinc-800 bg-zinc-950/80 p-6 text-zinc-400 animate-pulse">
-        <div className="h-6 w-48 bg-zinc-800 rounded mb-4"></div>
-        <div className="h-20 bg-zinc-900 rounded"></div>
+      <div className="card" style={{ padding: "2rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+        Loading Institutional Memory & Hypotheses...
       </div>
     );
   }
 
   return (
-    <div className="rounded-xl border border-zinc-800 bg-gradient-to-b from-zinc-900/90 to-zinc-950 p-6 shadow-2xl space-y-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 border-b border-zinc-800/80 pb-4">
-        <div>
-          <div className="flex items-center gap-3">
-            <h2 className="text-xl font-semibold tracking-tight text-white">
-              Institutional Channel Memory
-            </h2>
-            <span className="rounded-md border border-amber-500/40 bg-amber-950/40 px-2.5 py-0.5 text-xs font-medium text-amber-300">
-              OBSERVATIONAL ASSOCIATION — NOT PROVEN CAUSATION
-            </span>
+    <div style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
+      {/* Header card with prominent banner */}
+      <div className="card" style={{ padding: "1.25rem" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: "1rem",
+            borderBottom: "1px solid var(--border-subtle)",
+            paddingBottom: "0.85rem",
+            marginBottom: "1rem",
+          }}
+        >
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", flexWrap: "wrap" }}>
+              <h2 style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--text-primary)" }}>
+                Institutional Channel Memory
+              </h2>
+              <span className="badge badge-warning" style={{ fontSize: "0.7rem", padding: "0.2rem 0.5rem", letterSpacing: "0.04em" }}>
+                OBSERVATIONAL ASSOCIATION — NOT PROVEN CAUSATION
+              </span>
+            </div>
+            <p style={{ fontSize: "0.8rem", color: "var(--text-muted)", marginTop: "0.25rem" }}>
+              Factual historical relationships derived from settled multi-window performance evidence.
+            </p>
           </div>
-          <p className="mt-1 text-sm text-zinc-400">
-            Factual historical relationships derived from settled multi-window performance evidence.
-          </p>
+
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+            {refreshSuccess && (
+              <span style={{ fontSize: "0.75rem", color: "var(--status-success)", fontWeight: 600 }}>
+                ✓ Sweep Triggered
+              </span>
+            )}
+            <button
+              onClick={handleRefresh}
+              disabled={refreshing || isArchived}
+              title={isArchived ? "Activate this channel before requesting learning sweeps." : "Request Learning Sweep"}
+              className="btn btn-primary btn-sm"
+              style={{ fontSize: "0.8rem", display: "flex", alignItems: "center", gap: "0.4rem" }}
+            >
+              <span>↻</span> {refreshing ? "Triggering..." : "Request Learning Sweep"}
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          {refreshSuccess && (
-            <span className="text-xs text-emerald-400 font-medium">
-              Sweep queued successfully
-            </span>
-          )}
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing}
-            className="inline-flex items-center gap-2 rounded-lg border border-zinc-700 bg-zinc-800/90 px-3 py-1.5 text-xs font-medium text-zinc-200 transition hover:bg-zinc-700 hover:text-white disabled:opacity-50"
+
+        {error && (
+          <div
+            style={{
+              padding: "0.75rem 1rem",
+              background: "var(--status-danger-bg)",
+              border: "1px solid var(--status-danger-border)",
+              borderRadius: "var(--radius-sm)",
+              fontSize: "0.8rem",
+              color: "var(--status-danger)",
+              marginBottom: "1rem",
+            }}
           >
-            {refreshing ? "Queuing..." : "Request Learning Sweep"}
-          </button>
-        </div>
-      </div>
+            {error}
+          </div>
+        )}
 
-      {error && (
-        <div className="rounded-lg border border-rose-900/50 bg-rose-950/30 p-3 text-xs text-rose-300">
-          {error}
-        </div>
-      )}
-
-      {/* Section: Validated Knowledge Items */}
-      <div>
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-400 mb-3">
-          Active Knowledge Claims ({knowledge.length})
-        </h3>
-        {knowledge.length === 0 ? (
-          <p className="text-xs text-zinc-500 italic">
-            No knowledge claims have met sample size and effect size thresholds yet.
-          </p>
-        ) : (
-          <div className="grid gap-3 sm:grid-cols-1 lg:grid-cols-2">
-            {knowledge.map((item) => (
-              <div
-                key={item.knowledge_item_id}
-                className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 transition hover:border-zinc-700"
-              >
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <span className="text-xs font-mono font-medium text-zinc-300 uppercase">
-                    {item.knowledge_type}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`rounded border px-2 py-0.5 text-[11px] font-semibold tracking-wide ${getConfidenceBadge(
-                        item.confidence_class
-                      )}`}
-                    >
-                      {item.confidence_class}
-                    </span>
-                    <span
-                      className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${getStatusBadge(
-                        item.current_status
-                      )}`}
-                    >
-                      {item.current_status}
-                    </span>
-                  </div>
-                </div>
-
-                <p className="text-sm text-zinc-200 leading-snug">
-                  {item.human_readable_summary}
-                </p>
-
-                <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-zinc-400 border-t border-zinc-800/60 pt-2.5">
+        {/* Section 1: Knowledge Claims */}
+        <div style={{ marginBottom: "1.5rem" }}>
+          <h3 style={{ fontSize: "0.95rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.75rem" }}>
+            Established Channel Knowledge ({knowledge.length})
+          </h3>
+          {knowledge.length === 0 ? (
+            <div
+              style={{
+                textAlign: "center",
+                padding: "2rem 1rem",
+                color: "var(--text-muted)",
+                fontSize: "0.82rem",
+                background: "var(--bg-input)",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border-subtle)",
+              }}
+            >
+              No solidified knowledge items extracted yet. Run more content iterations to establish historical associations.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+              {knowledge.map((item) => (
+                <div
+                  key={item.knowledge_item_id}
+                  style={{
+                    padding: "0.85rem 1rem",
+                    background: "var(--bg-input)",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid var(--border-subtle)",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "flex-start",
+                    gap: "1rem",
+                  }}
+                >
                   <div>
-                    <span className="text-zinc-500">Effect:</span>{" "}
-                    <span className="font-mono text-zinc-200">
-                      {(toFiniteNumber(item.effect_size_absolute) ?? 0) > 0 ? "+" : ""}
-                      {formatDecimal(item.effect_size_absolute, 1)}
-                    </span>
-                    {item.effect_size_relative_percent !== null && (
-                      <span className="text-zinc-400 font-mono ml-1">
-                        ({(toFiniteNumber(item.effect_size_relative_percent) ?? 0) > 0 ? "+" : ""}
-                        {formatDecimal(item.effect_size_relative_percent, 1)}%)
+                    <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.35rem" }}>
+                      <span className="badge badge-active" style={{ fontSize: "0.7rem" }}>
+                        {item.knowledge_type}
                       </span>
-                    )}
+                      <span className={`badge ${getConfidenceBadgeClass(item.confidence_class)}`} style={{ fontSize: "0.7rem" }}>
+                        {item.confidence_class}
+                      </span>
+                      <span className="badge badge-neutral text-mono" style={{ fontSize: "0.7rem" }}>
+                        {item.evidence_type}
+                      </span>
+                    </div>
+                    <p style={{ fontSize: "0.85rem", color: "var(--text-primary)", fontWeight: 500 }}>
+                      {item.human_readable_summary}
+                    </p>
                   </div>
-                  <div>
-                    <span className="text-zinc-500">Cliff&apos;s Delta:</span>{" "}
-                    <span className="font-mono text-zinc-200">
-                      {formatDecimal(item.cliffs_delta, 2)}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-zinc-500">Sample:</span>{" "}
-                    <span className="font-mono text-zinc-300">
-                      Nt={item.sample_size_treatment}, Nc={item.sample_size_control}
-                    </span>
-                  </div>
-                  <div>
-                    <span className="text-zinc-500">Revision:</span>{" "}
-                    <span className="font-mono text-zinc-400">r{item.revision_number}</span>
+                  <div className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)", whiteSpace: "nowrap" }}>
+                    ID: {item.knowledge_item_id.substring(0, 8)}...
                   </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+              ))}
+            </div>
+          )}
+        </div>
 
-      {/* Section: Active Hypotheses */}
-      <div>
-        <h3 className="text-sm font-semibold uppercase tracking-wider text-zinc-400 mb-3">
-          Investigational Hypotheses ({hypotheses.length})
-        </h3>
-        {hypotheses.length === 0 ? (
-          <p className="text-xs text-zinc-500 italic">
-            No hypotheses are currently defined for this channel.
-          </p>
-        ) : (
-          <div className="space-y-2.5">
-            {hypotheses.map((hyp) => (
-              <div
-                key={hyp.hypothesis_family_id}
-                className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-zinc-800/70 bg-zinc-900/30 px-4 py-3 text-xs"
-              >
-                <div className="space-y-0.5">
-                  <div className="flex items-center gap-2">
-                    <span className="font-mono font-medium text-zinc-300">
-                      {hyp.hypothesis_slug}
-                    </span>
-                    <span className="text-zinc-500">v{hyp.current_version}</span>
+        {/* Section 2: Active Hypotheses */}
+        <div>
+          <h3 style={{ fontSize: "0.95rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.75rem" }}>
+            Investigational Hypotheses ({hypotheses.length})
+          </h3>
+          {hypotheses.length === 0 ? (
+            <div
+              style={{
+                textAlign: "center",
+                padding: "2rem 1rem",
+                color: "var(--text-muted)",
+                fontSize: "0.82rem",
+                background: "var(--bg-input)",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border-subtle)",
+              }}
+            >
+              No active hypothesis families found for this channel.
+            </div>
+          ) : (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(320px, 1fr))", gap: "0.75rem" }}>
+              {hypotheses.map((h) => (
+                <div
+                  key={h.hypothesis_family_id}
+                  style={{
+                    padding: "0.85rem 1rem",
+                    background: "var(--bg-input)",
+                    borderRadius: "var(--radius-sm)",
+                    border: "1px solid var(--border-subtle)",
+                    display: "flex",
+                    flexDirection: "column",
+                    justifyContent: "space-between",
+                    gap: "0.6rem",
+                  }}
+                >
+                  <div>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
+                      <span className={`badge ${getStatusBadgeClass(h.current_status)}`}>
+                        {h.current_status}
+                      </span>
+                      <span className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                        v{h.current_version} • {h.target_evaluation_window || "7d"}
+                      </span>
+                    </div>
+                    <p style={{ fontSize: "0.85rem", color: "var(--text-primary)", fontWeight: 600, lineHeight: 1.4 }}>
+                      {h.description}
+                    </p>
                   </div>
-                  <p className="text-zinc-400">{hyp.description}</p>
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-zinc-400 font-mono">
-                    Target: {hyp.target_outcome_metric} ({hyp.target_evaluation_window})
-                  </span>
-                  <span
-                    className={`rounded border px-2 py-0.5 text-[11px] font-semibold ${getStatusBadge(
-                      hyp.current_status
-                    )}`}
+
+                  <div
+                    style={{
+                      paddingTop: "0.5rem",
+                      borderTop: "1px solid var(--border-subtle)",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      fontSize: "0.75rem",
+                      color: "var(--text-muted)",
+                    }}
                   >
-                    {hyp.current_status}
-                  </span>
+                    <span>
+                      Factor: <strong style={{ color: "var(--accent-secondary)" }}>{h.factor_name}</strong>
+                    </span>
+                    <span>
+                      Target: <strong style={{ color: "var(--status-success)" }}>{h.target_outcome_metric}</strong>
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
-          </div>
-        )}
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

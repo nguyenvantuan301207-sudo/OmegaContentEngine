@@ -1,8 +1,7 @@
 "use client";
 
-import React, { useEffect, useState } from "react";
+import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
 import {
   Channel,
   ContentGenerationRequest,
@@ -34,12 +33,19 @@ import {
   ScriptVersionSummary,
   SubtitleCue,
 } from "@/lib/api";
+import { useOperatorContext } from "@/lib/operator-context";
+import { ChannelContextBar } from "@/components/ChannelContextBar";
 
 type TabType = "scenes" | "assets" | "narration" | "subtitles" | "plan" | "artifacts" | "qa";
 
-export default function ProductionEnginePage() {
-  const params = useParams();
-  const channelId = params.id as string;
+export default function ProductionEnginePage({
+  params,
+}: {
+  params: Promise<{ id: string }>;
+}) {
+  const resolvedParams = use(params);
+  const channelId = resolvedParams.id;
+  const { setSelectedChannelId } = useOperatorContext();
 
   const [channel, setChannel] = useState<Channel | null>(null);
   const [requests, setRequests] = useState<ProductionRequest[]>([]);
@@ -69,102 +75,105 @@ export default function ProductionEnginePage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Initial Load
-  useEffect(() => {
-    async function loadData() {
+  const loadArtifacts = useCallback(
+    async (req: ProductionRequest) => {
       try {
-        setLoading(true);
-        const [ch, reqList, cReqList] = await Promise.all([
-          getChannel(channelId),
-          listProductionRequests(channelId),
-          listContentRequests(channelId),
+        const [scList, astList, nList, subList, artList, jobList, plan, qa] = await Promise.allSettled([
+          listProductionScenes(channelId, req.id),
+          listProductionAssets(channelId, req.id),
+          listNarrationSegments(channelId, req.id),
+          listSubtitleCues(channelId, req.id),
+          listMediaArtifacts(channelId, req.id),
+          listRenderJobs(channelId, req.id),
+          getRenderPlan(channelId, req.id),
+          getProductionQAResult(channelId, req.id),
         ]);
-        setChannel(ch);
-        setRequests(reqList);
-        setContentRequests(cReqList);
-        if (reqList.length > 0) {
-          setSelectedReq(reqList[0]);
-        }
-      } catch (err: unknown) {
-        setError(err instanceof Error ? err.message : "Failed to load production data");
-      } finally {
-        setLoading(false);
-      }
-    }
-    loadData();
-  }, [channelId]);
 
-  // Load Request Artifacts
-  useEffect(() => {
-    if (!selectedReq) return;
+        setScenes(scList.status === "fulfilled" ? scList.value : []);
+        setAssets(astList.status === "fulfilled" ? astList.value : []);
+        setNarration(nList.status === "fulfilled" ? nList.value : []);
+        setSubtitles(subList.status === "fulfilled" ? subList.value : []);
+        setRenderJobs(jobList.status === "fulfilled" ? jobList.value : []);
+        setRenderPlan(plan.status === "fulfilled" ? plan.value : null);
+        setQaResult(qa.status === "fulfilled" ? qa.value : null);
 
-    async function loadArtifacts() {
-      try {
-        const [scList, astList, nList, subList, artList, jobList] = await Promise.all([
-          listProductionScenes(channelId, selectedReq!.id).catch(() => []),
-          listProductionAssets(channelId, selectedReq!.id).catch(() => []),
-          listNarrationSegments(channelId, selectedReq!.id).catch(() => []),
-          listSubtitleCues(channelId, selectedReq!.id).catch(() => []),
-          listMediaArtifacts(channelId, selectedReq!.id).catch(() => []),
-          listRenderJobs(channelId, selectedReq!.id).catch(() => []),
-        ]);
-        setScenes(scList);
-        setAssets(astList);
-        setNarration(nList);
-        setSubtitles(subList);
-        setArtifacts(artList);
-        setRenderJobs(jobList);
-
-        if (artList.length > 0) {
-          const current = artList.find((a) => a.is_current) || artList[0];
+        if (artList.status === "fulfilled" && artList.value.length > 0) {
+          setArtifacts(artList.value);
+          const current = artList.value.find((a) => a.is_current) || artList.value[0];
           setSelectedArtifactVersion(current.version);
         } else {
+          setArtifacts([]);
           setSelectedArtifactVersion(null);
         }
-
-        // Load plan & QA
-        getRenderPlan(channelId, selectedReq!.id).then(setRenderPlan).catch(() => setRenderPlan(null));
-        getProductionQAResult(channelId, selectedReq!.id).then(setQaResult).catch(() => setQaResult(null));
-      } catch (err: unknown) {
-        console.error("Failed to load artifacts", err);
+      } catch {
+        // Ignored for partial details
       }
-    }
-    loadArtifacts();
-  }, [channelId, selectedReq]);
+    },
+    [channelId]
+  );
 
-  // Handler: Select Content Request to load scripts
-  const handleContentReqChange = async (contentReqId: string) => {
-    setSelectedContentReqId(contentReqId);
-    if (!contentReqId) return;
+  const loadData = useCallback(async () => {
     try {
-      const scripts = await listScriptVersions(channelId, contentReqId);
-      setScriptsByReq((prev) => ({ ...prev, [contentReqId]: scripts }));
-      if (scripts.length > 0) {
-        setSelectedScriptId(scripts[0].id);
+      setLoading(true);
+      setError(null);
+      setSelectedChannelId(channelId);
+      const [ch, reqList, cReqList] = await Promise.all([
+        getChannel(channelId).catch(() => null),
+        listProductionRequests(channelId).catch(() => []),
+        listContentRequests(channelId).catch(() => []),
+      ]);
+      setChannel(ch);
+      setRequests(reqList);
+      setContentRequests(cReqList);
+      if (reqList.length > 0) {
+        setSelectedReq(reqList[0]);
+        await loadArtifacts(reqList[0]);
       }
     } catch (err: unknown) {
-      console.error(err);
+      setError(err instanceof Error ? err.message : "Failed to load production data");
+    } finally {
+      setLoading(false);
+    }
+  }, [channelId, loadArtifacts, setSelectedChannelId]);
+
+  useEffect(() => {
+    loadData();
+  }, [loadData]);
+
+  const handleContentReqChange = async (reqId: string) => {
+    setSelectedContentReqId(reqId);
+    setSelectedScriptId("");
+    if (!reqId) return;
+
+    if (!scriptsByReq[reqId]) {
+      try {
+        const sList = await listScriptVersions(channelId, reqId);
+        setScriptsByReq((prev) => ({ ...prev, [reqId]: sList }));
+        if (sList.length > 0) {
+          setSelectedScriptId(sList[0].id);
+        }
+      } catch {
+        // Handle gracefully
+      }
+    } else if (scriptsByReq[reqId].length > 0) {
+      setSelectedScriptId(scriptsByReq[reqId][0].id);
     }
   };
 
-  // Handler: Create Production Request
   const handleCreateRequest = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedScriptId) return;
+    if (!selectedContentReqId || !selectedScriptId) return;
+
     try {
       setActionLoading(true);
+      setError(null);
       const newReq = await createProductionRequest(channelId, {
         script_version_id: selectedScriptId,
-        target_width: 1920,
-        target_height: 1080,
-        fps: 30,
-        video_codec: "h264",
-        audio_codec: "aac",
-        container_format: "mp4",
       });
-      setRequests((prev) => [newReq, ...prev]);
-      setSelectedReq(newReq);
       setIsCreating(false);
+      await loadData();
+      setSelectedReq(newReq);
+      await loadArtifacts(newReq);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to create production request");
     } finally {
@@ -172,65 +181,41 @@ export default function ProductionEnginePage() {
     }
   };
 
-  // Handler: Prepare Production
   const handlePrepare = async () => {
     if (!selectedReq) return;
     try {
       setActionLoading(true);
-      const updated = await prepareProduction(channelId, selectedReq.id);
-      setSelectedReq(updated);
-      setRequests((prev) => prev.map((r) => (r.id === updated.id ? updated : r)));
+      setError(null);
+      await prepareProduction(channelId, selectedReq.id);
+      await loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to prepare production");
+      setError(err instanceof Error ? err.message : "Preparation failed");
     } finally {
       setActionLoading(false);
     }
   };
 
-  // Handler: Render v1
   const handleRender = async () => {
     if (!selectedReq) return;
     try {
       setActionLoading(true);
-      const idempotencyKey = `render_${selectedReq.id}_${Date.now()}`;
-      await renderProduction(channelId, selectedReq.id, idempotencyKey);
-      // Reload request and artifacts
-      const [updatedList, artList, jobList] = await Promise.all([
-        listProductionRequests(channelId),
-        listMediaArtifacts(channelId, selectedReq.id),
-        listRenderJobs(channelId, selectedReq.id),
-      ]);
-      setRequests(updatedList);
-      const updated = updatedList.find((r) => r.id === selectedReq.id);
-      if (updated) setSelectedReq(updated);
-      setArtifacts(artList);
-      setRenderJobs(jobList);
-      setActiveTab("artifacts");
+      setError(null);
+      await renderProduction(channelId, selectedReq.id, `render-${Date.now()}`);
+      await loadData();
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Render failed");
+      setError(err instanceof Error ? err.message : "Render submission failed");
     } finally {
       setActionLoading(false);
     }
   };
 
-  // Handler: Explicit Rerender (vN+1)
   const handleRerender = async () => {
     if (!selectedReq) return;
     try {
       setActionLoading(true);
-      const idempotencyKey = `rerender_${selectedReq.id}_${Date.now()}`;
-      await rerenderProduction(channelId, selectedReq.id, idempotencyKey, "Manual rerender request");
-      const [updatedList, artList, jobList] = await Promise.all([
-        listProductionRequests(channelId),
-        listMediaArtifacts(channelId, selectedReq.id),
-        listRenderJobs(channelId, selectedReq.id),
-      ]);
-      setRequests(updatedList);
-      const updated = updatedList.find((r) => r.id === selectedReq.id);
-      if (updated) setSelectedReq(updated);
-      setArtifacts(artList);
-      setRenderJobs(jobList);
-      setActiveTab("artifacts");
+      setError(null);
+      await rerenderProduction(channelId, selectedReq.id, `rerender-${Date.now()}`, "Operator requested rerender");
+      await loadData();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Rerender failed");
     } finally {
@@ -238,524 +223,713 @@ export default function ProductionEnginePage() {
     }
   };
 
+  const getStatusBadgeClass = (status: string, outcome?: string | null) => {
+    if (status === "SUCCEEDED") {
+      return outcome === "BLOCKED" ? "badge-warning" : "badge-success";
+    }
+    if (status === "RUNNING") return "badge-active";
+    if (status === "FAILED") return "badge-failed";
+    return "badge-draft";
+  };
+
   const selectedArtifact = artifacts.find((a) => a.version === selectedArtifactVersion) || artifacts[0];
 
+  const isArchived = channel?.state === "ARCHIVED";
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 p-8">
-      {/* Header Breadcrumb */}
-      <div className="flex items-center justify-between mb-6 pb-4 border-b border-slate-800">
+    <div style={{ maxWidth: "1200px", margin: "0 auto", padding: "1.5rem" }}>
+      {/* Channel Context Bar with Pipeline Tabs */}
+      <ChannelContextBar currentTab="production" />
+
+      {/* Header */}
+      <div className="page-header" style={{ marginBottom: "1.5rem" }}>
         <div>
-          <div className="flex items-center space-x-2 text-sm text-slate-400 mb-1">
-            <Link href="/" className="hover:text-cyan-400">Dashboard</Link>
-            <span>/</span>
-            <Link href={`/channels/${channelId}`} className="hover:text-cyan-400">
-              {channel ? channel.name : "Channel"}
-            </Link>
-            <span>/</span>
-            <span className="text-slate-200">Production Engine</span>
+          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.25rem" }}>
+            <h1 className="page-title">🎬 Production Workspace</h1>
+            <span className="badge badge-active">OMEGA-007</span>
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-3">
-            🎬 Production Workspace
-            <span className="text-xs px-2.5 py-0.5 rounded-full bg-cyan-950 text-cyan-400 border border-cyan-800 font-mono">
-              OMEGA-007
-            </span>
-          </h1>
+          <p className="page-subtitle">
+            Render plan compilation, audio narration synthesis, subtitle cue alignment, ffmpeg timeline rendering, and media delivery.
+          </p>
         </div>
 
-        <div className="flex items-center space-x-3">
+        <div style={{ display: "flex", gap: "0.5rem" }}>
           <button
             onClick={() => setIsCreating(true)}
-            className="px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white rounded-lg text-sm font-medium shadow-md shadow-cyan-950 transition"
+            disabled={isArchived}
+            title={isArchived ? "Activate this channel before creating production requests." : "New Production Request"}
+            className="btn btn-primary btn-sm"
+            style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}
           >
-            + New Production Request
+            <span>+</span> New Production Request
+          </button>
+          <button
+            onClick={loadData}
+            className="btn btn-secondary btn-sm"
+          >
+            ↻ Refresh
           </button>
         </div>
       </div>
 
       {error && (
-        <div className="mb-6 p-4 rounded-lg bg-red-950/60 border border-red-800 text-red-300 text-sm flex justify-between items-center">
+        <div
+          style={{
+            padding: "0.75rem 1rem",
+            background: "var(--status-danger-bg)",
+            border: "1px solid var(--status-danger-border)",
+            borderRadius: "var(--radius-sm)",
+            fontSize: "0.82rem",
+            color: "var(--status-danger)",
+            marginBottom: "1.5rem",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
           <span>{error}</span>
-          <button onClick={() => setError(null)} className="text-red-400 hover:text-white">✕</button>
+          <button onClick={() => setError(null)} className="btn btn-secondary btn-sm" style={{ padding: "0.15rem 0.45rem", fontSize: "0.72rem" }}>
+            ✕
+          </button>
         </div>
       )}
 
-      {/* Main Grid */}
-      <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-        {/* Left Sidebar: Requests List */}
-        <div className="lg:col-span-1 space-y-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-slate-400 mb-3">
-              Production Requests ({requests.length})
-            </h2>
+      {loading && !channel && (
+        <div className="card" style={{ padding: "3rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.9rem" }}>
+          Loading Production Engine workspace...
+        </div>
+      )}
 
-            {loading ? (
-              <div className="text-sm text-slate-500 py-6 text-center">Loading requests...</div>
-            ) : requests.length === 0 ? (
-              <div className="text-sm text-slate-500 py-6 text-center">No production requests yet.</div>
-            ) : (
-              <div className="space-y-2 max-h-[70vh] overflow-y-auto pr-1">
-                {requests.map((req) => (
-                  <button
+      {/* Main Grid: Left Requests, Right Workspace Console */}
+      <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: "1.5rem", alignItems: "start" }}>
+        {/* Left Sidebar: Requests List */}
+        <div className="card" style={{ padding: "1.25rem" }}>
+          <h3 style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)", marginBottom: "1rem" }}>
+            Production Requests ({requests.length})
+          </h3>
+
+          {requests.length === 0 ? (
+            <div
+              style={{
+                textAlign: "center",
+                padding: "2rem 1rem",
+                color: "var(--text-muted)",
+                fontSize: "0.82rem",
+                background: "var(--bg-input)",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border-subtle)",
+              }}
+            >
+              No production requests created yet.
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", maxHeight: "700px", overflowY: "auto" }}>
+              {requests.map((req) => {
+                const isSelected = selectedReq?.id === req.id;
+                return (
+                  <div
                     key={req.id}
-                    onClick={() => setSelectedReq(req)}
-                    className={`w-full text-left p-3 rounded-lg border transition ${
-                      selectedReq?.id === req.id
-                        ? "bg-slate-800 border-cyan-500/50 shadow-sm"
-                        : "bg-slate-900/50 border-slate-800 hover:border-slate-700"
-                    }`}
+                    onClick={() => {
+                      setSelectedReq(req);
+                      loadArtifacts(req);
+                    }}
+                    style={{
+                      padding: "0.75rem 0.85rem",
+                      borderRadius: "var(--radius-sm)",
+                      background: isSelected ? "var(--bg-card-hover)" : "var(--bg-input)",
+                      border: isSelected ? "1px solid var(--accent-primary)" : "1px solid var(--border-subtle)",
+                      cursor: "pointer",
+                      transition: "all 0.15s ease",
+                    }}
                   >
-                    <div className="flex justify-between items-start mb-1.5">
-                      <span className="font-mono text-xs text-slate-400">
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
+                      <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
                         {req.id.slice(0, 8)}...
                       </span>
-                      <span
-                        className={`text-[10px] px-2 py-0.5 rounded font-semibold ${
-                          req.status === "SUCCEEDED"
-                            ? req.outcome === "BLOCKED"
-                              ? "bg-amber-950 text-amber-400 border border-amber-800"
-                              : "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                            : req.status === "FAILED"
-                            ? "bg-red-950 text-red-400 border border-red-800"
-                            : req.status === "RUNNING"
-                            ? "bg-blue-950 text-blue-400 border border-blue-800 animate-pulse"
-                            : "bg-slate-800 text-slate-300"
-                        }`}
-                      >
+                      <span className={`badge ${getStatusBadgeClass(req.status, req.outcome)}`} style={{ fontSize: "0.68rem" }}>
                         {req.outcome === "BLOCKED" ? "BLOCKED" : req.status}
                       </span>
                     </div>
-                    <div className="text-xs text-slate-300">
-                      {req.target_width}x{req.target_height} @ {req.fps}fps ({req.video_codec})
+
+                    <div style={{ fontSize: "0.82rem", fontWeight: 600, color: isSelected ? "var(--accent-secondary)" : "var(--text-primary)" }}>
+                      {req.target_width}x{req.target_height} @ {req.fps}fps
                     </div>
-                    <div className="text-[10px] text-slate-500 mt-1">
-                      {new Date(req.created_at).toLocaleTimeString()}
+
+                    <div className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "0.25rem", display: "flex", justifyContent: "space-between" }}>
+                      <span>{req.video_codec}</span>
+                      <span>{new Date(req.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</span>
                     </div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Right Main Content */}
-        <div className="lg:col-span-3 space-y-6">
-          {selectedReq ? (
-            <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-              {/* Request Header Bar */}
-              <div className="flex flex-wrap items-center justify-between gap-4 pb-6 border-b border-slate-800">
+        {selectedReq ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+            {/* Action Header Card */}
+            <div className="card" style={{ padding: "1.25rem" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "1rem", marginBottom: "0.5rem" }}>
                 <div>
-                  <div className="flex items-center gap-3">
-                    <h2 className="text-xl font-bold text-white">
-                      Production Request {selectedReq.id.slice(0, 8)}
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.35rem" }}>
+                    <h2 style={{ fontSize: "1.15rem", fontWeight: 700, color: "var(--text-primary)" }}>
+                      Request {selectedReq.id.slice(0, 8)}
                     </h2>
-                    <span className="text-xs px-2.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                    <span className="badge badge-neutral text-mono" style={{ fontSize: "0.7rem" }}>
                       {selectedReq.mode}
                     </span>
                   </div>
-                  <p className="text-xs text-slate-400 mt-1 font-mono">
-                    Script Pinned: {selectedReq.script_version_id} | DNA: {selectedReq.channel_dna_revision_id.slice(0, 8)}...
+                  <p className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                    Script: {selectedReq.script_version_id} • DNA: {selectedReq.channel_dna_revision_id.slice(0, 8)}
                   </p>
                 </div>
 
-                <div className="flex items-center space-x-2">
+                <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
                   <button
                     onClick={handlePrepare}
-                    disabled={actionLoading || selectedReq.status === "RUNNING"}
-                    className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-200 rounded-lg text-xs font-semibold border border-slate-700 transition"
+                    disabled={actionLoading || selectedReq.status === "RUNNING" || isArchived}
+                    title={isArchived ? "Activate this channel before preparing production plans." : "Prepare Production Plan"}
+                    className="btn btn-secondary btn-sm"
                   >
                     {actionLoading ? "Processing..." : "1. Prepare Plan"}
                   </button>
 
                   <button
                     onClick={handleRender}
-                    disabled={actionLoading || selectedReq.status === "RUNNING"}
-                    className="px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-sm transition"
+                    disabled={actionLoading || selectedReq.status === "RUNNING" || isArchived}
+                    title={isArchived ? "Activate this channel before rendering media." : "Render Video"}
+                    className="btn btn-primary btn-sm"
                   >
                     {actionLoading ? "Rendering..." : "2. Render (v1)"}
                   </button>
 
                   <button
                     onClick={handleRerender}
-                    disabled={actionLoading || selectedReq.status === "RUNNING" || artifacts.length === 0}
-                    className="px-3 py-1.5 bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-sm transition"
+                    disabled={actionLoading || selectedReq.status === "RUNNING" || artifacts.length === 0 || isArchived}
+                    title={isArchived ? "Activate this channel before rerendering media." : "Rerender Video Revision"}
+                    className="btn btn-secondary btn-sm"
+                    style={{ color: "var(--status-purple)" }}
                   >
                     3. Rerender (vN+1)
                   </button>
+
+                  {artifacts.length > 0 && !isArchived && (
+                    <Link href="/publisher" className="btn btn-success btn-sm">
+                      Publish →
+                    </Link>
+                  )}
                 </div>
               </div>
+            </div>
 
-              {/* Tabs Navigation */}
-              <div className="flex space-x-2 border-b border-slate-800 mt-4 pb-2 overflow-x-auto text-xs">
-                {(
-                  [
-                    ["scenes", `🎬 Scenes (${scenes.length})`],
-                    ["assets", `🎨 Assets (${assets.length})`],
-                    ["narration", `🎙️ Narration (${narration.length})`],
-                    ["subtitles", `💬 Subtitles (${subtitles.length})`],
-                    ["plan", "⚙️ Render Plan"],
-                    ["artifacts", `📹 Media Artifacts (${artifacts.length})`],
-                    ["qa", "🛡️ QA Findings"],
-                  ] as const
-                ).map(([tabKey, tabLabel]) => (
-                  <button
-                    key={tabKey}
-                    onClick={() => setActiveTab(tabKey)}
-                    className={`px-3 py-1.5 rounded-lg font-medium transition ${
-                      activeTab === tabKey
-                        ? "bg-slate-800 text-cyan-400 border border-slate-700"
-                        : "text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    {tabLabel}
-                  </button>
-                ))}
+            {/* Tabs */}
+            <div className="card" style={{ padding: "1.25rem" }}>
+              <div className="tab-group" style={{ marginBottom: "1.25rem" }}>
+                <button
+                  onClick={() => setActiveTab("scenes")}
+                  className={`tab-item ${activeTab === "scenes" ? "active" : ""}`}
+                >
+                  🎬 Scenes ({scenes.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab("assets")}
+                  className={`tab-item ${activeTab === "assets" ? "active" : ""}`}
+                >
+                  🎨 Assets ({assets.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab("narration")}
+                  className={`tab-item ${activeTab === "narration" ? "active" : ""}`}
+                >
+                  🎙️ Narration ({narration.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab("subtitles")}
+                  className={`tab-item ${activeTab === "subtitles" ? "active" : ""}`}
+                >
+                  💬 Subtitles ({subtitles.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab("plan")}
+                  className={`tab-item ${activeTab === "plan" ? "active" : ""}`}
+                >
+                  ⚙️ Render Plan
+                </button>
+                <button
+                  onClick={() => setActiveTab("artifacts")}
+                  className={`tab-item ${activeTab === "artifacts" ? "active" : ""}`}
+                >
+                  📹 Media ({artifacts.length})
+                </button>
+                <button
+                  onClick={() => setActiveTab("qa")}
+                  className={`tab-item ${activeTab === "qa" ? "active" : ""}`}
+                >
+                  🛡️ QA {qaResult ? `(${qaResult.status})` : ""}
+                </button>
               </div>
 
-              {/* Tab Content Area */}
-              <div className="mt-6">
-                {/* 1. SCENES TAB */}
-                {activeTab === "scenes" && (
-                  <div className="space-y-4">
-                    {scenes.length === 0 ? (
-                      <div className="text-center py-12 text-slate-500 text-sm">
-                        No scenes generated yet. Click <strong>1. Prepare Plan</strong> above.
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        {scenes.map((scene) => (
-                          <div key={scene.id} className="p-4 bg-slate-950 border border-slate-800 rounded-lg">
-                            <div className="flex justify-between items-center mb-2">
-                              <span className="font-bold text-sm text-cyan-400">
-                                Scene {scene.scene_order} • {scene.scene_type}
-                              </span>
-                              <span className="text-xs font-mono text-slate-400">
-                                {scene.estimated_duration_ms} ms
-                              </span>
+              {/* 1. SCENES TAB */}
+              {activeTab === "scenes" && (
+                <div>
+                  {scenes.length === 0 ? (
+                    <div style={{ textAlign: "center", padding: "3rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                      No scenes generated yet. Click <strong>1. Prepare Plan</strong> above.
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
+                      {scenes.map((scene) => (
+                        <div
+                          key={scene.id}
+                          style={{
+                            padding: "1rem 1.25rem",
+                            background: "var(--bg-input)",
+                            borderRadius: "var(--radius-sm)",
+                            border: "1px solid var(--border-subtle)",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "0.5rem",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontWeight: 700, fontSize: "0.9rem", color: "var(--accent-secondary)" }}>
+                              Scene {scene.scene_order} • {scene.scene_type}
+                            </span>
+                            <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                              {scene.estimated_duration_ms} ms
+                            </span>
+                          </div>
+                          <p style={{ fontSize: "0.88rem", color: "var(--text-primary)", lineHeight: 1.5 }}>
+                            {scene.narration_text}
+                          </p>
+                          {scene.visual_intent && (
+                            <div style={{ padding: "0.5rem 0.75rem", background: "var(--bg-card)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)", fontSize: "0.78rem", color: "var(--text-muted)" }}>
+                              🎨 <em>Visual Intent: {scene.visual_intent}</em>
                             </div>
-                            <p className="text-sm text-slate-200 mb-2">
-                              {scene.narration_text}
-                            </p>
-                            {scene.visual_intent && (
-                              <div className="text-xs text-slate-400 bg-slate-900/80 p-2 rounded border border-slate-800/60">
-                                🎨 <em>Visual: {scene.visual_intent}</em>
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
-                {/* 2. ASSETS TAB */}
-                {activeTab === "assets" && (
-                  <div className="space-y-4">
-                    {assets.length === 0 ? (
-                      <div className="text-center py-12 text-slate-500 text-sm">
-                        No assets resolved yet.
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        {assets.map((ast) => (
-                          <div key={ast.id} className="p-4 bg-slate-950 border border-slate-800 rounded-lg">
-                            <div className="flex justify-between items-start mb-2">
-                              <span className="font-semibold text-xs text-slate-300 uppercase">
-                                {ast.asset_type} ({ast.provider_type})
-                              </span>
-                              <span className="text-[10px] px-2 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800">
-                                {ast.license_status}
-                              </span>
-                            </div>
-                            <p className="text-xs text-slate-400 font-mono truncate mb-1">
-                              URI: {ast.storage_uri}
-                            </p>
-                            <p className="text-[10px] text-slate-500 font-mono truncate">
-                              SHA256: {ast.content_hash}
-                            </p>
+              {/* 2. ASSETS TAB */}
+              {activeTab === "assets" && (
+                <div>
+                  {assets.length === 0 ? (
+                    <div style={{ textAlign: "center", padding: "3rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                      No assets resolved yet.
+                    </div>
+                  ) : (
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: "0.75rem" }}>
+                      {assets.map((ast) => (
+                        <div
+                          key={ast.id}
+                          style={{
+                            padding: "0.85rem 1rem",
+                            background: "var(--bg-input)",
+                            borderRadius: "var(--radius-sm)",
+                            border: "1px solid var(--border-subtle)",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "0.35rem",
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <span style={{ fontSize: "0.75rem", fontWeight: 700, color: "var(--text-primary)", textTransform: "uppercase" }}>
+                              {ast.asset_type} ({ast.provider_type})
+                            </span>
+                            <span className="badge badge-success" style={{ fontSize: "0.68rem" }}>
+                              {ast.license_status}
+                            </span>
                           </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
+                          <p className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)", wordBreak: "break-all" }}>
+                            URI: {ast.storage_uri}
+                          </p>
+                          <p className="text-mono" style={{ fontSize: "0.68rem", color: "var(--text-muted)", wordBreak: "break-all" }}>
+                            SHA256: {ast.content_hash}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
-                {/* 3. NARRATION TAB */}
-                {activeTab === "narration" && (
-                  <div className="space-y-3">
-                    {narration.length === 0 ? (
-                      <div className="text-center py-12 text-slate-500 text-sm">No narration segments generated.</div>
-                    ) : (
-                      narration.map((seg, idx) => (
-                        <div key={seg.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg flex items-center justify-between">
-                          <div className="space-y-1">
-                            <div className="text-xs text-cyan-400 font-semibold">Segment #{idx + 1}</div>
-                            <div className="text-sm text-slate-200">{seg.text}</div>
+              {/* 3. NARRATION TAB */}
+              {activeTab === "narration" && (
+                <div>
+                  {narration.length === 0 ? (
+                    <div style={{ textAlign: "center", padding: "3rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                      No narration segments generated.
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
+                      {narration.map((seg, idx) => (
+                        <div
+                          key={seg.id}
+                          style={{
+                            padding: "0.85rem 1rem",
+                            background: "var(--bg-input)",
+                            borderRadius: "var(--radius-sm)",
+                            border: "1px solid var(--border-subtle)",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: "1rem",
+                          }}
+                        >
+                          <div>
+                            <span style={{ fontSize: "0.72rem", fontWeight: 700, color: "var(--accent-secondary)", display: "block", marginBottom: "0.2rem" }}>
+                              Segment #{idx + 1}
+                            </span>
+                            <p style={{ fontSize: "0.85rem", color: "var(--text-primary)" }}>{seg.text}</p>
                           </div>
-                          <div className="text-right text-xs font-mono text-slate-400">
+                          <div className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)", textAlign: "right", whiteSpace: "nowrap" }}>
                             <div>{seg.start_ms}ms → {seg.end_ms}ms</div>
-                            <div className="text-slate-500">Δ {seg.duration_ms}ms</div>
+                            <div style={{ color: "var(--accent-secondary)" }}>Δ {seg.duration_ms}ms</div>
                           </div>
                         </div>
-                      ))
-                    )}
-                  </div>
-                )}
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
-                {/* 4. SUBTITLES TAB */}
-                {activeTab === "subtitles" && (
-                  <div className="space-y-3">
-                    {subtitles.length === 0 ? (
-                      <div className="text-center py-12 text-slate-500 text-sm">No subtitle cues available.</div>
-                    ) : (
-                      subtitles.map((cue) => (
-                        <div key={cue.id} className="p-3 bg-slate-950 border border-slate-800 rounded-lg flex justify-between items-center">
-                          <div>
-                            <span className="text-xs font-bold text-slate-400 mr-3">#{cue.cue_order}</span>
-                            <span className="text-sm text-slate-200">{cue.text}</span>
+              {/* 4. SUBTITLES TAB */}
+              {activeTab === "subtitles" && (
+                <div>
+                  {subtitles.length === 0 ? (
+                    <div style={{ textAlign: "center", padding: "3rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                      No subtitle cues available.
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                      {subtitles.map((cue) => (
+                        <div
+                          key={cue.id}
+                          style={{
+                            padding: "0.75rem 1rem",
+                            background: "var(--bg-input)",
+                            borderRadius: "var(--radius-sm)",
+                            border: "1px solid var(--border-subtle)",
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                          }}
+                        >
+                          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                            <span className="text-mono" style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                              #{cue.cue_order}
+                            </span>
+                            <span style={{ fontSize: "0.85rem", color: "var(--text-primary)" }}>{cue.text}</span>
                           </div>
-                          <span className="text-xs font-mono text-slate-400">
+                          <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
                             {cue.start_ms}ms → {cue.end_ms}ms
                           </span>
                         </div>
-                      ))
-                    )}
-                  </div>
-                )}
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
-                {/* 5. RENDER PLAN TAB */}
-                {activeTab === "plan" && (
-                  <div className="space-y-4">
-                    {renderPlan ? (
-                      <div className="space-y-4">
-                        <div className="p-4 bg-slate-950 border border-slate-800 rounded-lg space-y-3">
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs font-mono">
-                            <div className="bg-slate-900 p-3 rounded border border-slate-800">
-                              <span className="text-slate-400 block mb-1">Dimensions</span>
-                              <span className="text-slate-200 font-bold">{renderPlan.width}x{renderPlan.height}</span>
-                            </div>
-                            <div className="bg-slate-900 p-3 rounded border border-slate-800">
-                              <span className="text-slate-400 block mb-1">FPS / Codec</span>
-                              <span className="text-slate-200 font-bold">{renderPlan.fps} fps ({renderPlan.video_codec})</span>
-                            </div>
-                            <div className="bg-slate-900 p-3 rounded border border-slate-800">
-                              <span className="text-slate-400 block mb-1">Total Duration</span>
-                              <span className="text-slate-200 font-bold">{(renderPlan.total_duration_ms / 1000).toFixed(1)}s</span>
-                            </div>
-                            <div className="bg-slate-900 p-3 rounded border border-slate-800">
-                              <span className="text-slate-400 block mb-1">Plan Version</span>
-                              <span className="text-cyan-400 font-bold">v{renderPlan.version}</span>
-                            </div>
-                          </div>
+              {/* 5. RENDER PLAN TAB */}
+              {activeTab === "plan" && (
+                <div>
+                  {renderPlan ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                      <div
+                        style={{
+                          display: "grid",
+                          gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))",
+                          gap: "0.75rem",
+                        }}
+                      >
+                        <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+                          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", display: "block" }}>Dimensions</span>
+                          <span style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--text-primary)" }}>{renderPlan.width}x{renderPlan.height}</span>
                         </div>
+                        <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+                          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", display: "block" }}>FPS / Codec</span>
+                          <span style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--text-primary)" }}>{renderPlan.fps} fps ({renderPlan.video_codec})</span>
+                        </div>
+                        <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+                          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", display: "block" }}>Total Duration</span>
+                          <span style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--status-success)" }}>{(renderPlan.total_duration_ms / 1000).toFixed(1)}s</span>
+                        </div>
+                        <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+                          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", display: "block" }}>Plan Version</span>
+                          <span className="text-mono" style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--accent-secondary)" }}>v{renderPlan.version}</span>
+                        </div>
+                      </div>
 
-                        {/* Render Jobs History */}
-                        {renderJobs.length > 0 && (
-                          <div className="p-4 bg-slate-950 border border-slate-800 rounded-lg space-y-2">
-                            <h4 className="text-xs font-semibold uppercase text-slate-400">Execution Jobs ({renderJobs.length})</h4>
-                            <div className="space-y-1.5 max-h-48 overflow-y-auto">
-                              {renderJobs.map((j) => (
-                                <div key={j.id} className="p-2.5 bg-slate-900 border border-slate-800 rounded flex justify-between items-center text-xs">
-                                  <div className="space-y-0.5">
-                                    <span className="font-mono text-cyan-400">{j.id.slice(0, 8)}...</span>
-                                    <div className="text-[10px] text-slate-500 font-mono">Key: {j.idempotency_key}</div>
-                                  </div>
-                                  <div className="text-right">
-                                    <span className="font-semibold text-slate-300">{j.state}</span>
-                                    <div className="text-[10px] text-slate-500">Attempt {j.attempt}/{j.max_attempts}</div>
+                      {/* Render Jobs History */}
+                      {renderJobs.length > 0 && (
+                        <div>
+                          <h4 style={{ fontSize: "0.85rem", fontWeight: 700, color: "var(--text-secondary)", textTransform: "uppercase", marginBottom: "0.5rem" }}>
+                            Execution Jobs ({renderJobs.length})
+                          </h4>
+                          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+                            {renderJobs.map((j) => (
+                              <div
+                                key={j.id}
+                                style={{
+                                  padding: "0.75rem 1rem",
+                                  background: "var(--bg-input)",
+                                  borderRadius: "var(--radius-sm)",
+                                  border: "1px solid var(--border-subtle)",
+                                  display: "flex",
+                                  justifyContent: "space-between",
+                                  alignItems: "center",
+                                  fontSize: "0.8rem",
+                                }}
+                              >
+                                <div>
+                                  <span className="text-mono" style={{ color: "var(--accent-secondary)", fontWeight: 600 }}>
+                                    {j.id.slice(0, 8)}...
+                                  </span>
+                                  <div className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "0.15rem" }}>
+                                    Key: {j.idempotency_key}
                                   </div>
                                 </div>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="text-center py-12 text-slate-500 text-sm">No RenderPlan manifest available.</div>
-                    )}
-                  </div>
-                )}
-
-                {/* 6. MEDIA ARTIFACTS TAB */}
-                {activeTab === "artifacts" && (
-                  <div className="space-y-6">
-                    {artifacts.length === 0 ? (
-                      <div className="text-center py-12 text-slate-500 text-sm">
-                        No rendered media artifacts found. Click <strong>2. Render</strong> to produce an MP4 video.
-                      </div>
-                    ) : (
-                      <div>
-                        {/* Version Switcher */}
-                        <div className="flex items-center space-x-2 mb-4">
-                          <span className="text-xs text-slate-400 font-medium">Revisions:</span>
-                          {artifacts.map((art) => (
-                            <button
-                              key={art.id}
-                              onClick={() => setSelectedArtifactVersion(art.version)}
-                              className={`px-3 py-1 text-xs rounded font-mono font-semibold transition ${
-                                selectedArtifactVersion === art.version
-                                  ? "bg-cyan-600 text-white shadow-sm"
-                                  : "bg-slate-800 text-slate-400 hover:text-white"
-                              }`}
-                            >
-                              v{art.version} {art.is_current ? "(Current)" : ""}
-                            </button>
-                          ))}
-                        </div>
-
-                        {selectedArtifact && (
-                          <div className="space-y-4">
-                            {/* Video Player */}
-                            <div className="aspect-video bg-black rounded-xl overflow-hidden border border-slate-800 shadow-xl relative">
-                              <video
-                                controls
-                                className="w-full h-full object-contain"
-                                src={getMediaArtifactStreamUrl(channelId, selectedReq.id, selectedArtifact.id)}
-                              >
-                                Your browser does not support HTML5 video streaming.
-                              </video>
-                            </div>
-
-                            {/* Artifact Info Card */}
-                            <div className="p-4 bg-slate-950 border border-slate-800 rounded-lg text-xs space-y-2">
-                              <div className="flex justify-between">
-                                <span className="text-slate-400">Dimensions:</span>
-                                <span className="font-mono text-slate-200">{selectedArtifact.width}x{selectedArtifact.height}</span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span className="text-slate-400">Duration:</span>
-                                <span className="font-mono text-slate-200">{selectedArtifact.duration_ms ? (selectedArtifact.duration_ms / 1000).toFixed(2) : "0"} s</span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span className="text-slate-400">File Size:</span>
-                                <span className="font-mono text-slate-200">{(selectedArtifact.file_size_bytes / 1024).toFixed(1)} KB</span>
-                              </div>
-                              <div className="flex justify-between">
-                                <span className="text-slate-400">SHA-256 Digest:</span>
-                                <span className="font-mono text-cyan-400 truncate max-w-[300px]">{selectedArtifact.content_hash}</span>
-                              </div>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* 7. QA TAB */}
-                {activeTab === "qa" && (
-                  <div className="space-y-4">
-                    {qaResult ? (
-                      <div>
-                        <div className="flex items-center gap-3 mb-4">
-                          <span className="text-sm font-semibold text-slate-300">Overall Status:</span>
-                          <span
-                            className={`text-xs px-3 py-1 rounded font-bold ${
-                              qaResult.status === "PASSED"
-                                ? "bg-emerald-950 text-emerald-400 border border-emerald-800"
-                                : qaResult.status === "PASSED_WITH_WARNINGS"
-                                ? "bg-amber-950 text-amber-400 border border-amber-800"
-                                : "bg-red-950 text-red-400 border border-red-800"
-                            }`}
-                          >
-                            {qaResult.status}
-                          </span>
-                        </div>
-
-                        {qaResult.findings.length === 0 ? (
-                          <div className="p-4 bg-emerald-950/40 border border-emerald-800 text-emerald-300 text-xs rounded-lg">
-                            ✅ All 17 Production QA checks passed successfully with zero findings.
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            {qaResult.findings.map((f, i) => (
-                              <div
-                                key={i}
-                                className={`p-3 rounded-lg border text-xs flex items-start gap-3 ${
-                                  f.severity === "BLOCKING"
-                                    ? "bg-red-950/40 border-red-800 text-red-300"
-                                    : "bg-amber-950/40 border-amber-800 text-amber-300"
-                                }`}
-                              >
-                                <span className="font-mono font-bold uppercase">{f.rule_code}</span>
-                                <span>{f.message}</span>
+                                <div style={{ textAlign: "right" }}>
+                                  <span className="badge badge-active" style={{ fontSize: "0.7rem" }}>{j.state}</span>
+                                  <div className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)", marginTop: "0.15rem" }}>
+                                    Attempt {j.attempt}/{j.max_attempts}
+                                  </div>
+                                </div>
                               </div>
                             ))}
                           </div>
-                        )}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ textAlign: "center", padding: "3rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                      No RenderPlan manifest available.
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 6. MEDIA ARTIFACTS TAB */}
+              {activeTab === "artifacts" && (
+                <div>
+                  {artifacts.length === 0 ? (
+                    <div style={{ textAlign: "center", padding: "3rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                      No rendered media artifacts found. Click <strong>2. Render</strong> to produce an MP4 video.
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                      {/* Version Switcher */}
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                        <span style={{ fontSize: "0.75rem", color: "var(--text-muted)", fontWeight: 600 }}>Revisions:</span>
+                        {artifacts.map((art) => (
+                          <button
+                            key={art.id}
+                            onClick={() => setSelectedArtifactVersion(art.version)}
+                            className={`btn btn-sm ${selectedArtifactVersion === art.version ? "btn-primary" : "btn-secondary"}`}
+                            style={{ fontSize: "0.72rem", padding: "0.2rem 0.5rem" }}
+                          >
+                            v{art.version} {art.is_current ? "★ Current" : ""}
+                          </button>
+                        ))}
                       </div>
-                    ) : (
-                      <div className="text-center py-12 text-slate-500 text-sm">No QA results evaluated yet.</div>
-                    )}
-                  </div>
-                )}
-              </div>
+
+                      {selectedArtifact && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
+                          {/* Video Player */}
+                          <div style={{ maxWidth: "720px", margin: "0 auto", width: "100%", background: "#000", borderRadius: "var(--radius-sm)", overflow: "hidden", border: "1px solid var(--border-subtle)" }}>
+                            <video
+                              controls
+                              style={{ width: "100%", maxHeight: "420px", display: "block" }}
+                              src={getMediaArtifactStreamUrl(channelId, selectedReq.id, selectedArtifact.id)}
+                            >
+                              Your browser does not support HTML5 video streaming.
+                            </video>
+                          </div>
+
+                          {/* Artifact Info Card */}
+                          <div
+                            style={{
+                              padding: "1rem",
+                              background: "var(--bg-input)",
+                              borderRadius: "var(--radius-sm)",
+                              border: "1px solid var(--border-subtle)",
+                              display: "grid",
+                              gridTemplateColumns: "1fr 1fr",
+                              gap: "0.75rem",
+                              fontSize: "0.8rem",
+                            }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between" }}>
+                              <span style={{ color: "var(--text-muted)" }}>Dimensions:</span>
+                              <span className="text-mono" style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+                                {selectedArtifact.width}x{selectedArtifact.height}
+                              </span>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}>
+                              <span style={{ color: "var(--text-muted)" }}>Duration:</span>
+                              <span className="text-mono" style={{ fontWeight: 600, color: "var(--status-success)" }}>
+                                {selectedArtifact.duration_ms ? (selectedArtifact.duration_ms / 1000).toFixed(2) : "0"} s
+                              </span>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}>
+                              <span style={{ color: "var(--text-muted)" }}>File Size:</span>
+                              <span className="text-mono" style={{ fontWeight: 600, color: "var(--text-primary)" }}>
+                                {(selectedArtifact.file_size_bytes / 1024).toFixed(1)} KB
+                              </span>
+                            </div>
+                            <div style={{ display: "flex", justifyContent: "space-between" }}>
+                              <span style={{ color: "var(--text-muted)" }}>SHA-256:</span>
+                              <span className="text-mono" style={{ color: "var(--accent-secondary)", maxWidth: "160px", overflow: "hidden", textOverflow: "ellipsis" }}>
+                                {selectedArtifact.content_hash}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* 7. QA TAB */}
+              {activeTab === "qa" && (
+                <div>
+                  {qaResult ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+                      <div
+                        style={{
+                          padding: "0.85rem 1rem",
+                          background: qaResult.status === "PASSED" ? "var(--status-success-bg)" : "var(--status-warning-bg)",
+                          border: qaResult.status === "PASSED" ? "1px solid var(--status-success-border)" : "1px solid var(--status-warning-border)",
+                          borderRadius: "var(--radius-sm)",
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          fontSize: "0.85rem",
+                          fontWeight: 700,
+                          color: qaResult.status === "PASSED" ? "var(--status-success)" : "var(--status-warning)",
+                        }}
+                      >
+                        <span>Overall QA Status: {qaResult.status}</span>
+                        <span className="text-mono" style={{ fontSize: "0.72rem" }}>
+                          {qaResult.findings.length} finding(s)
+                        </span>
+                      </div>
+
+                      {qaResult.findings.length === 0 ? (
+                        <div style={{ padding: "1rem", background: "var(--status-success-bg)", border: "1px solid var(--status-success-border)", borderRadius: "var(--radius-sm)", color: "var(--status-success)", fontSize: "0.85rem" }}>
+                          ✅ All production QA checks passed successfully with zero blocking findings.
+                        </div>
+                      ) : (
+                        qaResult.findings.map((f, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              padding: "0.75rem 1rem",
+                              background: "var(--bg-input)",
+                              borderRadius: "var(--radius-sm)",
+                              border: "1px solid var(--border-subtle)",
+                              fontSize: "0.8rem",
+                            }}
+                          >
+                            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.25rem" }}>
+                              <span className="badge badge-warning" style={{ fontSize: "0.68rem" }}>
+                                {f.severity} • {f.rule_code}
+                              </span>
+                            </div>
+                            <p style={{ color: "var(--text-primary)" }}>{f.message}</p>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  ) : (
+                    <div style={{ textAlign: "center", padding: "3rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                      No QA results evaluated yet.
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
-          ) : (
-            <div className="p-12 text-center text-slate-500 bg-slate-900 border border-slate-800 rounded-xl">
-              Select or create a production request to view workspace.
-            </div>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div className="card" style={{ padding: "3rem 1.5rem", textAlign: "center", color: "var(--text-muted)" }}>
+            <p style={{ fontSize: "0.95rem", marginBottom: "0.5rem" }}>No production request selected.</p>
+            <p style={{ fontSize: "0.82rem" }}>Select a request on the left or create a new request above.</p>
+          </div>
+        )}
       </div>
 
-      {/* Create Modal */}
+      {/* Modal: Create Production Request */}
       {isCreating && (
-        <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 z-50">
-          <div className="bg-slate-900 border border-slate-800 rounded-xl max-w-lg w-full p-6 space-y-4">
-            <h3 className="text-lg font-bold text-white">Create Production Request</h3>
-            <form onSubmit={handleCreateRequest} className="space-y-4">
-              <div>
-                <label className="block text-xs font-semibold text-slate-400 mb-1">
-                  1. Select Content Generation Request
-                </label>
-                <select
-                  value={selectedContentReqId}
-                  onChange={(e) => handleContentReqChange(e.target.value)}
-                  className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-200"
-                  required
-                >
-                  <option value="">-- Choose Content Request --</option>
-                  {contentRequests.map((cr) => (
-                    <option key={cr.id} value={cr.id}>
-                      {cr.id.slice(0, 8)}... ({cr.status})
-                    </option>
-                  ))}
-                </select>
-              </div>
+        <div className="modal-backdrop">
+          <div className="modal-card" style={{ maxWidth: "520px" }}>
+            <div className="modal-header">
+              <h3 style={{ fontSize: "1rem", fontWeight: 700, color: "var(--text-primary)" }}>
+                Create Production Request
+              </h3>
+              <button onClick={() => setIsCreating(false)} className="btn btn-secondary btn-sm" style={{ padding: "0.2rem 0.5rem" }}>
+                ✕
+              </button>
+            </div>
 
-              {selectedContentReqId && (
-                <div>
-                  <label className="block text-xs font-semibold text-slate-400 mb-1">
-                    2. Select Pinned Script Version
-                  </label>
+            <form onSubmit={handleCreateRequest}>
+              <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
+                <div className="form-group">
+                  <label className="form-label">1. Select Content Generation Request *</label>
                   <select
-                    value={selectedScriptId}
-                    onChange={(e) => setSelectedScriptId(e.target.value)}
-                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2.5 text-sm text-slate-200"
+                    value={selectedContentReqId}
+                    onChange={(e) => handleContentReqChange(e.target.value)}
+                    className="form-select"
                     required
                   >
-                    <option value="">-- Choose Script --</option>
-                    {(scriptsByReq[selectedContentReqId] || []).map((s) => (
-                      <option key={s.id} value={s.id}>
-                        v{s.version}: {s.title} ({s.qa_status})
+                    <option value="">-- Choose Content Request --</option>
+                    {contentRequests.map((cr) => (
+                      <option key={cr.id} value={cr.id}>
+                        {cr.id.slice(0, 8)}... ({cr.status})
                       </option>
                     ))}
                   </select>
                 </div>
-              )}
 
-              <div className="flex justify-end space-x-3 pt-4 border-t border-slate-800">
+                {selectedContentReqId && (
+                  <div className="form-group">
+                    <label className="form-label">2. Select Pinned Script Version *</label>
+                    <select
+                      value={selectedScriptId}
+                      onChange={(e) => setSelectedScriptId(e.target.value)}
+                      className="form-select"
+                      required
+                    >
+                      <option value="">-- Choose Script --</option>
+                      {(scriptsByReq[selectedContentReqId] || []).map((s) => (
+                        <option key={s.id} value={s.id}>
+                          v{s.version}: {s.title} ({s.qa_status})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
                 <button
                   type="button"
                   onClick={() => setIsCreating(false)}
-                  className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-white"
+                  className="btn btn-secondary btn-sm"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
                   disabled={actionLoading || !selectedScriptId}
-                  className="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white rounded-lg text-xs font-semibold transition"
+                  className="btn btn-primary btn-sm"
                 >
                   {actionLoading ? "Creating..." : "Create Request"}
                 </button>

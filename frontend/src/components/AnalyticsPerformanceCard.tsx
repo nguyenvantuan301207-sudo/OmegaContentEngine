@@ -18,10 +18,13 @@ export function AnalyticsPerformanceCard({
 
   if (!analytics) {
     return (
-      <div className="rounded-xl border border-border/40 bg-card p-6 shadow-sm">
-        <h3 className="text-lg font-semibold tracking-tight text-foreground">Content Analytics</h3>
-        <p className="mt-2 text-sm text-muted-foreground">
-          No analytics data available yet. Content must be published and verified on YouTube before performance tracking begins.
+      <div className="card" style={{ padding: "2rem 1.5rem", textAlign: "center" }}>
+        <div style={{ fontSize: "2rem", marginBottom: "0.5rem" }}>📊</div>
+        <h3 style={{ fontSize: "1.05rem", fontWeight: 600, color: "var(--text-primary)", marginBottom: "0.5rem" }}>
+          Content Performance Analytics
+        </h3>
+        <p style={{ fontSize: "0.85rem", color: "var(--text-muted)", maxWidth: "540px", margin: "0 auto", lineHeight: 1.5 }}>
+          No analytics observation recorded for this content item yet. Performance tracking automatically begins via scheduled background sweeps after a video is published and verified on YouTube.
         </p>
       </div>
     );
@@ -68,16 +71,28 @@ export function AnalyticsPerformanceCard({
   const comments = getMetricDisplay("comments");
 
   return (
-    <div className="rounded-xl border border-border/40 bg-card p-6 shadow-sm">
-      <div className="flex flex-col justify-between gap-4 border-b border-border/40 pb-4 sm:flex-row sm:items-center">
+    <div className="card" style={{ padding: "1.25rem" }}>
+      {/* Header */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "1rem",
+          borderBottom: "1px solid var(--border-subtle)",
+          paddingBottom: "0.85rem",
+          marginBottom: "1.25rem",
+        }}
+      >
         <div>
-          <h3 className="text-lg font-semibold tracking-tight text-foreground">
+          <h3 style={{ fontSize: "1.05rem", fontWeight: 700, color: "var(--text-primary)" }}>
             Authoritative Performance Analytics
           </h3>
-          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>Video ID: {analytics.provider_video_id}</span>
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "0.6rem", fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.3rem" }}>
+            <span className="text-mono">Video ID: {analytics.provider_video_id}</span>
             <span>•</span>
-            <span>Status: {analytics.asset_status}</span>
+            <span className="badge badge-active" style={{ fontSize: "0.68rem" }}>{analytics.asset_status}</span>
             <span>•</span>
             <span>Phase: {analytics.lifecycle_phase}</span>
             <span>•</span>
@@ -96,68 +111,94 @@ export function AnalyticsPerformanceCard({
         <button
           onClick={handleRefresh}
           disabled={refreshing}
-          className="inline-flex items-center justify-center rounded-lg border border-border/60 bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted/80 disabled:opacity-50"
+          className="btn btn-secondary btn-sm"
+          style={{ fontSize: "0.78rem", display: "flex", alignItems: "center", gap: "0.35rem" }}
         >
-          {refreshing ? "Refreshing..." : "↻ Refresh Now"}
+          <span>↻</span> {refreshing ? "Refreshing..." : "Refresh Now"}
         </button>
       </div>
 
       {error && (
-        <div className="mt-4 rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+        <div
+          style={{
+            padding: "0.75rem 1rem",
+            background: "var(--status-danger-bg)",
+            border: "1px solid var(--status-danger-border)",
+            borderRadius: "var(--radius-sm)",
+            fontSize: "0.8rem",
+            color: "var(--status-danger)",
+            marginBottom: "1rem",
+          }}
+        >
           {error}
         </div>
       )}
 
-      <div className="mt-6 grid grid-cols-2 gap-4 sm:grid-cols-4">
+      {/* Primary KPI Grid */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
+          gap: "0.85rem",
+          marginBottom: "1rem",
+        }}
+      >
         {/* Views */}
-        <div className="rounded-lg border border-border/30 bg-muted/20 p-3">
-          <span className="text-xs font-medium text-muted-foreground">Views</span>
-          <p className="mt-1 text-xl font-bold tracking-tight text-foreground">
+        <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+          <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Views</span>
+          <p style={{ fontSize: "1.4rem", fontWeight: 700, color: "var(--text-primary)", marginTop: "0.2rem" }}>
             {views.valueText}
           </p>
-          <span className="text-[10px] text-muted-foreground">Quality: {views.quality}</span>
+          <span className="text-mono" style={{ fontSize: "0.68rem", color: "var(--text-muted)" }}>Quality: {views.quality}</span>
         </div>
 
         {/* Watch Time */}
-        <div className="rounded-lg border border-border/30 bg-muted/20 p-3">
-          <span className="text-xs font-medium text-muted-foreground">Watch Time</span>
-          <p className="mt-1 text-xl font-bold tracking-tight text-foreground">
+        <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+          <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Watch Time</span>
+          <p style={{ fontSize: "1.4rem", fontWeight: 700, color: "var(--status-success)", marginTop: "0.2rem" }}>
             {watchTime.valueText}
           </p>
-          <span className="text-[10px] text-muted-foreground">Quality: {watchTime.quality}</span>
+          <span className="text-mono" style={{ fontSize: "0.68rem", color: "var(--text-muted)" }}>Quality: {watchTime.quality}</span>
         </div>
 
         {/* Average View Percentage */}
-        <div className="rounded-lg border border-border/30 bg-muted/20 p-3">
-          <span className="text-xs font-medium text-muted-foreground">Avg View %</span>
-          <p className="mt-1 text-xl font-bold tracking-tight text-foreground">
+        <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+          <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Avg Retention</span>
+          <p style={{ fontSize: "1.4rem", fontWeight: 700, color: "var(--text-primary)", marginTop: "0.2rem" }}>
             {avgViewPct.valueText}
           </p>
-          <span className="text-[10px] text-muted-foreground">Quality: {avgViewPct.quality}</span>
+          <span className="text-mono" style={{ fontSize: "0.68rem", color: "var(--text-muted)" }}>Quality: {avgViewPct.quality}</span>
         </div>
 
         {/* Impression CTR */}
-        <div className="rounded-lg border border-border/30 bg-muted/20 p-3">
-          <span className="text-xs font-medium text-muted-foreground">Impression CTR</span>
-          <p className="mt-1 text-xl font-bold tracking-tight text-foreground">
+        <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+          <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Impression CTR</span>
+          <p style={{ fontSize: "1.4rem", fontWeight: 700, color: "var(--text-primary)", marginTop: "0.2rem" }}>
             {ctr.valueText}
           </p>
-          <span className="text-[10px] text-muted-foreground">Quality: {ctr.quality}</span>
+          <span className="text-mono" style={{ fontSize: "0.68rem", color: "var(--text-muted)" }}>Quality: {ctr.quality}</span>
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-3 gap-4">
-        <div className="rounded-lg border border-border/30 bg-muted/10 p-3">
-          <span className="text-xs font-medium text-muted-foreground">Likes</span>
-          <p className="mt-1 text-base font-semibold text-foreground">{likes.valueText}</p>
+      {/* Secondary Metrics */}
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(3, 1fr)",
+          gap: "0.75rem",
+        }}
+      >
+        <div style={{ padding: "0.65rem 0.85rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>Likes</span>
+          <p style={{ fontSize: "1rem", fontWeight: 600, color: "var(--text-primary)", marginTop: "0.15rem" }}>{likes.valueText}</p>
         </div>
-        <div className="rounded-lg border border-border/30 bg-muted/10 p-3">
-          <span className="text-xs font-medium text-muted-foreground">Comments</span>
-          <p className="mt-1 text-base font-semibold text-foreground">{comments.valueText}</p>
+        <div style={{ padding: "0.65rem 0.85rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>Comments</span>
+          <p style={{ fontSize: "1rem", fontWeight: 600, color: "var(--text-primary)", marginTop: "0.15rem" }}>{comments.valueText}</p>
         </div>
-        <div className="rounded-lg border border-border/30 bg-muted/10 p-3">
-          <span className="text-xs font-medium text-muted-foreground">Engagement Rate</span>
-          <p className="mt-1 text-base font-semibold text-foreground">{engagement.valueText}</p>
+        <div style={{ padding: "0.65rem 0.85rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
+          <span style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>Engagement Rate</span>
+          <p style={{ fontSize: "1rem", fontWeight: 600, color: "var(--text-primary)", marginTop: "0.15rem" }}>{engagement.valueText}</p>
         </div>
       </div>
     </div>

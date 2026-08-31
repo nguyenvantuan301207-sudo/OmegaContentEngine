@@ -3,7 +3,7 @@
 import React from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { CANARY_CHANNEL_ID } from "@/lib/operator-context";
+import { CANARY_CHANNEL_ID, useOperatorContext } from "@/lib/operator-context";
 
 interface NavItemDef {
   label: string;
@@ -15,35 +15,53 @@ interface NavItemDef {
 
 export function Sidebar() {
   const pathname = usePathname();
+  const { selectedChannelId, canaryChannelId } = useOperatorContext();
+  const targetChannelId = selectedChannelId || canaryChannelId || CANARY_CHANNEL_ID;
 
-  const coreNav: NavItemDef[] = [
+  const overviewNav: NavItemDef[] = [
     { label: "Overview", href: "/", icon: "⌂", enabled: true },
+  ];
+
+  const workspaceNav: NavItemDef[] = [
     { label: "Channels", href: "/channels", icon: "⊞", enabled: true },
     { label: "Missions", href: "/missions", icon: "⚡", enabled: true },
   ];
 
   const pipelineNav: NavItemDef[] = [
     {
+      label: "Topics",
+      href: `/channels/${targetChannelId}/topics`,
+      icon: "💡",
+      enabled: true,
+    },
+    {
+      label: "Research",
+      href: `/channels/${targetChannelId}/research`,
+      icon: "🔬",
+      enabled: true,
+    },
+    {
       label: "Content",
-      href: `/channels/${CANARY_CHANNEL_ID}/content`,
+      href: `/channels/${targetChannelId}/content`,
       icon: "✎",
       enabled: true,
-      badge: "Canary",
     },
     {
       label: "Production",
-      href: `/channels/${CANARY_CHANNEL_ID}/production`,
+      href: `/channels/${targetChannelId}/production`,
       icon: "▶",
       enabled: true,
-      badge: "Canary",
     },
-    { label: "Schedule", href: "#", icon: "◷", enabled: false, badge: "Soon" },
-    { label: "Publisher", href: "#", icon: "☁", enabled: false, badge: "Soon" },
+  ];
+
+  const operationsNav: NavItemDef[] = [
+    { label: "Schedule", href: "/schedule", icon: "◷", enabled: true },
+    { label: "Publisher", href: "/publisher", icon: "☁", enabled: true },
   ];
 
   const intelligenceNav: NavItemDef[] = [
-    { label: "Analytics", href: "#", icon: "📊", enabled: false, badge: "Soon" },
-    { label: "Learning", href: "#", icon: "🧠", enabled: false, badge: "Soon" },
+    { label: "Analytics", href: "/analytics", icon: "📊", enabled: true },
+    { label: "Learning", href: "/learning", icon: "🧠", enabled: true },
     { label: "System", href: "/", icon: "⚙", enabled: true },
   ];
 
@@ -87,11 +105,17 @@ export function Sidebar() {
       </div>
 
       <nav className="sidebar-nav">
-        <div className="nav-group-title">Operations</div>
-        {coreNav.map(renderItem)}
+        <div className="nav-group-title">Overview</div>
+        {overviewNav.map(renderItem)}
+
+        <div className="nav-group-title">Workspace</div>
+        {workspaceNav.map(renderItem)}
 
         <div className="nav-group-title">Pipeline</div>
         {pipelineNav.map(renderItem)}
+
+        <div className="nav-group-title">Operations</div>
+        {operationsNav.map(renderItem)}
 
         <div className="nav-group-title">Intelligence & Core</div>
         {intelligenceNav.map(renderItem)}

@@ -52,72 +52,56 @@ export function SchedulerTimelineCard({ channelId }: SchedulerTimelineCardProps)
     }
   };
 
-  const getStateBadge = (state: ReservationState) => {
+  const getStateBadgeClass = (state: ReservationState) => {
     switch (state) {
       case "ACTIVE":
-        return (
-          <span className="px-2 py-0.5 text-xs font-semibold rounded bg-emerald-950 text-emerald-400 border border-emerald-800">
-            ACTIVE (Scheduled)
-          </span>
-        );
+        return "badge-active";
       case "DISPATCHING":
-        return (
-          <span className="px-2 py-0.5 text-xs font-semibold rounded bg-blue-950 text-blue-400 border border-blue-800 animate-pulse">
-            DISPATCHING
-          </span>
-        );
+        return "badge-active";
       case "CONSUMED":
-        return (
-          <span className="px-2 py-0.5 text-xs font-semibold rounded bg-purple-950 text-purple-400 border border-purple-800">
-            CONSUMED
-          </span>
-        );
+        return "badge-purple";
       case "RELEASED":
-        return (
-          <span className="px-2 py-0.5 text-xs font-semibold rounded bg-zinc-800 text-zinc-400 border border-zinc-700">
-            RELEASED
-          </span>
-        );
+        return "badge-draft";
       case "EXPIRED":
-        return (
-          <span className="px-2 py-0.5 text-xs font-semibold rounded bg-amber-950 text-amber-400 border border-amber-800">
-            EXPIRED
-          </span>
-        );
+        return "badge-warning";
       case "CANCELLED":
-        return (
-          <span className="px-2 py-0.5 text-xs font-semibold rounded bg-rose-950 text-rose-400 border border-rose-800">
-            CANCELLED
-          </span>
-        );
+        return "badge-failed";
       default:
-        return (
-          <span className="px-2 py-0.5 text-xs font-semibold rounded bg-zinc-800 text-zinc-400">
-            {state}
-          </span>
-        );
+        return "badge-neutral";
     }
   };
 
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-xl p-5 shadow-lg text-zinc-100">
-      <div className="flex items-center justify-between border-b border-zinc-800 pb-3 mb-4">
+    <div className="card" style={{ padding: "1.25rem" }}>
+      {/* Card Header */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          borderBottom: "1px solid var(--border-subtle)",
+          paddingBottom: "0.85rem",
+          marginBottom: "1rem",
+        }}
+      >
         <div>
-          <h2 className="text-lg font-bold text-zinc-100 flex items-center gap-2">
+          <h2 style={{ fontSize: "1.05rem", fontWeight: 700, color: "var(--text-primary)", display: "flex", alignItems: "center", gap: "0.5rem" }}>
             <span>📅</span> Smart Scheduler Timeline
           </h2>
-          <p className="text-xs text-zinc-400 mt-0.5">
+          <p style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.2rem" }}>
             Channel Target Timezone:{" "}
-            <span className="font-mono text-zinc-300 font-medium">
+            <span className="text-mono" style={{ color: "var(--text-secondary)", fontWeight: 600 }}>
               {timeline?.timezone || "UTC"}
             </span>
           </p>
         </div>
 
         {timeline && (
-          <div className="text-right">
-            <span className="text-xs text-zinc-400 block">Today&apos;s Throughput</span>
-            <span className="text-sm font-semibold text-zinc-200">
+          <div style={{ textAlign: "right" }}>
+            <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", display: "block", textTransform: "uppercase" }}>
+              Today&apos;s Throughput
+            </span>
+            <span style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)" }}>
               {timeline.capacity_used_today} / {timeline.capacity_limit_today} slots
             </span>
           </div>
@@ -125,25 +109,45 @@ export function SchedulerTimelineCard({ channelId }: SchedulerTimelineCardProps)
       </div>
 
       {loading && (
-        <div className="py-8 text-center text-zinc-500 text-sm">
+        <div style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
           Loading schedule timeline...
         </div>
       )}
 
       {error && (
-        <div className="py-3 px-4 bg-rose-950/50 border border-rose-800 rounded-lg text-rose-300 text-xs mb-4">
+        <div
+          style={{
+            padding: "0.75rem 1rem",
+            background: "var(--status-danger-bg)",
+            border: "1px solid var(--status-danger-border)",
+            borderRadius: "var(--radius-sm)",
+            fontSize: "0.8rem",
+            color: "var(--status-danger)",
+            marginBottom: "1rem",
+          }}
+        >
           {error}
         </div>
       )}
 
       {!loading && !error && timeline && (
-        <div className="space-y-3">
+        <div style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
           {timeline.reservations.length === 0 ? (
-            <div className="py-6 text-center text-zinc-500 text-xs bg-zinc-950/50 rounded-lg border border-zinc-800/50">
+            <div
+              style={{
+                textAlign: "center",
+                padding: "2rem 1rem",
+                color: "var(--text-muted)",
+                fontSize: "0.82rem",
+                background: "var(--bg-input)",
+                borderRadius: "var(--radius-sm)",
+                border: "1px solid var(--border-subtle)",
+              }}
+            >
               No active or upcoming reservations scheduled for this channel.
             </div>
           ) : (
-            <div className="divide-y divide-zinc-800/60">
+            <div style={{ display: "flex", flexDirection: "column", gap: "0.6rem" }}>
               {timeline.reservations.map((res) => {
                 const utcDate = new Date(res.scheduled_start_at);
                 const localStr = utcDate.toLocaleString("en-US", {
@@ -156,29 +160,40 @@ export function SchedulerTimelineCard({ channelId }: SchedulerTimelineCardProps)
                 return (
                   <div
                     key={res.id}
-                    className="py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    style={{
+                      padding: "0.85rem 1rem",
+                      background: "var(--bg-input)",
+                      borderRadius: "var(--radius-sm)",
+                      border: "1px solid var(--border-subtle)",
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "center",
+                      flexWrap: "wrap",
+                      gap: "0.75rem",
+                    }}
                   >
-                    <div className="space-y-1">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        {getStateBadge(res.state)}
-                        <span className="text-xs font-mono px-2 py-0.5 rounded bg-zinc-800 text-zinc-300">
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.25rem" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", flexWrap: "wrap" }}>
+                        <span className={`badge ${getStateBadgeClass(res.state)}`}>
+                          {res.state}
+                        </span>
+                        <span className="badge badge-neutral text-mono" style={{ fontSize: "0.7rem" }}>
                           {res.workload_category}
                         </span>
-                        <span className="text-xs text-zinc-400">
-                          Priority:{" "}
-                          <span className="font-semibold text-zinc-200">
-                            {res.priority_score}
-                          </span>
+                        <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+                          Priority: <strong style={{ color: "var(--text-primary)" }}>{res.priority_score}</strong>
                         </span>
                       </div>
 
-                      <div className="text-xs text-zinc-300">
-                        <span className="font-medium text-emerald-400">{localStr}</span>{" "}
-                        <span className="text-zinc-500 font-mono text-[11px]">({utcStr})</span>
+                      <div style={{ fontSize: "0.82rem", color: "var(--text-primary)" }}>
+                        <span style={{ fontWeight: 600, color: "var(--status-success)" }}>{localStr}</span>{" "}
+                        <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                          ({utcStr})
+                        </span>
                       </div>
 
-                      <div className="text-[11px] text-zinc-500 font-mono">
-                        ID: {res.id.substring(0, 8)}... | Target: {res.target_id.substring(0, 8)}...
+                      <div className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                        ID: {res.id.substring(0, 8)}... • Target: {res.target_id.substring(0, 8)}...
                       </div>
                     </div>
 
@@ -186,7 +201,8 @@ export function SchedulerTimelineCard({ channelId }: SchedulerTimelineCardProps)
                       <button
                         onClick={() => handleRelease(res.id)}
                         disabled={releasingId === res.id}
-                        className="self-start sm:self-center px-3 py-1 text-xs font-medium bg-zinc-800 hover:bg-rose-950 hover:text-rose-300 hover:border-rose-800 text-zinc-300 border border-zinc-700 rounded transition disabled:opacity-50"
+                        className="btn btn-secondary btn-sm"
+                        style={{ fontSize: "0.75rem", padding: "0.3rem 0.65rem", color: "var(--status-danger)" }}
                       >
                         {releasingId === res.id ? "Releasing..." : "Release Slot"}
                       </button>
@@ -197,13 +213,14 @@ export function SchedulerTimelineCard({ channelId }: SchedulerTimelineCardProps)
             </div>
           )}
 
-          <div className="pt-3 border-t border-zinc-800/80 flex justify-end">
+          <div style={{ paddingTop: "0.75rem", borderTop: "1px solid var(--border-subtle)", display: "flex", justifyContent: "flex-end" }}>
             <button
               onClick={loadTimeline}
               disabled={loading}
-              className="text-xs text-zinc-400 hover:text-zinc-200 transition"
+              className="btn btn-secondary btn-sm"
+              style={{ fontSize: "0.78rem", display: "flex", alignItems: "center", gap: "0.35rem" }}
             >
-              ↻ Refresh Timeline
+              <span>↻</span> Refresh Timeline
             </button>
           </div>
         </div>
