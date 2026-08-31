@@ -2378,3 +2378,184 @@ export async function triggerLearningRefresh(
     : `/api/v1/learning/channels/${channelId}/refresh`;
   return apiFetch(url, { method: "POST" });
 }
+
+// ── Autonomous Loop Types (OMEGA-014) ──
+
+export type LoopAutonomyLevel = "MANUAL" | "SUPERVISED" | "BOUNDED_AUTONOMOUS";
+
+export type AutonomyLoopState =
+  | "IDLE"
+  | "OBSERVING"
+  | "PLANNING"
+  | "WAITING_APPROVAL"
+  | "EXECUTING"
+  | "VERIFYING"
+  | "WAITING_SIGNAL"
+  | "PAUSED"
+  | "BLOCKED"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
+
+export interface AutonomyLoopStatus {
+  id: string;
+  mission_id: string;
+  channel_id: string;
+  autonomy_level: LoopAutonomyLevel;
+  operational_state: AutonomyLoopState;
+  current_iteration_sequence: number;
+  current_iteration_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AutonomyIterationSummary {
+  id: string;
+  iteration_sequence: number;
+  state: string;
+  started_at: string;
+  completed_at: string | null;
+  stop_reason: string | null;
+}
+
+export interface AutonomyIterationDetail {
+  id: string;
+  loop_id: string;
+  iteration_sequence: number;
+  state: string;
+  started_at: string;
+  completed_at: string | null;
+  stop_reason: string | null;
+  observation: Record<string, unknown>;
+  action_plan: {
+    action_type: string;
+    risk_class: string;
+    target_subsystem: string;
+    estimated_cost_usd: string;
+    requires_approval: boolean;
+    advisory_rationale: string | null;
+  } | null;
+  attempts: Array<{
+    attempt_id: string;
+    attempt_sequence: number;
+    correlation_key: string;
+  }>;
+}
+
+export interface AutonomyApprovalItem {
+  id: string;
+  loop_id: string;
+  action_plan_id: string;
+  semantic_action_key: string;
+  action_checksum: string;
+  guardian_epoch: number;
+  mission_state: string;
+  requested_at: string;
+  expires_at: string;
+  latest_decision: string | null;
+}
+
+export async function createAutonomyLoop(payload: {
+  mission_id: string;
+  channel_id: string;
+  autonomy_level?: LoopAutonomyLevel;
+  daily_cap_usd?: string;
+  lifetime_cap_usd?: string;
+}): Promise<AutonomyLoopStatus> {
+  return apiFetch("/api/v1/autonomy/loops", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function getAutonomyLoop(id: string): Promise<AutonomyLoopStatus> {
+  return apiFetch(`/api/v1/autonomy/loops/${id}`);
+}
+
+export async function getAutonomyIterations(
+  id: string,
+  limit: number = 20
+): Promise<AutonomyIterationSummary[]> {
+  return apiFetch(`/api/v1/autonomy/loops/${id}/iterations?limit=${limit}`);
+}
+
+export async function getAutonomyIteration(
+  id: string
+): Promise<AutonomyIterationDetail> {
+  return apiFetch(`/api/v1/autonomy/iterations/${id}`);
+}
+
+export async function pauseAutonomyLoop(
+  id: string,
+  reason: string = "Manual user pause"
+): Promise<{ status: string; loop_id: string }> {
+  return apiFetch(`/api/v1/autonomy/loops/${id}/pause?reason=${encodeURIComponent(reason)}`, {
+    method: "POST",
+  });
+}
+
+export async function resumeAutonomyLoop(
+  id: string
+): Promise<{ status: string; loop_id: string }> {
+  return apiFetch(`/api/v1/autonomy/loops/${id}/resume`, {
+    method: "POST",
+  });
+}
+
+export async function cancelAutonomyLoop(
+  id: string,
+  reason: string = "Manual user cancellation"
+): Promise<{ status: string; loop_id: string }> {
+  return apiFetch(`/api/v1/autonomy/loops/${id}/cancel?reason=${encodeURIComponent(reason)}`, {
+    method: "POST",
+  });
+}
+
+export async function resetAutonomyLoopFailure(
+  id: string,
+  reason: string = "Human failure reset"
+): Promise<{ status: string; loop_id: string }> {
+  return apiFetch(`/api/v1/autonomy/loops/${id}/reset-failure?reason=${encodeURIComponent(reason)}`, {
+    method: "POST",
+  });
+}
+
+export async function getAutonomyApprovals(
+  loopId?: string
+): Promise<AutonomyApprovalItem[]> {
+  const url = loopId
+    ? `/api/v1/autonomy/approvals?loop_id=${encodeURIComponent(loopId)}`
+    : "/api/v1/autonomy/approvals";
+  return apiFetch(url);
+}
+
+export async function approveAutonomyAction(
+  id: string,
+  reviewReason: string,
+  reviewerUserId?: string
+): Promise<{ status: string; approval_request_id: string }> {
+  return apiFetch(`/api/v1/autonomy/approvals/${id}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      review_reason: reviewReason,
+      reviewer_user_id: reviewerUserId || "HUMAN_OPERATOR",
+    }),
+  });
+}
+
+export async function rejectAutonomyAction(
+  id: string,
+  reviewReason: string,
+  reviewerUserId?: string
+): Promise<{ status: string; approval_request_id: string }> {
+  return apiFetch(`/api/v1/autonomy/approvals/${id}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      review_reason: reviewReason,
+      reviewer_user_id: reviewerUserId || "HUMAN_OPERATOR",
+    }),
+  });
+}

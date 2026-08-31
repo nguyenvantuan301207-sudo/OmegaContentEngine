@@ -13,6 +13,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import desc, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -67,8 +68,16 @@ async def create_request(
     session: AsyncSession,
     channel_id: UUID,
     request_in: ContentGenerationRequestCreate,
+    idempotency_key: str | None = None,
 ) -> ContentGenerationRequestResponse:
     """Create a new ContentGenerationRequest with pinned ResearchBrief and ChannelDNARevision."""
+    if idempotency_key:
+        stmt_existing = select(ContentGenerationRequest).where(
+            ContentGenerationRequest.idempotency_key == idempotency_key
+        )
+        existing = (await session.execute(stmt_existing)).scalar_one_or_none()
+        if existing:
+            return ContentGenerationRequestResponse.model_validate(existing)
     # 1. Validate Channel
     chan_res = await session.execute(select(Channel).where(Channel.id == channel_id))
     channel = chan_res.scalar_one_or_none()
@@ -157,6 +166,7 @@ async def create_request(
         research_brief_id=request_in.research_brief_id,
         channel_dna_revision_id=channel_dna_revision_id,
         mission_execution_id=request_in.mission_execution_id,
+        idempotency_key=idempotency_key,
         mode=mode.value,
         status=ContentRequestStatus.DRAFT.value,
         content_type=request_in.content_type.value,
@@ -166,9 +176,20 @@ async def create_request(
         region=request_in.region,
         creative_direction=request_in.creative_direction,
     )
-    session.add(content_req)
-    await session.commit()
-    await session.refresh(content_req)
+    try:
+        session.add(content_req)
+        await session.commit()
+        await session.refresh(content_req)
+    except IntegrityError:
+        await session.rollback()
+        if idempotency_key:
+            stmt_existing = select(ContentGenerationRequest).where(
+                ContentGenerationRequest.idempotency_key == idempotency_key
+            )
+            existing = (await session.execute(stmt_existing)).scalar_one_or_none()
+            if existing:
+                return ContentGenerationRequestResponse.model_validate(existing)
+        raise
 
     logger.info(
         "ContentGenerationRequest created",

@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -33,6 +34,9 @@ from omega.infrastructure.models import (
     ScriptVersion,
     SubtitleCue,
 )
+from omega.logging import get_logger
+
+logger = get_logger("omega-production-service")
 
 
 class ProductionLineageError(ValueError):
@@ -61,8 +65,17 @@ class ProductionService:
         session: AsyncSession,
         channel_id: uuid.UUID,
         payload: ProductionRequestCreate,
+        idempotency_key: str | None = None,
     ) -> ProductionRequest:
         """Create a new ProductionRequest and validate strict upstream lineage."""
+        if idempotency_key:
+            stmt_existing = select(ProductionRequest).where(
+                ProductionRequest.idempotency_key == idempotency_key
+            )
+            existing = (await session.execute(stmt_existing)).scalar_one_or_none()
+            if existing:
+                return existing
+
         # 1. Load ScriptVersion with ContentGenerationRequest
         script_stmt = (
             select(ScriptVersion)
@@ -116,6 +129,7 @@ class ProductionService:
             content_request_id=content_req.id,
             channel_dna_revision_id=pinned_dna_revision_id,
             mission_execution_id=payload.mission_execution_id,
+            idempotency_key=idempotency_key,
             mode=mode.value,
             status=ProductionRequestStatus.DRAFT.value,
             outcome=None,
@@ -128,9 +142,20 @@ class ProductionService:
             voice_profile=payload.voice_profile.model_dump(),
             metadata_=payload.metadata,
         )
-        session.add(prod_request)
-        await session.commit()
-        await session.refresh(prod_request)
+        try:
+            session.add(prod_request)
+            await session.commit()
+            await session.refresh(prod_request)
+        except IntegrityError:
+            await session.rollback()
+            if idempotency_key:
+                stmt_existing = select(ProductionRequest).where(
+                    ProductionRequest.idempotency_key == idempotency_key
+                )
+                existing = (await session.execute(stmt_existing)).scalar_one_or_none()
+                if existing:
+                    return existing
+            raise
         return prod_request
 
     async def prepare_production(

@@ -721,3 +721,206 @@ def learning_evaluate_hypotheses_sweep_task() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Learning evaluate sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "evaluated_count": 0}
+
+
+# ── OMEGA-014 Autonomous Loop Worker Tasks ──
+
+
+@celery_app.task(name="omega.autonomy.tick_sweep")
+def autonomy_tick_sweep_task() -> dict[str, Any]:
+    """Periodic sweep executing autonomous loop iterations across active loops."""
+    import asyncio
+
+    from sqlalchemy import select
+
+    from omega.application.autonomy.dispatch_service import AutonomyDispatchService
+    from omega.application.autonomy.loop_service import AutonomyLoopService
+    from omega.application.autonomy.observation_service import AutonomyObservationService
+    from omega.application.autonomy.plan_service import AutonomyPlanService
+    from omega.domain.autonomy import AutonomyLoopState
+    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.models import (
+        AutonomyLoopLatestPointer,
+        AutonomyPolicySnapshot,
+    )
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            # Query loops in IDLE or OBSERVING
+            stmt = (
+                select(AutonomyLoopLatestPointer)
+                .where(
+                    AutonomyLoopLatestPointer.operational_state.in_(
+                        [
+                            AutonomyLoopState.IDLE.value,
+                            AutonomyLoopState.OBSERVING.value,
+                        ]
+                    )
+                )
+                .limit(5)
+            )
+            pointers = (await session.execute(stmt)).scalars().all()
+            ticks_processed = 0
+
+            for ptr in pointers:
+                try:
+                    # 1. Capture Observation
+                    obs = await AutonomyObservationService.capture_snapshot(session, ptr.loop_id)
+
+                    # 2. Query latest policy snapshot
+                    stmt_pol = (
+                        select(AutonomyPolicySnapshot)
+                        .where(AutonomyPolicySnapshot.loop_id == ptr.loop_id)
+                        .order_by(AutonomyPolicySnapshot.policy_version.desc())
+                        .limit(1)
+                    )
+                    pol = (await session.execute(stmt_pol)).scalar_one()
+
+                    # 3. Allocate Iteration
+                    iteration = await AutonomyLoopService.allocate_iteration(
+                        session=session,
+                        loop_id=ptr.loop_id,
+                        observation_snapshot_id=obs.id,
+                        policy_snapshot_id=pol.id,
+                    )
+
+                    # 4. Create Action Plan
+                    plan = await AutonomyPlanService.create_plan(
+                        session=session,
+                        iteration_id=iteration.id,
+                    )
+
+                    # 5. Dispatch if autonomous
+                    if not plan.requires_approval:
+                        await AutonomyDispatchService.prepare_and_dispatch(
+                            session=session,
+                            action_plan_id=plan.id,
+                        )
+                    else:
+                        await AutonomyLoopService.update_operational_state(
+                            session=session,
+                            loop_id=ptr.loop_id,
+                            new_state=AutonomyLoopState.WAITING_APPROVAL,
+                        )
+
+                    await session.commit()
+                    ticks_processed += 1
+                except Exception as loop_exc:
+                    await session.rollback()
+                    logger.warning(
+                        "Autonomy loop tick iteration skipped or failed",
+                        loop_id=str(ptr.loop_id),
+                        error=str(loop_exc),
+                    )
+            return {"ticks_processed": ticks_processed}
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Autonomy tick sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "ticks_processed": 0}
+
+
+@celery_app.task(name="omega.autonomy.reconciliation_sweep")
+def autonomy_reconciliation_sweep_task() -> dict[str, Any]:
+    """Periodic sweep reconciling unconfirmed or timed-out action attempts."""
+    import asyncio
+
+    from sqlalchemy import select
+
+    from omega.application.autonomy.reconciliation_service import AutonomyReconciliationService
+    from omega.domain.autonomy import ActionAttemptOutcomeStatus
+    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.models import AutonomyActionAttemptOutcome
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(AutonomyActionAttemptOutcome.action_attempt_id)
+                .where(
+                    AutonomyActionAttemptOutcome.status
+                    == ActionAttemptOutcomeStatus.RECONCILIATION_REQUIRED.value
+                )
+                .distinct()
+                .limit(10)
+            )
+            attempt_ids = (await session.execute(stmt)).scalars().all()
+            reconciled_count = 0
+
+            for att_id in attempt_ids:
+                try:
+                    await AutonomyReconciliationService.reconcile_attempt(session, att_id)
+                    reconciled_count += 1
+                except Exception as rec_exc:
+                    await session.rollback()
+                    logger.warning(
+                        "Reconciliation attempt failed", attempt_id=str(att_id), error=str(rec_exc)
+                    )
+
+            return {"reconciled_count": reconciled_count}
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Autonomy reconciliation sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "reconciled_count": 0}
+
+
+@celery_app.task(name="omega.autonomy.approval_expiry_sweep")
+def autonomy_approval_expiry_sweep_task() -> dict[str, Any]:
+    """Periodic sweep expiring timed-out pending approvals."""
+    import asyncio
+
+    from sqlalchemy import func, select
+
+    from omega.application.autonomy.approval_service import AutonomyApprovalService
+    from omega.domain.autonomy import ApprovalActorType, ApprovalDecisionValue
+    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.models import (
+        AutonomyApprovalDecision,
+        AutonomyApprovalRequest,
+    )
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            # Query requests that expired where no decision exists
+            decided_ids = select(AutonomyApprovalDecision.approval_request_id)
+            stmt = (
+                select(AutonomyApprovalRequest)
+                .where(
+                    AutonomyApprovalRequest.expires_at <= func.now(),
+                    AutonomyApprovalRequest.id.not_in(decided_ids),
+                )
+                .limit(10)
+            )
+            expired_requests = (await session.execute(stmt)).scalars().all()
+            expired_count = 0
+
+            for req in expired_requests:
+                try:
+                    await AutonomyApprovalService.decide_request(
+                        session=session,
+                        approval_request_id=req.id,
+                        decision=ApprovalDecisionValue.EXPIRED,
+                        actor_type=ApprovalActorType.SYSTEM,
+                        reviewer_user_id=None,
+                        review_reason="Automatically expired by approval expiry sweep.",
+                    )
+                    await session.commit()
+                    expired_count += 1
+                except Exception as exp_exc:
+                    await session.rollback()
+                    logger.warning(
+                        "Approval expiry failed", request_id=str(req.id), error=str(exp_exc)
+                    )
+
+            return {"expired_count": expired_count}
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Autonomy approval expiry sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "expired_count": 0}
