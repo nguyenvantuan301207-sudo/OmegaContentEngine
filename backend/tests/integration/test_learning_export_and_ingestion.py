@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.analytics.learning_service import LearningExportService
@@ -34,6 +34,7 @@ from omega.infrastructure.models import (
     ChannelDNARevision,
     ContentGenerationRequest,
     LearningIngestionCursor,
+    LearningInputSnapshot,
     MediaArtifact,
     Mission,
     PlatformAccount,
@@ -805,16 +806,142 @@ async def test_learning_export_cursor_replays_without_loss(
     db_session: AsyncSession, learning_test_env
 ):
     """Verify keyset pagination cursor discovers candidates without data loss."""
+    env = learning_test_env
+    consumer_id = f"test_consumer_cursor_{uuid4().hex[:8]}"
+
+    # Drain any existing database windows so consumer is caught up to current frontier
+    while True:
+        stmt_cur = select(LearningIngestionCursor).where(
+            LearningIngestionCursor.consumer_id == consumer_id
+        )
+        cursor = (await db_session.execute(stmt_cur)).scalar_one_or_none()
+        after_time = cursor.cursor_updated_at_utc if cursor else datetime(1970, 1, 1, tzinfo=UTC)
+        after_id = cursor.cursor_window_id if cursor else UUID(int=0)
+
+        candidates = await LearningExportService.enumerate_export_candidates(
+            session=db_session,
+            after_updated_at=after_time,
+            after_window_id=after_id,
+            limit=500,
+        )
+        if not candidates:
+            break
+        await LearningIngestionService.sweep_and_ingest(db_session, consumer_id, batch_size=500)
+
+    # 1. Create known eligible window
+    asset: AnalyticsAsset = env["asset"]
+    w_test = AnalyticsWindow(
+        id=uuid4(),
+        asset_id=asset.id,
+        window_type=WindowType.FIRST_24H.value,
+        window_state=WindowState.FINALIZED.value,
+        window_start_utc=asset.published_at,
+        window_end_utc=asset.published_at + timedelta(hours=24),
+        updated_at=datetime.now(UTC),
+    )
+    db_session.add(w_test)
+    await db_session.commit()
+
+    # 2. First sweep consumes expected semantic inputs
     count = await LearningIngestionService.sweep_and_ingest(
-        db_session, "test_consumer_1", batch_size=1000
+        db_session, consumer_id, batch_size=1000
     )
     assert count >= 1
 
-    # Re-running sweep without updates yields 0 new candidates
+    # 3. Capture cursor pair
+    stmt_cur = select(LearningIngestionCursor).where(
+        LearningIngestionCursor.consumer_id == consumer_id
+    )
+    cursor_1 = (await db_session.execute(stmt_cur)).scalar_one()
+    cursor_pair_1 = (cursor_1.cursor_updated_at_utc, cursor_1.cursor_window_id)
+
+    stmt_snap = select(func.count(LearningInputSnapshot.id))
+    snapshots_count_1 = (await db_session.execute(stmt_snap)).scalar()
+
+    # 4. No AnalyticsWindow changes
+
+    # 5. Second candidate enumeration returns exactly []
+    candidates_2 = await LearningExportService.enumerate_export_candidates(
+        session=db_session,
+        after_updated_at=cursor_pair_1[0],
+        after_window_id=cursor_pair_1[1],
+        limit=1000,
+    )
+    assert candidates_2 == []
+
+    # 6. Second semantic ingest count == 0
     count_again = await LearningIngestionService.sweep_and_ingest(
-        db_session, "test_consumer_1", batch_size=1000
+        db_session, consumer_id, batch_size=1000
     )
     assert count_again == 0
+
+    # 7. Cursor pair unchanged
+    cursor_2 = (await db_session.execute(stmt_cur)).scalar_one()
+    cursor_pair_2 = (cursor_2.cursor_updated_at_utc, cursor_2.cursor_window_id)
+    assert cursor_pair_2 == cursor_pair_1
+
+    # 8. No new LearningInputSnapshot revisions created
+    snapshots_count_2 = (await db_session.execute(stmt_snap)).scalar()
+    assert snapshots_count_2 == snapshots_count_1
+
+
+@pytest.mark.asyncio
+async def test_cursor_test_isolation_ignores_prior_unrelated_database_state(
+    db_session: AsyncSession, learning_test_env
+):
+    """Verify a consumer advancing from its cursor position ignores older unrelated database windows."""
+    env = learning_test_env
+    consumer_id = f"test_consumer_isolation_{uuid4().hex[:8]}"
+
+    # Drain to current database frontier
+    while True:
+        stmt_cur = select(LearningIngestionCursor).where(
+            LearningIngestionCursor.consumer_id == consumer_id
+        )
+        cursor = (await db_session.execute(stmt_cur)).scalar_one_or_none()
+        after_time = cursor.cursor_updated_at_utc if cursor else datetime(1970, 1, 1, tzinfo=UTC)
+        after_id = cursor.cursor_window_id if cursor else UUID(int=0)
+
+        candidates = await LearningExportService.enumerate_export_candidates(
+            session=db_session,
+            after_updated_at=after_time,
+            after_window_id=after_id,
+            limit=500,
+        )
+        if not candidates:
+            break
+        await LearningIngestionService.sweep_and_ingest(db_session, consumer_id, batch_size=500)
+
+    # Capture cursor position
+    stmt_cur = select(LearningIngestionCursor).where(
+        LearningIngestionCursor.consumer_id == consumer_id
+    )
+    cursor_baseline = (await db_session.execute(stmt_cur)).scalar_one()
+    base_seq = cursor_baseline.high_water_mark_sequence
+
+    # Add a new window for this test
+    asset: AnalyticsAsset = env["asset"]
+    w_new = AnalyticsWindow(
+        id=uuid4(),
+        asset_id=asset.id,
+        window_type=WindowType.FIRST_24H.value,
+        window_state=WindowState.FINALIZED.value,
+        window_start_utc=asset.published_at,
+        window_end_utc=asset.published_at + timedelta(hours=24),
+        updated_at=datetime.now(UTC),
+    )
+    db_session.add(w_new)
+    await db_session.commit()
+
+    # Sweep should only see the single new window, ignoring all prior historical windows
+    count = await LearningIngestionService.sweep_and_ingest(
+        db_session, consumer_id, batch_size=1000
+    )
+    assert count == 1
+
+    cursor_after = (await db_session.execute(stmt_cur)).scalar_one()
+    assert cursor_after.cursor_window_id == w_new.id
+    assert cursor_after.high_water_mark_sequence == base_seq + 1
 
 
 @pytest.mark.asyncio
