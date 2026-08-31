@@ -371,7 +371,7 @@ def process_guardian_alert_outbox() -> dict[str, int]:
     import asyncio
 
     from omega.application.guardian.outbox import AlertOutboxService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> int:
         async with AsyncSessionLocal() as session:
@@ -394,7 +394,7 @@ def schedule_dispatch_sweep_task() -> dict[str, int]:
     import asyncio
 
     from omega.application.scheduler.sweep_service import SchedulerSweepService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> dict[str, int]:
         async with AsyncSessionLocal() as session:
@@ -414,7 +414,7 @@ def schedule_outbox_relay_task() -> dict[str, int]:
     import asyncio
 
     from omega.application.scheduler.outbox_relay import OutboxRelayService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> dict[str, int]:
         async with AsyncSessionLocal() as session:
@@ -434,7 +434,7 @@ def schedule_expiration_sweep_task() -> dict[str, int]:
     import asyncio
 
     from omega.application.scheduler.sweep_service import SchedulerSweepService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> int:
         async with AsyncSessionLocal() as session:
@@ -454,7 +454,7 @@ def schedule_stale_dispatching_sweep_task() -> dict[str, int]:
     import asyncio
 
     from omega.application.scheduler.sweep_service import SchedulerSweepService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> dict[str, int]:
         async with AsyncSessionLocal() as session:
@@ -475,7 +475,7 @@ def execute_publish_task(task_id: str) -> dict[str, Any]:
     from uuid import UUID
 
     from omega.application.publisher.publish_service import PublishExecutionService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> dict[str, Any]:
         async with AsyncSessionLocal() as session:
@@ -502,7 +502,7 @@ def publisher_handoff_sweep_task() -> dict[str, int]:
     import asyncio
 
     from omega.application.publisher.handoff_relay import HandoffRelayService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> int:
         async with AsyncSessionLocal() as session:
@@ -522,7 +522,7 @@ def publisher_reconciliation_sweep_task() -> dict[str, int]:
     import asyncio
 
     from omega.application.publisher.reconciliation_service import ReconciliationService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> int:
         async with AsyncSessionLocal() as session:
@@ -547,7 +547,7 @@ def analytics_poll_sweep_task() -> dict[str, Any]:
     from sqlalchemy import func, select
 
     from omega.application.analytics.poll_service import AnalyticsPollService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
     from omega.infrastructure.models import AnalyticsAsset
 
     async def _run() -> dict[str, Any]:
@@ -593,7 +593,7 @@ def analytics_fetch_video_batch_task(asset_id: str) -> dict[str, Any]:
     from uuid import UUID
 
     from omega.application.analytics.poll_service import AnalyticsPollService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> dict[str, Any]:
         async with AsyncSessionLocal() as session:
@@ -628,7 +628,7 @@ def analytics_daily_reconciliation_sweep_task() -> dict[str, Any]:
 
     from sqlalchemy import select
 
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
     from omega.infrastructure.models import AnalyticsWindow
 
     async def _run() -> dict[str, Any]:
@@ -656,7 +656,7 @@ def learning_ingest_observations_sweep_task() -> dict[str, Any]:
     import asyncio
 
     from omega.application.learning.ingestion_service import LearningIngestionService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
 
     async def _run() -> dict[str, Any]:
         async with AsyncSessionLocal() as session:
@@ -681,13 +681,13 @@ def learning_evaluate_hypotheses_sweep_task() -> dict[str, Any]:
     from sqlalchemy import select
 
     from omega.application.learning.evaluation_service import EvaluationService
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
     from omega.infrastructure.models import LearningHypothesisLatestPointer
 
     async def _run() -> dict[str, Any]:
         async with AsyncSessionLocal() as session:
             stmt = (
-                select(LearningHypothesisLatestPointer)
+                select(LearningHypothesisLatestPointer.hypothesis_family_id)
                 .where(
                     LearningHypothesisLatestPointer.current_status.in_(
                         ["DRAFT", "ACTIVE", "SUPPORTED", "WEAKENED"]
@@ -695,21 +695,21 @@ def learning_evaluate_hypotheses_sweep_task() -> dict[str, Any]:
                 )
                 .limit(10)
             )
-            pointers = (await session.execute(stmt)).scalars().all()
+            family_ids = (await session.execute(stmt)).scalars().all()
             now_utc = datetime.now(UTC)
             evaluated = 0
-            for ptr in pointers:
+            for family_id in family_ids:
                 try:
                     await EvaluationService.evaluate_hypothesis(
                         session=session,
-                        hypothesis_family_id=ptr.hypothesis_family_id,
+                        hypothesis_family_id=family_id,
                         as_of_utc=now_utc,
                     )
                     evaluated += 1
                 except Exception as eval_exc:
                     logger.warning(
                         "Hypothesis evaluation failed",
-                        family_id=str(ptr.hypothesis_family_id),
+                        family_id=str(family_id),
                         error=str(eval_exc),
                     )
             await session.commit()
@@ -738,7 +738,7 @@ def autonomy_tick_sweep_task() -> dict[str, Any]:
     from omega.application.autonomy.observation_service import AutonomyObservationService
     from omega.application.autonomy.plan_service import AutonomyPlanService
     from omega.domain.autonomy import AutonomyLoopState
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
     from omega.infrastructure.models import (
         AutonomyLoopLatestPointer,
         AutonomyPolicySnapshot,
@@ -746,42 +746,35 @@ def autonomy_tick_sweep_task() -> dict[str, Any]:
 
     async def _run() -> dict[str, Any]:
         async with AsyncSessionLocal() as session:
-            # Query loops in IDLE or OBSERVING
+            # Query loops in IDLE eligible for a new iteration
             stmt = (
-                select(AutonomyLoopLatestPointer)
-                .where(
-                    AutonomyLoopLatestPointer.operational_state.in_(
-                        [
-                            AutonomyLoopState.IDLE.value,
-                            AutonomyLoopState.OBSERVING.value,
-                        ]
-                    )
-                )
+                select(AutonomyLoopLatestPointer.loop_id)
+                .where(AutonomyLoopLatestPointer.operational_state == AutonomyLoopState.IDLE.value)
                 .limit(5)
             )
-            pointers = (await session.execute(stmt)).scalars().all()
+            loop_ids = (await session.execute(stmt)).scalars().all()
             ticks_processed = 0
 
-            for ptr in pointers:
+            for target_loop_id in loop_ids:
                 try:
                     # 1. Capture Observation
-                    obs = await AutonomyObservationService.capture_snapshot(session, ptr.loop_id)
+                    obs = await AutonomyObservationService.capture_snapshot(session, target_loop_id)
 
                     # 2. Query latest policy snapshot
                     stmt_pol = (
-                        select(AutonomyPolicySnapshot)
-                        .where(AutonomyPolicySnapshot.loop_id == ptr.loop_id)
+                        select(AutonomyPolicySnapshot.id)
+                        .where(AutonomyPolicySnapshot.loop_id == target_loop_id)
                         .order_by(AutonomyPolicySnapshot.policy_version.desc())
                         .limit(1)
                     )
-                    pol = (await session.execute(stmt_pol)).scalar_one()
+                    pol_id = (await session.execute(stmt_pol)).scalar_one()
 
                     # 3. Allocate Iteration
                     iteration = await AutonomyLoopService.allocate_iteration(
                         session=session,
-                        loop_id=ptr.loop_id,
+                        loop_id=target_loop_id,
                         observation_snapshot_id=obs.id,
-                        policy_snapshot_id=pol.id,
+                        policy_snapshot_id=pol_id,
                     )
 
                     # 4. Create Action Plan
@@ -789,17 +782,25 @@ def autonomy_tick_sweep_task() -> dict[str, Any]:
                         session=session,
                         iteration_id=iteration.id,
                     )
+                    plan_id = plan.id
+                    requires_approval = plan.requires_approval
+
+                    await AutonomyLoopService.update_operational_state(
+                        session=session,
+                        loop_id=target_loop_id,
+                        new_state=AutonomyLoopState.PLANNING,
+                    )
 
                     # 5. Dispatch if autonomous
-                    if not plan.requires_approval:
+                    if not requires_approval:
                         await AutonomyDispatchService.prepare_and_dispatch(
                             session=session,
-                            action_plan_id=plan.id,
+                            action_plan_id=plan_id,
                         )
                     else:
                         await AutonomyLoopService.update_operational_state(
                             session=session,
-                            loop_id=ptr.loop_id,
+                            loop_id=target_loop_id,
                             new_state=AutonomyLoopState.WAITING_APPROVAL,
                         )
 
@@ -809,7 +810,7 @@ def autonomy_tick_sweep_task() -> dict[str, Any]:
                     await session.rollback()
                     logger.warning(
                         "Autonomy loop tick iteration skipped or failed",
-                        loop_id=str(ptr.loop_id),
+                        loop_id=str(target_loop_id),
                         error=str(loop_exc),
                     )
             return {"ticks_processed": ticks_processed}
@@ -831,7 +832,7 @@ def autonomy_reconciliation_sweep_task() -> dict[str, Any]:
 
     from omega.application.autonomy.reconciliation_service import AutonomyReconciliationService
     from omega.domain.autonomy import ActionAttemptOutcomeStatus
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
     from omega.infrastructure.models import AutonomyActionAttemptOutcome
 
     async def _run() -> dict[str, Any]:
@@ -877,7 +878,7 @@ def autonomy_approval_expiry_sweep_task() -> dict[str, Any]:
 
     from omega.application.autonomy.approval_service import AutonomyApprovalService
     from omega.domain.autonomy import ApprovalActorType, ApprovalDecisionValue
-    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.database import AsyncWorkerSessionLocal as AsyncSessionLocal
     from omega.infrastructure.models import (
         AutonomyApprovalDecision,
         AutonomyApprovalRequest,
@@ -888,21 +889,21 @@ def autonomy_approval_expiry_sweep_task() -> dict[str, Any]:
             # Query requests that expired where no decision exists
             decided_ids = select(AutonomyApprovalDecision.approval_request_id)
             stmt = (
-                select(AutonomyApprovalRequest)
+                select(AutonomyApprovalRequest.id)
                 .where(
                     AutonomyApprovalRequest.expires_at <= func.now(),
                     AutonomyApprovalRequest.id.not_in(decided_ids),
                 )
                 .limit(10)
             )
-            expired_requests = (await session.execute(stmt)).scalars().all()
+            expired_request_ids = (await session.execute(stmt)).scalars().all()
             expired_count = 0
 
-            for req in expired_requests:
+            for req_id in expired_request_ids:
                 try:
                     await AutonomyApprovalService.decide_request(
                         session=session,
-                        approval_request_id=req.id,
+                        approval_request_id=req_id,
                         decision=ApprovalDecisionValue.EXPIRED,
                         actor_type=ApprovalActorType.SYSTEM,
                         reviewer_user_id=None,
@@ -913,7 +914,7 @@ def autonomy_approval_expiry_sweep_task() -> dict[str, Any]:
                 except Exception as exp_exc:
                     await session.rollback()
                     logger.warning(
-                        "Approval expiry failed", request_id=str(req.id), error=str(exp_exc)
+                        "Approval expiry failed", request_id=str(req_id), error=str(exp_exc)
                     )
 
             return {"expired_count": expired_count}
