@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import enum
 import hashlib
+import json
 from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -310,3 +311,60 @@ class LearningObservation(BaseModel):
     # Data Quality
     is_fully_finalized: bool
     quality_flags: list[str] = Field(default_factory=list)
+
+
+EMPTY_DIMENSIONS_HASH: str = ""
+
+CANONICAL_COMPUTED_FORMULAS: dict[str, tuple[str, str]] = {
+    "view_velocity_per_hour": ("FORMULA_VIEW_VELOCITY_V1", "1"),
+    "like_ratio_percent": ("FORMULA_LIKE_RATIO_V1", "1"),
+    "comment_ratio_percent": ("FORMULA_COMMENT_RATIO_V1", "1"),
+    "engagement_rate_percent": ("FORMULA_ENGAGEMENT_RATE_V1", "1"),
+    "net_subscribers": ("FORMULA_NET_SUBSCRIBERS_V1", "1"),
+}
+
+
+class AnalyticsExportContractError(Exception):
+    """Raised when an analytics export contract violation occurs."""
+
+
+class ExportCandidate(BaseModel):
+    """Candidate window identified for downstream learning ingestion."""
+
+    model_config = ConfigDict(frozen=True)
+
+    window_id: UUID
+    asset_id: UUID
+    window_type: WindowType
+    window_state: WindowState
+    updated_at: datetime
+
+
+def compute_learning_observation_checksum(obs: LearningObservation) -> str:
+    """Compute deterministic SHA-256 checksum over semantic Analytics state only.
+
+    Excludes non-semantic database timestamps, execution times, or worker IDs.
+    Keys are sorted, enums converted to string values, and quality flags sorted unique.
+    """
+    canonical_dict = {
+        "observation_id": str(obs.observation_id),
+        "channel_id": str(obs.channel_id),
+        "publish_intent_id": str(obs.publish_intent_id),
+        "provider_video_id": obs.provider_video_id,
+        "media_artifact_id": str(obs.media_artifact_id),
+        "channel_dna_revision_id": str(obs.channel_dna_revision_id)
+        if obs.channel_dna_revision_id
+        else None,
+        "published_at_utc": obs.published_at_utc.isoformat(),
+        "window_type": obs.window_type.value,
+        "window_state": obs.window_state.value,
+        "window_start_utc": obs.window_start_utc.isoformat(),
+        "window_end_utc": obs.window_end_utc.isoformat(),
+        "metrics": dict(sorted(obs.metrics.items())),
+        "metric_qualities": {k: v.value for k, v in sorted(obs.metric_qualities.items())},
+        "classifications": {k: v.value for k, v in sorted(obs.classifications.items())},
+        "is_fully_finalized": obs.is_fully_finalized,
+        "quality_flags": sorted(list(set(obs.quality_flags))),
+    }
+    raw_bytes = json.dumps(canonical_dict, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return hashlib.sha256(raw_bytes).hexdigest()

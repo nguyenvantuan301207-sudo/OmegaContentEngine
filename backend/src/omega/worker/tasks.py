@@ -648,3 +648,76 @@ def analytics_daily_reconciliation_sweep_task() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Analytics daily reconciliation sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "checked_windows": 0}
+
+
+@celery_app.task(name="omega.learning.ingest_observations_sweep")
+def learning_ingest_observations_sweep_task() -> dict[str, Any]:
+    """Periodic sweep ingesting finalized/revised analytics observations into learning."""
+    import asyncio
+
+    from omega.application.learning.ingestion_service import LearningIngestionService
+    from omega.infrastructure.database import AsyncSessionLocal
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            count = await LearningIngestionService.sweep_and_ingest(session)
+            await session.commit()
+            return {"ingested_count": count}
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Learning ingest sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "ingested_count": 0}
+
+
+@celery_app.task(name="omega.learning.evaluate_hypotheses_sweep")
+def learning_evaluate_hypotheses_sweep_task() -> dict[str, Any]:
+    """Periodic sweep evaluating active hypotheses across channels."""
+    import asyncio
+    from datetime import UTC, datetime
+
+    from sqlalchemy import select
+
+    from omega.application.learning.evaluation_service import EvaluationService
+    from omega.infrastructure.database import AsyncSessionLocal
+    from omega.infrastructure.models import LearningHypothesisLatestPointer
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncSessionLocal() as session:
+            stmt = (
+                select(LearningHypothesisLatestPointer)
+                .where(
+                    LearningHypothesisLatestPointer.current_status.in_(
+                        ["DRAFT", "ACTIVE", "SUPPORTED", "WEAKENED"]
+                    )
+                )
+                .limit(10)
+            )
+            pointers = (await session.execute(stmt)).scalars().all()
+            now_utc = datetime.now(UTC)
+            evaluated = 0
+            for ptr in pointers:
+                try:
+                    await EvaluationService.evaluate_hypothesis(
+                        session=session,
+                        hypothesis_family_id=ptr.hypothesis_family_id,
+                        as_of_utc=now_utc,
+                    )
+                    evaluated += 1
+                except Exception as eval_exc:
+                    logger.warning(
+                        "Hypothesis evaluation failed",
+                        family_id=str(ptr.hypothesis_family_id),
+                        error=str(eval_exc),
+                    )
+            await session.commit()
+            return {"evaluated_count": evaluated}
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Learning evaluate sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "evaluated_count": 0}

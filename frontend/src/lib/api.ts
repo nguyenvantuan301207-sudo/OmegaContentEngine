@@ -2254,3 +2254,127 @@ export async function getAnalyticsHealth(): Promise<AnalyticsHealth> {
   return apiFetch("/api/v1/analytics/health");
 }
 
+// ── Learning Engine Types & Methods (OMEGA-013) ──
+
+export interface LearningKnowledgeItem {
+  knowledge_family_id: string;
+  knowledge_item_id: string;
+  channel_id: string;
+  knowledge_type: string;
+  structured_claim: Record<string, unknown>;
+  human_readable_summary: string;
+  evidence_type: string;
+  confidence_class: "VERY_LOW" | "LOW" | "MODERATE" | "HIGH" | "VERY_HIGH";
+  effect_size_absolute: number;
+  effect_size_relative_percent: number | null;
+  cliffs_delta: number;
+  sample_size_treatment: number;
+  sample_size_control: number;
+  current_status: "ACTIVE" | "WEAKENED" | "STALE" | "SUPERSEDED" | "RETRACTED";
+  status_reason: string | null;
+  revision_number: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LearningHypothesisSummary {
+  hypothesis_family_id: string;
+  hypothesis_id: string;
+  channel_id: string;
+  cohort_id: string;
+  hypothesis_slug: string;
+  description: string;
+  factor_name: string;
+  treatment_definition: Record<string, unknown>;
+  control_definition: Record<string, unknown>;
+  target_outcome_metric: string;
+  target_evaluation_window: string;
+  current_version: number;
+  current_status: "DRAFT" | "ACTIVE" | "INCONCLUSIVE" | "SUPPORTED" | "WEAKENED" | "CONTRADICTED" | "STALE" | "SUPERSEDED";
+
+  updated_at: string;
+}
+
+export interface LearningHypothesisEvaluation {
+  evaluation_id: string;
+  hypothesis_id: string;
+  evaluation_version: number;
+  sample_size_treatment: number;
+  sample_size_control: number;
+  treatment_median: number;
+  control_median: number;
+  effect_size_absolute: number;
+  effect_size_relative_percent: number | null;
+  cliffs_delta: number;
+  p_value_raw: number;
+  p_value_adjusted: number;
+  confidence_class: string;
+  resulting_status: string;
+  evaluated_at: string;
+}
+
+export interface LearningBaseline {
+  baseline_id: string;
+  cohort_id: string;
+  outcome_metric: string;
+  evaluation_window: string;
+  baseline_version: number;
+  member_count: number;
+  metric_median: number;
+  metric_mean: number;
+  metric_stddev: number;
+  metric_iqr: number;
+  metric_mad: number;
+  calculated_at: string;
+}
+
+export interface LearningRefreshResponse {
+  job_id: string;
+  channel_id: string;
+  status: string;
+  created_at: string;
+}
+
+export async function getChannelKnowledge(
+  channelId: string,
+  status?: string
+): Promise<LearningKnowledgeItem[]> {
+  const url = status
+    ? `/api/v1/learning/channels/${channelId}/knowledge?status=${encodeURIComponent(status)}`
+    : `/api/v1/learning/channels/${channelId}/knowledge`;
+  return apiFetch(url);
+}
+
+export async function getChannelHypotheses(
+  channelId: string
+): Promise<LearningHypothesisSummary[]> {
+  return apiFetch(`/api/v1/learning/channels/${channelId}/hypotheses`);
+}
+
+export async function getHypothesisDetail(
+  familyId: string
+): Promise<LearningHypothesisSummary> {
+  return apiFetch(`/api/v1/learning/hypotheses/${familyId}`);
+}
+
+export async function getHypothesisHistory(
+  familyId: string
+): Promise<LearningHypothesisEvaluation[]> {
+  return apiFetch(`/api/v1/learning/hypotheses/${familyId}/history`);
+}
+
+export async function getChannelBaselines(
+  channelId: string
+): Promise<LearningBaseline[]> {
+  return apiFetch(`/api/v1/learning/channels/${channelId}/baselines`);
+}
+
+export async function triggerLearningRefresh(
+  channelId: string,
+  requestId?: string
+): Promise<LearningRefreshResponse> {
+  const url = requestId
+    ? `/api/v1/learning/channels/${channelId}/refresh?request_id=${encodeURIComponent(requestId)}`
+    : `/api/v1/learning/channels/${channelId}/refresh`;
+  return apiFetch(url, { method: "POST" });
+}

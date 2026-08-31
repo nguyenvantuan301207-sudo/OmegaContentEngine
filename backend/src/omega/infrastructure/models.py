@@ -3975,3 +3975,647 @@ class AnalyticsChannelLatestPointer(Base):
 
     def __repr__(self) -> str:
         return f"<AnalyticsChannelLatestPointer {self.channel_id}:{self.snapshot_date} rev={self.current_revision_sequence}>"
+
+
+# ============================================================================
+# OMEGA-013 Learning Engine Models
+# ============================================================================
+
+
+class LearningIngestionCursor(Base):
+    """Durable high-water mark tracking for OMEGA-012 observation discovery."""
+
+    __tablename__ = "learning_ingestion_cursors"
+
+    consumer_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    cursor_updated_at_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    cursor_window_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    high_water_mark_sequence: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, server_default=text("0")
+    )
+    last_success_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningIngestionCursor {self.consumer_id} seq={self.high_water_mark_sequence}>"
+
+
+class LearningInputSnapshot(Base):
+    """Immutable store of ingested OMEGA-012 learning observations."""
+
+    __tablename__ = "learning_input_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    observation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    publish_intent_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("publish_intents.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    provider_video_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    media_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("media_artifacts.id", ondelete="RESTRICT"), nullable=False
+    )
+    channel_dna_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    window_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    window_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    window_start_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    raw_metrics: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    metric_qualities: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    classifications: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    is_fully_finalized: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    quality_flags: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    payload_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    revision_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    preceding_snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_input_snapshots.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    ingested_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "observation_id",
+            "window_type",
+            "revision_sequence",
+            name="uq_learning_input_obs_win_rev",
+        ),
+        CheckConstraint(
+            "window_state IN ('PENDING', 'PROVISIONAL', 'FINALIZED', 'REVISED')",
+            name="ck_learning_input_window_state",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningInputSnapshot {self.id} obs={self.observation_id} rev={self.revision_sequence}>"
+
+
+class LearningInputLatestPointer(Base):
+    """Mutable query projection and concurrency anchor for input snapshots."""
+
+    __tablename__ = "learning_input_latest_pointers"
+
+    observation_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    window_type: Mapped[str] = mapped_column(String(32), primary_key=True)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    current_input_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_input_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    current_revision_sequence: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    current_payload_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    current_snapshot: Mapped[LearningInputSnapshot] = relationship("LearningInputSnapshot")
+
+    def __repr__(self) -> str:
+        return f"<LearningInputLatestPointer {self.observation_id}:{self.window_type} rev={self.current_revision_sequence}>"
+
+
+class LearningFeatureSnapshot(Base):
+    """Extracted deterministic and model-extracted content features."""
+
+    __tablename__ = "learning_feature_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    input_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_input_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    feature_schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    extractor_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    deterministic_features: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    model_features: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    feature_snapshot_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningFeatureSnapshot {self.id} input={self.input_snapshot_id}>"
+
+
+class LearningModelExtraction(Base):
+    """Audit trail for LLM prompt/response extraction provenance."""
+
+    __tablename__ = "learning_model_extractions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    feature_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_feature_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    model_provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    prompt_template_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    prompt_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    response_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    structured_output: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningModelExtraction {self.id} provider={self.model_provider} model={self.model_name}>"
+
+
+class LearningCohort(Base):
+    """Channel-local comparison cohort definitions."""
+
+    __tablename__ = "learning_cohorts"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    cohort_slug: Mapped[str] = mapped_column(String(64), nullable=False)
+    content_format: Mapped[str] = mapped_column(String(32), nullable=False)
+    duration_bucket: Mapped[str] = mapped_column(String(32), nullable=False)
+    dna_compatibility_mode: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="STRICT_REVISION"
+    )
+    evaluation_window: Mapped[str] = mapped_column(String(32), nullable=False)
+    inclusion_criteria: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("channel_id", "cohort_slug", name="uq_learning_cohorts_chan_slug"),
+        CheckConstraint(
+            "content_format IN ('SHORT', 'LONG_FORM')", name="ck_learning_cohorts_content_format"
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningCohort {self.cohort_slug} chan={self.channel_id}>"
+
+
+class LearningCohortMember(Base):
+    """Association between feature snapshots and cohorts."""
+
+    __tablename__ = "learning_cohort_members"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    cohort_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_cohorts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    feature_snapshot_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_feature_snapshots.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    cohort_member_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    admitted_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningCohortMember cohort={self.cohort_id} feat={self.feature_snapshot_id}>"
+
+
+class LearningBaseline(Base):
+    """Immutable cohort performance baselines."""
+
+    __tablename__ = "learning_baselines"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    cohort_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_cohorts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    outcome_metric: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluation_window: Mapped[str] = mapped_column(String(32), nullable=False)
+    baseline_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    member_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    metric_median: Mapped[float] = mapped_column(Float, nullable=False)
+    metric_mean: Mapped[float] = mapped_column(Float, nullable=False)
+    metric_stddev: Mapped[float] = mapped_column(Float, nullable=False)
+    metric_iqr: Mapped[float] = mapped_column(Float, nullable=False)
+    metric_mad: Mapped[float] = mapped_column(Float, nullable=False)
+    member_ids_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    evaluation_as_of_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    selection_policy_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    baseline_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    calculated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_baselines_lookup_latest",
+            "cohort_id",
+            "outcome_metric",
+            "evaluation_window",
+            text("baseline_version DESC"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningBaseline cohort={self.cohort_id} metric={self.outcome_metric} ver={self.baseline_version}>"
+
+
+class LearningHypothesis(Base):
+    """Immutable versioned hypothesis definitions."""
+
+    __tablename__ = "learning_hypotheses"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hypothesis_family_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    hypothesis_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    cohort_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_cohorts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    hypothesis_slug: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    factor_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    treatment_definition: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    control_definition: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    target_outcome_metric: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_evaluation_window: Mapped[str] = mapped_column(String(32), nullable=False)
+    definition_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    supersedes_hypothesis_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_hypotheses.id", ondelete="RESTRICT"), nullable=True
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "hypothesis_family_id", "hypothesis_version", name="uq_hypotheses_family_version"
+        ),
+        UniqueConstraint(
+            "hypothesis_family_id", "definition_checksum", name="uq_hypotheses_family_def_checksum"
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningHypothesis {self.hypothesis_slug} fam={self.hypothesis_family_id} ver={self.hypothesis_version}>"
+
+
+class LearningHypothesisLatestPointer(Base):
+    """Mutable query projection tracking current state per hypothesis family."""
+
+    __tablename__ = "learning_hypothesis_latest_pointers"
+
+    hypothesis_family_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    current_hypothesis_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_hypotheses.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    current_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    current_status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT")
+    latest_evaluation_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_hypothesis_evaluations.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    current_hypothesis: Mapped[LearningHypothesis] = relationship(
+        "LearningHypothesis", foreign_keys=[current_hypothesis_id]
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "current_status IN ('DRAFT', 'ACTIVE', 'INCONCLUSIVE', 'SUPPORTED', 'WEAKENED', 'CONTRADICTED', 'STALE', 'SUPERSEDED')",
+            name="ck_hypotheses_current_status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningHypothesisLatestPointer {self.hypothesis_family_id} status={self.current_status}>"
+
+
+class LearningHypothesisEvaluation(Base):
+    """Immutable statistical evaluation results."""
+
+    __tablename__ = "learning_hypothesis_evaluations"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hypothesis_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_hypotheses.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    hypothesis_family_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    baseline_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_baselines.id", ondelete="RESTRICT"), nullable=False
+    )
+    evaluation_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    sample_size_treatment: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_size_control: Mapped[int] = mapped_column(Integer, nullable=False)
+    treatment_median: Mapped[float] = mapped_column(Float, nullable=False)
+    control_median: Mapped[float] = mapped_column(Float, nullable=False)
+    effect_size_absolute: Mapped[float] = mapped_column(Float, nullable=False)
+    effect_size_relative_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cliffs_delta: Mapped[float] = mapped_column(Float, nullable=False)
+    p_value_raw: Mapped[float] = mapped_column(Float, nullable=False)
+    p_value_adjusted: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    resulting_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    evaluation_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    evaluated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    hypothesis: Mapped[LearningHypothesis] = relationship("LearningHypothesis")
+    baseline: Mapped[LearningBaseline] = relationship("LearningBaseline")
+
+    __table_args__ = (
+        CheckConstraint(
+            "resulting_status IN ('INCONCLUSIVE', 'SUPPORTED', 'WEAKENED', 'CONTRADICTED')",
+            name="ck_evaluation_resulting_status",
+        ),
+        CheckConstraint(
+            "confidence_class IN ('VERY_LOW', 'LOW', 'MODERATE', 'HIGH', 'VERY_HIGH')",
+            name="ck_evaluation_confidence_class",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningHypothesisEvaluation {self.id} hyp={self.hypothesis_id} status={self.resulting_status}>"
+
+
+class LearningEvaluationEvidenceManifest(Base):
+    """Complete, reproducible sample population manifest for an evaluation."""
+
+    __tablename__ = "learning_evaluation_evidence_manifests"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_hypothesis_evaluations.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    treatment_input_snapshot_ids: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    control_input_snapshot_ids: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    source_learning_observation_ids: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    source_feature_snapshot_ids: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    baseline_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_baselines.id", ondelete="RESTRICT"), nullable=False
+    )
+    treatment_values: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    control_values: Mapped[list[Any]] = mapped_column(JSON, nullable=False)
+    member_set_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    analysis_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    effect_policy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    effect_policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    confidence_policy_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    confidence_policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    multiple_comparison_family_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    correction_method: Mapped[str] = mapped_column(String(32), nullable=False)
+    correction_method_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    evaluation_as_of_utc: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    manifest_checksum: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    evaluation: Mapped[LearningHypothesisEvaluation] = relationship("LearningHypothesisEvaluation")
+
+    def __repr__(self) -> str:
+        return f"<LearningEvaluationEvidenceManifest {self.id} eval={self.evaluation_id}>"
+
+
+class LearningKnowledgeItem(Base):
+    """Immutable knowledge claims and statistical evidence links."""
+
+    __tablename__ = "learning_knowledge_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    knowledge_family_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    knowledge_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    structured_claim: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    human_readable_summary: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_type: Mapped[str] = mapped_column(String(32), nullable=False, default="OBSERVATIONAL")
+    confidence_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    effect_size_absolute: Mapped[float] = mapped_column(Float, nullable=False)
+    effect_size_relative_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cliffs_delta: Mapped[float] = mapped_column(Float, nullable=False)
+    sample_size_treatment: Mapped[int] = mapped_column(Integer, nullable=False)
+    sample_size_control: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_hypothesis_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_hypotheses.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    source_evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_hypothesis_evaluations.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    supersedes_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_knowledge_items.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    knowledge_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "evidence_type IN ('OBSERVATIONAL', 'CONTROLLED_EXPERIMENT', 'MANUAL_LABEL', 'EXTERNAL_PRIOR')",
+            name="ck_knowledge_evidence_type",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningKnowledgeItem {self.id} fam={self.knowledge_family_id} rev={self.revision_number}>"
+
+
+class LearningKnowledgeLatestPointer(Base):
+    """Mutable lifecycle projection for knowledge claims."""
+
+    __tablename__ = "learning_knowledge_latest_pointers"
+
+    knowledge_family_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    current_knowledge_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("learning_knowledge_items.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    current_revision_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    current_status: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE")
+    status_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    current_knowledge: Mapped[LearningKnowledgeItem] = relationship(
+        "LearningKnowledgeItem", foreign_keys=[current_knowledge_item_id]
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "current_status IN ('ACTIVE', 'WEAKENED', 'STALE', 'SUPERSEDED', 'RETRACTED')",
+            name="ck_knowledge_current_status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningKnowledgeLatestPointer {self.knowledge_family_id} status={self.current_status}>"
+
+
+class LearningEvent(Base):
+    """Authoritative append-only audit event journal."""
+
+    __tablename__ = "learning_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    aggregate_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    aggregate_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="RESTRICT"), nullable=False
+    )
+    source_ids: Mapped[list[Any]] = mapped_column(JSON, nullable=False, default=list)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    event_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    occurred_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        Index("idx_learning_events_chan_time", "channel_id", "occurred_at"),
+        Index("idx_learning_events_agg", "aggregate_type", "aggregate_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningEvent {self.event_type} agg={self.aggregate_id}>"
+
+
+class LearningJob(Base):
+    """Fenced background execution jobs."""
+
+    __tablename__ = "learning_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    job_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", index=True)
+    job_dedupe_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    claim_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    claimed_by_worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    error_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PENDING', 'CLAIMED', 'COMPLETED', 'FAILED', 'DEFERRED')",
+            name="ck_learning_jobs_status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LearningJob {self.id} type={self.job_type} status={self.status}>"
