@@ -92,12 +92,35 @@ def test_semantic_diagram_extraction(engine):
     scene = create_mock_scene(VisualStrategy.DIAGRAM, "The Manufacturer ships to the Distribution Center, which goes to the Retailer.")
     comp = engine.compose(scene)
     labels = [layer.content.get("label") for layer in comp.layers if layer.type == LayerType.DIAGRAM_NODE]
-    assert "Client" not in labels
-    assert "API" not in labels
-    assert "Database" not in labels
+    assert "System" not in labels
+    assert "Source" not in labels
+    assert "Target" not in labels
+    assert "Input" not in labels
+    assert "Process" not in labels
+    assert "Output" not in labels
     assert "Distribution Center" in labels
     assert "Manufacturer" in labels
     assert "Retailer" in labels
+
+def test_diagram_fallback_insufficient_content(engine):
+    # This string has no capitalized entities and < 2 long words (e.g. "a" is short, "b" is short)
+    scene = create_mock_scene(VisualStrategy.DIAGRAM, "a b c d e")
+    scene.visual_brief = ""
+    scene.on_screen_text = ""
+    comp = engine.compose(scene)
+    # DIAGRAM should fall back to INFOGRAPHIC, but "a b c d e" also has < 6 words, so INFOGRAPHIC falls back to KINETIC_TEXT
+    assert comp.visual_strategy == VisualStrategy.KINETIC_TEXT
+    assert not any(layer.type == LayerType.DIAGRAM_NODE for layer in comp.layers)
+
+def test_infographic_fallback_insufficient_content(engine):
+    scene = create_mock_scene(VisualStrategy.INFOGRAPHIC, "Short sentence.")
+    scene.visual_brief = ""
+    scene.on_screen_text = ""
+    comp = engine.compose(scene)
+    # INFOGRAPHIC should fall back to KINETIC_TEXT because there aren't enough words/parts
+    assert comp.visual_strategy == VisualStrategy.KINETIC_TEXT
+    texts = [layer.content.get("text") for layer in comp.layers if layer.type == LayerType.TEXT]
+    assert "Analysis" not in texts
 
 def test_semantic_infographic_extraction(engine):
     scene = create_mock_scene(VisualStrategy.INFOGRAPHIC, "On one hand we have low latency. On the other hand we have high throughput.")
@@ -105,6 +128,7 @@ def test_semantic_infographic_extraction(engine):
     texts = [layer.content.get("text") for layer in comp.layers if layer.type == LayerType.TEXT]
     assert "Factor A" not in texts
     assert "Factor B" not in texts
+    assert "Analysis" not in texts
 
 def test_code_demo_generic_prose_fallback(engine):
     # This prose has no code-like hints, so it should fallback to INFOGRAPHIC

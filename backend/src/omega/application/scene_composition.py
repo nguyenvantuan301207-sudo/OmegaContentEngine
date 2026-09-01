@@ -86,6 +86,20 @@ class SceneCompositionEngine:
             if not code_lang:
                 strategy = VisualStrategy.INFOGRAPHIC
 
+        # Handle DIAGRAM fallback
+        nodes = []
+        if strategy == VisualStrategy.DIAGRAM:
+            nodes = self._extract_diagram_nodes(scene)
+            if len(nodes) < 2:
+                strategy = VisualStrategy.INFOGRAPHIC
+
+        # Handle INFOGRAPHIC fallback
+        blocks = []
+        if strategy == VisualStrategy.INFOGRAPHIC:
+            blocks = self._extract_infographic_blocks(scene)
+            if len(blocks) < 2:
+                strategy = VisualStrategy.KINETIC_TEXT
+
         if strategy == VisualStrategy.TITLE_MOTION:
             layout = "CENTERED_TITLE"
             layers.append(self._create_layer("title", LayerType.TEXT, self.margin_x, 400, self.safe_width, 200, 10, content={"text": scene.section_id, "font_size": 96, "align": "center"}))
@@ -96,20 +110,28 @@ class SceneCompositionEngine:
             layout = "FLOW_DIAGRAM"
             layers.append(self._create_layer("title", LayerType.TEXT, self.margin_x, self.margin_top, self.safe_width, 100, 10, content={"text": scene.section_id, "font_size": 64}))
 
-            nodes = self._extract_diagram_nodes(scene)
             node_w = 300
             node_h = 150
             y_center = self.height // 2 - node_h // 2
-            x1 = self.margin_x + 100
-            x2 = self.width // 2 - node_w // 2
-            x3 = self.width - self.margin_x - 100 - node_w
 
-            layers.append(self._create_layer("node_1", LayerType.DIAGRAM_NODE, x1, y_center, node_w, node_h, 10, content={"label": nodes[0]}))
-            layers.append(self._create_layer("node_2", LayerType.DIAGRAM_NODE, x2, y_center, node_w, node_h, 10, content={"label": nodes[1]}))
-            layers.append(self._create_layer("node_3", LayerType.DIAGRAM_NODE, x3, y_center, node_w, node_h, 10, content={"label": nodes[2]}))
+            if len(nodes) >= 3:
+                x1 = self.margin_x + 100
+                x2 = self.width // 2 - node_w // 2
+                x3 = self.width - self.margin_x - 100 - node_w
 
-            layers.append(self._create_layer("edge_1", LayerType.DIAGRAM_EDGE, x1 + node_w, y_center + node_h // 2, x2 - (x1 + node_w), 4, 5, content={"from": "node_1", "to": "node_2"}))
-            layers.append(self._create_layer("edge_2", LayerType.DIAGRAM_EDGE, x2 + node_w, y_center + node_h // 2, x3 - (x2 + node_w), 4, 5, content={"from": "node_2", "to": "node_3"}))
+                layers.append(self._create_layer("node_1", LayerType.DIAGRAM_NODE, x1, y_center, node_w, node_h, 10, content={"label": nodes[0]}))
+                layers.append(self._create_layer("node_2", LayerType.DIAGRAM_NODE, x2, y_center, node_w, node_h, 10, content={"label": nodes[1]}))
+                layers.append(self._create_layer("node_3", LayerType.DIAGRAM_NODE, x3, y_center, node_w, node_h, 10, content={"label": nodes[2]}))
+
+                layers.append(self._create_layer("edge_1", LayerType.DIAGRAM_EDGE, x1 + node_w, y_center + node_h // 2, x2 - (x1 + node_w), 4, 5, content={"from": "node_1", "to": "node_2"}))
+                layers.append(self._create_layer("edge_2", LayerType.DIAGRAM_EDGE, x2 + node_w, y_center + node_h // 2, x3 - (x2 + node_w), 4, 5, content={"from": "node_2", "to": "node_3"}))
+            else:
+                x1 = self.width // 2 - node_w - 100
+                x2 = self.width // 2 + 100
+
+                layers.append(self._create_layer("node_1", LayerType.DIAGRAM_NODE, x1, y_center, node_w, node_h, 10, content={"label": nodes[0]}))
+                layers.append(self._create_layer("node_2", LayerType.DIAGRAM_NODE, x2, y_center, node_w, node_h, 10, content={"label": nodes[1]}))
+                layers.append(self._create_layer("edge_1", LayerType.DIAGRAM_EDGE, x1 + node_w, y_center + node_h // 2, x2 - (x1 + node_w), 4, 5, content={"from": "node_1", "to": "node_2"}))
 
         elif strategy == VisualStrategy.CODE_DEMO:
             layout = "EDITOR_PANEL"
@@ -118,7 +140,6 @@ class SceneCompositionEngine:
             layers.append(self._create_layer("callout", LayerType.SHAPE, self.margin_x - 20, 180, self.safe_width + 40, 640, 5, style={"bg": "#1e1e1e", "radius": 16}))
 
         elif strategy == VisualStrategy.INFOGRAPHIC:
-            blocks = self._extract_infographic_blocks(scene)
             layout = "GRID_2_COL"
             layers.append(self._create_layer("title", LayerType.TEXT, self.margin_x, self.margin_top, self.safe_width, 100, 10, content={"text": scene.section_id, "font_size": 64}))
             layers.append(self._create_layer("block_1_shape", LayerType.SHAPE, self.margin_x, 300, 800, 400, 5, style={"bg": "#f0f0f0"}))
@@ -204,16 +225,12 @@ class SceneCompositionEngine:
             entity = re.sub(r'^(The|A|An)\s+', '', entity)
             if entity not in entities and len(entity) > 2 and entity.lower() not in ["test", "this", "that", "these", "those"]:
                 entities.append(entity)
-        if len(entities) >= 3:
+        if len(entities) >= 2:
             return entities[:3]
-        elif len(entities) == 2:
-            return entities + ["System"]
-        elif len(entities) == 1:
-            return ["Source", entities[0], "Target"]
         words = [w.capitalize() for w in text.split() if len(w) > 3]
-        if len(words) >= 3:
+        if len(words) >= 2:
             return words[:3]
-        return ["Input", "Process", "Output"]
+        return []
 
     def _extract_infographic_blocks(self, scene: StoryboardScene) -> list[str]:
         text = scene.narration_excerpt
@@ -221,10 +238,10 @@ class SceneCompositionEngine:
         if len(parts) >= 2:
             return parts[:2]
         words = text.split()
-        if len(words) > 4:
+        if len(words) >= 6:
             half = len(words) // 2
             return [" ".join(words[:half]), " ".join(words[half:])]
-        return [text, "Analysis"]
+        return []
 
     def _extract_code(self, scene: StoryboardScene) -> tuple[str | None, str | None]:
         text = scene.narration_excerpt
