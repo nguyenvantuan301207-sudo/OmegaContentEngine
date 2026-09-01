@@ -13,7 +13,6 @@ import hashlib
 import json
 import os
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from uuid import UUID, uuid4
 
 import httpx
@@ -21,6 +20,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.guardian.engine import GuardianEngine
+from omega.application.media_storage import LocalMediaStorageProvider, StorageSecurityError
 from omega.application.network.preflight import NetworkPreflightService
 from omega.application.publisher.adapters.base import AdapterRegistry
 from omega.config import get_settings
@@ -93,7 +93,6 @@ class PublishExecutionService:
         - creating PublishAttempt rows
         """
         now = datetime.now(UTC)
-        settings = get_settings()
         vault = get_credential_vault()
         errors: list[str] = []
 
@@ -156,27 +155,32 @@ class PublishExecutionService:
         if not artifact:
             errors.append(f"MediaArtifact {intent.media_artifact_id} not found.")
         else:
-            storage_root = Path(settings.media_storage_root).resolve()
-            artifact_file_path = (storage_root / artifact.storage_uri).resolve()
-            if not str(artifact_file_path).startswith(str(storage_root)):
-                errors.append(f"Artifact path escape detected: {artifact.storage_uri}")
-            elif not artifact_file_path.is_file() and not os.getenv("OMEGA_TEST_MODE"):
-                errors.append(f"Media artifact file does not exist on disk: {artifact_file_path}")
-            else:
-                if artifact_file_path.is_file() and artifact.content_hash:
-                    hasher = hashlib.sha256()
-                    with open(artifact_file_path, "rb") as f:
-                        while chunk := f.read(65536):
-                            hasher.update(chunk)
-                    computed_hash = hasher.hexdigest()
-                    if computed_hash != artifact.content_hash:
-                        errors.append(
-                            f"Artifact checksum mismatch: computed {computed_hash} != recorded {artifact.content_hash}"
-                        )
+            storage = LocalMediaStorageProvider()
+            try:
+                artifact_file_path = storage.resolve_artifact_path(
+                    channel_id=intent.channel_id,
+                    production_request_id=artifact.production_request_id,
+                    storage_uri=artifact.storage_uri,
+                )
+                if not artifact_file_path.is_file() and not os.getenv("OMEGA_TEST_MODE"):
+                    errors.append(f"Media artifact file does not exist on disk: {artifact_file_path}")
+                else:
+                    if artifact_file_path.is_file() and artifact.content_hash:
+                        hasher = hashlib.sha256()
+                        with open(artifact_file_path, "rb") as f:
+                            while chunk := f.read(65536):
+                                hasher.update(chunk)
+                        computed_hash = hasher.hexdigest()
+                        if computed_hash != artifact.content_hash:
+                            errors.append(
+                                f"Artifact checksum mismatch: computed {computed_hash} != recorded {artifact.content_hash}"
+                            )
+                        else:
+                            artifact_verified = True
                     else:
                         artifact_verified = True
-                else:
-                    artifact_verified = True
+            except StorageSecurityError as exc:
+                errors.append(f"Artifact path escape detected: {exc}")
 
         # 3. Guardian Pre-Publish Gate (OMEGA-008)
         if artifact and mission and not errors:
@@ -278,13 +282,20 @@ class PublishExecutionService:
         # 7. Sanitized Payload Construction & Digest Computation
         total_bytes = 0
         if artifact:
-            storage_root = Path(settings.media_storage_root).resolve()
-            artifact_file_path = (storage_root / artifact.storage_uri).resolve()
-            total_bytes = (
-                artifact_file_path.stat().st_size
-                if artifact_file_path.is_file()
-                else (artifact.file_size_bytes or 1024)
-            )
+            storage = LocalMediaStorageProvider()
+            try:
+                artifact_file_path = storage.resolve_artifact_path(
+                    channel_id=intent.channel_id,
+                    production_request_id=artifact.production_request_id,
+                    storage_uri=artifact.storage_uri,
+                )
+                total_bytes = (
+                    artifact_file_path.stat().st_size
+                    if artifact_file_path.is_file()
+                    else (artifact.file_size_bytes or 1024)
+                )
+            except StorageSecurityError:
+                total_bytes = artifact.file_size_bytes or 1024
 
         sanitized_payload = {
             "title": intent.title,
@@ -427,13 +438,18 @@ class PublishExecutionService:
             if not artifact:
                 raise PublishExecutionError(f"MediaArtifact {intent.media_artifact_id} not found.")
 
-            # Validate path safety
-            storage_root = Path(settings.media_storage_root).resolve()
-            artifact_file_path = (storage_root / artifact.storage_uri).resolve()
-            if not str(artifact_file_path).startswith(str(storage_root)):
-                raise PublishExecutionError(
-                    f"Artifact path escape detected: {artifact.storage_uri}"
+            # Validate path safety via canonical storage provider
+            storage = LocalMediaStorageProvider()
+            try:
+                artifact_file_path = storage.resolve_artifact_path(
+                    channel_id=intent.channel_id,
+                    production_request_id=artifact.production_request_id,
+                    storage_uri=artifact.storage_uri,
                 )
+            except StorageSecurityError as exc:
+                raise PublishExecutionError(
+                    f"Artifact path escape detected: {artifact.storage_uri} ({exc})"
+                ) from exc
 
             if not artifact_file_path.is_file() and not os.getenv("OMEGA_TEST_MODE"):
                 raise PublishExecutionError(

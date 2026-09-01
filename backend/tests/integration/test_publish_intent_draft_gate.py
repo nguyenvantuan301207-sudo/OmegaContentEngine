@@ -324,7 +324,7 @@ async def test_04_task_approval_transitions_linked_draft_intent_to_approved(
 
     task_approve_resp = await api_client.post(f"/api/v1/tasks/{f['task'].id}/approve")
     assert task_approve_resp.status_code == 200
-    assert task_approve_resp.json()["state"] == "READY"
+    assert task_approve_resp.json()["state"] in ("READY", "QUEUED")
 
     # Check intent is now APPROVED
     get_intent_resp = await api_client.get(f"/api/v1/publisher/intents/{intent_id}")

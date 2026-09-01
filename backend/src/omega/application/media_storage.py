@@ -23,7 +23,8 @@ class LocalMediaStorageProvider:
     """Local media storage manager ensuring channel/request isolation and safe path resolution."""
 
     def __init__(self, base_root: str | None = None) -> None:
-        self.base_root = Path(base_root or MEDIA_BASE_ROOT).resolve()
+        root_val = base_root or os.getenv("MEDIA_STORAGE_ROOT", MEDIA_BASE_ROOT)
+        self.base_root = Path(root_val).resolve()
 
     def get_channel_dir(self, channel_id: UUID) -> Path:
         """Resolve the channel directory."""
@@ -79,6 +80,24 @@ class LocalMediaStorageProvider:
         resolved = (prod_dir / clean_rel).resolve()
         self._assert_within_root(resolved, prod_dir)
         return resolved
+
+    def resolve_artifact_path(
+        self,
+        channel_id: UUID,
+        production_request_id: UUID | None,
+        storage_uri: str,
+    ) -> Path:
+        """Resolve physical path for a MediaArtifact across scoped and flat layouts."""
+        if production_request_id:
+            scoped_path = self.resolve_stored_uri(channel_id, production_request_id, storage_uri)
+            if scoped_path.exists():
+                return scoped_path
+        clean_rel = storage_uri.lstrip("/\\")
+        flat_path = (self.base_root / clean_rel).resolve()
+        self._assert_safe_path(flat_path)
+        if production_request_id and not flat_path.exists():
+            return self.resolve_stored_uri(channel_id, production_request_id, storage_uri)
+        return flat_path
 
     def to_relative_uri(self, channel_id: UUID, request_id: UUID, absolute_path: Path | str) -> str:
         """Convert an absolute path to a relative storage URI scoped to the production request."""
