@@ -78,6 +78,14 @@ class SceneCompositionEngine:
             if not metric:
                 strategy = VisualStrategy.KINETIC_TEXT
 
+        # Handle CODE_DEMO fallback
+        code_lang = None
+        code_text = ""
+        if strategy == VisualStrategy.CODE_DEMO:
+            code_lang, code_text = self._extract_code(scene)
+            if not code_lang:
+                strategy = VisualStrategy.INFOGRAPHIC
+
         if strategy == VisualStrategy.TITLE_MOTION:
             layout = "CENTERED_TITLE"
             layers.append(self._create_layer("title", LayerType.TEXT, self.margin_x, 400, self.safe_width, 200, 10, content={"text": scene.section_id, "font_size": 96, "align": "center"}))
@@ -88,7 +96,7 @@ class SceneCompositionEngine:
             layout = "FLOW_DIAGRAM"
             layers.append(self._create_layer("title", LayerType.TEXT, self.margin_x, self.margin_top, self.safe_width, 100, 10, content={"text": scene.section_id, "font_size": 64}))
 
-            # 3 Nodes horizontally
+            nodes = self._extract_diagram_nodes(scene)
             node_w = 300
             node_h = 150
             y_center = self.height // 2 - node_h // 2
@@ -96,9 +104,9 @@ class SceneCompositionEngine:
             x2 = self.width // 2 - node_w // 2
             x3 = self.width - self.margin_x - 100 - node_w
 
-            layers.append(self._create_layer("node_1", LayerType.DIAGRAM_NODE, x1, y_center, node_w, node_h, 10, content={"label": "Client"}))
-            layers.append(self._create_layer("node_2", LayerType.DIAGRAM_NODE, x2, y_center, node_w, node_h, 10, content={"label": "API"}))
-            layers.append(self._create_layer("node_3", LayerType.DIAGRAM_NODE, x3, y_center, node_w, node_h, 10, content={"label": "Database"}))
+            layers.append(self._create_layer("node_1", LayerType.DIAGRAM_NODE, x1, y_center, node_w, node_h, 10, content={"label": nodes[0]}))
+            layers.append(self._create_layer("node_2", LayerType.DIAGRAM_NODE, x2, y_center, node_w, node_h, 10, content={"label": nodes[1]}))
+            layers.append(self._create_layer("node_3", LayerType.DIAGRAM_NODE, x3, y_center, node_w, node_h, 10, content={"label": nodes[2]}))
 
             layers.append(self._create_layer("edge_1", LayerType.DIAGRAM_EDGE, x1 + node_w, y_center + node_h // 2, x2 - (x1 + node_w), 4, 5, content={"from": "node_1", "to": "node_2"}))
             layers.append(self._create_layer("edge_2", LayerType.DIAGRAM_EDGE, x2 + node_w, y_center + node_h // 2, x3 - (x2 + node_w), 4, 5, content={"from": "node_2", "to": "node_3"}))
@@ -106,16 +114,17 @@ class SceneCompositionEngine:
         elif strategy == VisualStrategy.CODE_DEMO:
             layout = "EDITOR_PANEL"
             layers.append(self._create_layer("header", LayerType.TEXT, self.margin_x, self.margin_top, self.safe_width, 80, 10, content={"text": scene.section_id, "font_size": 48}))
-            layers.append(self._create_layer("code", LayerType.CODE_BLOCK, self.margin_x, 200, self.safe_width, 600, 10, content={"code": scene.narration_excerpt[:100] + "...", "language": "python"}))
+            layers.append(self._create_layer("code", LayerType.CODE_BLOCK, self.margin_x, 200, self.safe_width, 600, 10, content={"code": code_text, "language": code_lang}))
             layers.append(self._create_layer("callout", LayerType.SHAPE, self.margin_x - 20, 180, self.safe_width + 40, 640, 5, style={"bg": "#1e1e1e", "radius": 16}))
 
         elif strategy == VisualStrategy.INFOGRAPHIC:
+            blocks = self._extract_infographic_blocks(scene)
             layout = "GRID_2_COL"
             layers.append(self._create_layer("title", LayerType.TEXT, self.margin_x, self.margin_top, self.safe_width, 100, 10, content={"text": scene.section_id, "font_size": 64}))
             layers.append(self._create_layer("block_1_shape", LayerType.SHAPE, self.margin_x, 300, 800, 400, 5, style={"bg": "#f0f0f0"}))
-            layers.append(self._create_layer("block_1_text", LayerType.TEXT, self.margin_x + 50, 350, 700, 300, 10, content={"text": "Factor A", "font_size": 48}))
+            layers.append(self._create_layer("block_1_text", LayerType.TEXT, self.margin_x + 50, 350, 700, 300, 10, content={"text": blocks[0], "font_size": 48}))
             layers.append(self._create_layer("block_2_shape", LayerType.SHAPE, self.width - self.margin_x - 800, 300, 800, 400, 5, style={"bg": "#f0f0f0"}))
-            layers.append(self._create_layer("block_2_text", LayerType.TEXT, self.width - self.margin_x - 750, 350, 700, 300, 10, content={"text": "Factor B", "font_size": 48}))
+            layers.append(self._create_layer("block_2_text", LayerType.TEXT, self.width - self.margin_x - 750, 350, 700, 300, 10, content={"text": blocks[1], "font_size": 48}))
 
         elif strategy == VisualStrategy.STATISTIC:
             layout = "HERO_METRIC"
@@ -185,3 +194,67 @@ class SceneCompositionEngine:
         if match:
             return match.group(1)
         return None
+
+    def _extract_diagram_nodes(self, scene: StoryboardScene) -> list[str]:
+        text = f"{scene.visual_brief} {scene.on_screen_text} {scene.narration_excerpt}".replace(".", " ").replace(",", " ")
+        entities = []
+        matches = re.finditer(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', text)
+        for match in matches:
+            entity = match.group(1).strip()
+            entity = re.sub(r'^(The|A|An)\s+', '', entity)
+            if entity not in entities and len(entity) > 2 and entity.lower() not in ["test", "this", "that", "these", "those"]:
+                entities.append(entity)
+        if len(entities) >= 3:
+            return entities[:3]
+        elif len(entities) == 2:
+            return entities + ["System"]
+        elif len(entities) == 1:
+            return ["Source", entities[0], "Target"]
+        words = [w.capitalize() for w in text.split() if len(w) > 3]
+        if len(words) >= 3:
+            return words[:3]
+        return ["Input", "Process", "Output"]
+
+    def _extract_infographic_blocks(self, scene: StoryboardScene) -> list[str]:
+        text = scene.narration_excerpt
+        parts = [p.strip() for p in re.split(r'[,;.]', text) if len(p.strip()) > 5]
+        if len(parts) >= 2:
+            return parts[:2]
+        words = text.split()
+        if len(words) > 4:
+            half = len(words) // 2
+            return [" ".join(words[:half]), " ".join(words[half:])]
+        return [text, "Analysis"]
+
+    def _extract_code(self, scene: StoryboardScene) -> tuple[str | None, str | None]:
+        text = scene.narration_excerpt
+
+        # Python def with pass
+        match = re.search(r'(def\s+\w+\([^)]*\):\s*pass)', text)
+        if match:
+            code = match.group(1).replace(" pass", "\n    pass").replace(":\n", ":\n")
+            # ensure no space before \n
+            code = re.sub(r':\s+\n', ':\n', code)
+            return "python", code
+
+        # Python def with simple return/assignment
+        match = re.search(r'(def\s+\w+\([^)]*\):\s*(?:return\s+[\w\'"]+|[\w_]+\s*=\s*[\w\'"]+))', text)
+        if match:
+            return "python", match.group(1).strip()
+
+        # SQL
+        match = re.search(r'(SELECT\s+.*?\s+FROM\s+\w+)', text, re.IGNORECASE)
+        if match:
+            return "sql", match.group(1).strip()
+
+        # JSON
+        match = re.search(r'(\{["\'].*?\})', text)
+        if match:
+            return "json", match.group(1).strip()
+
+        # generic assignment
+        match = re.search(r'\b([a-zA-Z_]\w*\s*=\s*[0-9]+)\b', text)
+        if match:
+            return "python", match.group(1).strip()
+
+        return None, None
