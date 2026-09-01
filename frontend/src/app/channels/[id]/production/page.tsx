@@ -1,7 +1,6 @@
 "use client";
 
 import { use, useCallback, useEffect, useState } from "react";
-import Link from "next/link";
 import {
   Channel,
   ContentGenerationRequest,
@@ -35,6 +34,7 @@ import {
 } from "@/lib/api";
 import { useOperatorContext } from "@/lib/operator-context";
 import { ChannelContextBar } from "@/components/ChannelContextBar";
+import { PublishPreparationModal } from "@/components/PublishPreparationModal";
 
 type TabType = "scenes" | "assets" | "narration" | "subtitles" | "plan" | "artifacts" | "qa";
 
@@ -62,6 +62,7 @@ export default function ProductionEnginePage({
   const [artifacts, setArtifacts] = useState<MediaArtifact[]>([]);
   const [qaResult, setQaResult] = useState<ProductionQAResult | null>(null);
   const [selectedArtifactVersion, setSelectedArtifactVersion] = useState<number | null>(null);
+  const [showPublishModal, setShowPublishModal] = useState(false);
 
   // New Request Form State
   const [isCreating, setIsCreating] = useState(false);
@@ -415,10 +416,16 @@ export default function ProductionEnginePage({
                     3. Rerender (vN+1)
                   </button>
 
-                  {artifacts.length > 0 && !isArchived && (
-                    <Link href="/publisher" className="btn btn-success btn-sm">
-                      Publish →
-                    </Link>
+                  {artifacts.length > 0 && (
+                    <button
+                      onClick={() => setShowPublishModal(true)}
+                      disabled={isArchived}
+                      title={isArchived ? "Activate this channel before preparing publications." : "Prepare Video Publication"}
+                      className="btn btn-success btn-sm"
+                      style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}
+                    >
+                      <span>🚀</span> Prepare Publication
+                    </button>
                   )}
                 </div>
               </div>
@@ -791,6 +798,18 @@ export default function ProductionEnginePage({
                               </span>
                             </div>
                           </div>
+
+                          <div style={{ display: "flex", justifyContent: "flex-end", marginTop: "0.25rem" }}>
+                            <button
+                              onClick={() => setShowPublishModal(true)}
+                              disabled={isArchived}
+                              title={isArchived ? "Activate this channel before preparing publications." : "Prepare Publication for this Video"}
+                              className="btn btn-success btn-sm"
+                              style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}
+                            >
+                              <span>🚀</span> Prepare Publication (v{selectedArtifact.version})
+                            </button>
+                          </div>
                         </div>
                       )}
                     </div>
@@ -937,6 +956,17 @@ export default function ProductionEnginePage({
             </form>
           </div>
         </div>
+      )}
+
+      {/* Publish Preparation Modal */}
+      {showPublishModal && selectedArtifact && channel && selectedReq && (
+        <PublishPreparationModal
+          channel={channel}
+          productionRequest={selectedReq}
+          artifact={selectedArtifact}
+          isOpen={showPublishModal}
+          onClose={() => setShowPublishModal(false)}
+        />
       )}
     </div>
   );

@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import {
   ChannelTimelineResponse,
   ReservationState,
@@ -96,16 +97,25 @@ export function SchedulerTimelineCard({ channelId }: SchedulerTimelineCardProps)
           </p>
         </div>
 
-        {timeline && (
-          <div style={{ textAlign: "right" }}>
-            <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", display: "block", textTransform: "uppercase" }}>
-              Today&apos;s Throughput
-            </span>
-            <span style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)" }}>
-              {timeline.capacity_used_today} / {timeline.capacity_limit_today} slots
-            </span>
-          </div>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
+          {timeline && (
+            <div style={{ textAlign: "right" }}>
+              <span style={{ fontSize: "0.7rem", color: "var(--text-muted)", display: "block", textTransform: "uppercase" }}>
+                Today&apos;s Throughput
+              </span>
+              <span style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)" }}>
+                {timeline.capacity_used_today} / {timeline.capacity_limit_today} slots
+              </span>
+            </div>
+          )}
+          <Link
+            href={`/publisher?channel_id=${channelId}`}
+            className="btn btn-secondary btn-sm"
+            style={{ fontSize: "0.75rem" }}
+          >
+            🚀 Publisher Cockpit ↗
+          </Link>
+        </div>
       </div>
 
       {loading && (

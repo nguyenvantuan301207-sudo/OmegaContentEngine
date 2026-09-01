@@ -26,6 +26,28 @@ export default function PublisherPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const selectIntent = useCallback(async (intent: PublishIntent | null) => {
+    setSelectedIntent(intent);
+    if (intent) {
+      try {
+        const attempt = await getPublishAttempt(intent.id).catch(() => null);
+        setLatestAttempt(attempt);
+        if (attempt) {
+          const prog = await getUploadProgress(attempt.id).catch(() => null);
+          setUploadProgress(prog);
+        } else {
+          setUploadProgress(null);
+        }
+      } catch {
+        setLatestAttempt(null);
+        setUploadProgress(null);
+      }
+    } else {
+      setLatestAttempt(null);
+      setUploadProgress(null);
+    }
+  }, []);
+
   const loadData = useCallback(async () => {
     if (!selectedChannelId) return;
     try {
@@ -40,28 +62,24 @@ export default function PublisherPage() {
       setAccounts(accs);
       setIntents(intentList);
 
-      const activeIntent = intentList[0] || null;
-      setSelectedIntent(activeIntent);
-
-      if (activeIntent) {
-        const attempt = await getPublishAttempt(activeIntent.id).catch(() => null);
-        setLatestAttempt(attempt);
-        if (attempt) {
-          const prog = await getUploadProgress(attempt.id).catch(() => null);
-          setUploadProgress(prog);
-        } else {
-          setUploadProgress(null);
+      // Check URL query param for intent_id
+      let targetIntent: PublishIntent | null = null;
+      if (typeof window !== "undefined") {
+        const params = new URLSearchParams(window.location.search);
+        const urlIntentId = params.get("intent_id");
+        if (urlIntentId) {
+          targetIntent = intentList.find((i) => i.id === urlIntentId) || null;
         }
-      } else {
-        setLatestAttempt(null);
-        setUploadProgress(null);
       }
+
+      const activeIntent = targetIntent || intentList[0] || null;
+      await selectIntent(activeIntent);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load publisher data");
     } finally {
       setLoading(false);
     }
-  }, [selectedChannelId]);
+  }, [selectedChannelId, selectIntent]);
 
   useEffect(() => {
     loadData();
@@ -120,9 +138,14 @@ export default function PublisherPage() {
       {/* Publish Intent History Table */}
       <div className="card" style={{ padding: "1.25rem" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-          <h3 style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)" }}>
-            Publication Intent History ({intents.length})
-          </h3>
+          <div>
+            <h3 style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)" }}>
+              Publication Intent History ({intents.length})
+            </h3>
+            <p style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
+              Select any intent below to inspect Guardian readiness, approval status, and execution details.
+            </p>
+          </div>
           <button onClick={loadData} disabled={loading} className="btn btn-secondary btn-sm" style={{ fontSize: "0.75rem" }}>
             ↻ Refresh History
           </button>
@@ -144,49 +167,72 @@ export default function PublisherPage() {
           </div>
         ) : (
           <div className="table-container">
-            <table className="table">
+            <table className="table" style={{ width: "100%" }}>
               <thead>
                 <tr>
-                  <th>Title & Intent</th>
+                  <th>Title & Revision</th>
                   <th>State</th>
                   <th>Privacy</th>
                   <th>Task ID</th>
                   <th>Created</th>
+                  <th>Action</th>
                 </tr>
               </thead>
               <tbody>
-                {intents.map((intent) => (
-                  <tr key={intent.id}>
-                    <td>
-                      <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "var(--text-primary)" }}>
-                        {intent.title}
-                      </div>
-                      <div className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
-                        Revision v{intent.revision_number} • Media: {intent.media_artifact_id.substring(0, 8)}...
-                      </div>
-                    </td>
-                    <td>
-                      <span className={`badge ${intent.state === "PUBLISHED" ? "badge-success" : intent.state === "FAILED" ? "badge-failed" : "badge-active"}`}>
-                        {intent.state}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="badge badge-neutral text-mono" style={{ fontSize: "0.7rem" }}>
-                        {intent.requested_privacy_status}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
-                        {intent.task_id.substring(0, 8)}...
-                      </span>
-                    </td>
-                    <td>
-                      <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
-                        {new Date(intent.created_at).toLocaleDateString()}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
+                {intents.map((intent) => {
+                  const isSelected = selectedIntent?.id === intent.id;
+                  return (
+                    <tr
+                      key={intent.id}
+                      onClick={() => selectIntent(intent)}
+                      style={{
+                        cursor: "pointer",
+                        background: isSelected ? "var(--bg-card-hover)" : undefined,
+                      }}
+                    >
+                      <td>
+                        <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "var(--text-primary)" }}>
+                          {intent.title} {isSelected && <span style={{ color: "var(--accent-secondary)", fontSize: "0.72rem" }}>★ Active</span>}
+                        </div>
+                        <div className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
+                          v{intent.revision_number} • Media: {intent.media_artifact_id.substring(0, 8)}...
+                        </div>
+                      </td>
+                      <td>
+                        <span className={`badge ${intent.state === "PUBLISHED" ? "badge-success" : intent.state === "FAILED" ? "badge-failed" : "badge-active"}`}>
+                          {intent.state}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="badge badge-neutral text-mono" style={{ fontSize: "0.7rem" }}>
+                          {intent.requested_privacy_status}
+                        </span>
+                      </td>
+                      <td>
+                        <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                          {intent.task_id.substring(0, 8)}...
+                        </span>
+                      </td>
+                      <td>
+                        <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
+                          {new Date(intent.created_at).toLocaleDateString()}
+                        </span>
+                      </td>
+                      <td>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            selectIntent(intent);
+                          }}
+                          className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-secondary"}`}
+                          style={{ fontSize: "0.72rem", padding: "0.2rem 0.5rem" }}
+                        >
+                          {isSelected ? "Inspecting" : "Select"}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
