@@ -213,6 +213,27 @@ async def get_publish_intent(
     return intent
 
 
+@router.post("/intents/{intent_id}/approve", response_model=PublishIntentResponse)
+async def approve_publish_intent(
+    intent_id: UUID,
+    session: DBSession,
+) -> PublishIntent:
+    """Approve a DRAFT PublishIntent for scheduling and execution."""
+    try:
+        intent = await PublishIntentService.approve_intent(
+            session=session,
+            intent_id=intent_id,
+            actor="API_USER",
+        )
+        return intent
+    except Exception as exc:
+        logger.error("Failed to approve publish intent", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
 # ── Publish Attempt & Progression Endpoints ──
 
 

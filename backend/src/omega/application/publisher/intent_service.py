@@ -46,6 +46,7 @@ class PublishIntentService:
         payload: PublishIntentCreate,
         *,
         actor: str = "SYSTEM",
+        initial_state: PublishIntentState = PublishIntentState.DRAFT,
     ) -> PublishIntent:
         """Construct or revision an approved PublishIntent snapshot before scheduling."""
         # 1. Validate mandatory audience compliance
@@ -101,13 +102,17 @@ class PublishIntentService:
             platform_custom_options=payload.platform_custom_options,
         )
 
-        # 6. Check for existing active intent on this task
+        # 6. Check for existing active or draft intent on this task
         stmt = (
             select(PublishIntent)
             .where(
                 PublishIntent.task_id == payload.task_id,
                 PublishIntent.state.in_(
-                    [PublishIntentState.APPROVED.value, PublishIntentState.CLAIMED.value]
+                    [
+                        PublishIntentState.DRAFT.value,
+                        PublishIntentState.APPROVED.value,
+                        PublishIntentState.CLAIMED.value,
+                    ]
                 ),
             )
             .with_for_update()
@@ -124,6 +129,7 @@ class PublishIntentService:
                 return existing_intent
 
             # Metadata or artifact changed -> Supersede existing intent
+            old_state = existing_intent.state
             existing_intent.state = PublishIntentState.SUPERSEDED.value
             existing_intent.superseded_at = datetime.now(UTC)
             existing_intent.updated_at = datetime.now(UTC)
@@ -132,7 +138,7 @@ class PublishIntentService:
             trans_old = PublishIntentTransition(
                 id=uuid4(),
                 publish_intent_id=existing_intent.id,
-                from_state=PublishIntentState.APPROVED.value,
+                from_state=old_state,
                 to_state=PublishIntentState.SUPERSEDED.value,
                 reason="Superseded by new PublishIntent revision due to metadata or artifact change.",
                 actor=actor,
@@ -142,7 +148,13 @@ class PublishIntentService:
             revision_number = existing_intent.revision_number + 1
             supersedes_intent_id = existing_intent.id
 
-        # 7. Create new PublishIntent in APPROVED state
+        target_state = (
+            initial_state.value
+            if isinstance(initial_state, PublishIntentState)
+            else str(initial_state)
+        )
+
+        # 7. Create new PublishIntent in target state (defaults to DRAFT for human supervision)
         new_intent = PublishIntent(
             id=uuid4(),
             mission_id=payload.mission_id,
@@ -162,18 +174,23 @@ class PublishIntentService:
             made_for_kids=payload.made_for_kids,
             platform_custom_options=payload.platform_custom_options,
             intent_checksum=intent_checksum,
-            state=PublishIntentState.APPROVED.value,
+            state=target_state,
         )
         session.add(new_intent)
         await session.flush()
 
         # 8. Record initial transition
+        trans_reason = (
+            "PublishIntent created in DRAFT state awaiting operator review."
+            if target_state == PublishIntentState.DRAFT.value
+            else "PublishIntent created and approved for scheduling."
+        )
         trans_new = PublishIntentTransition(
             id=uuid4(),
             publish_intent_id=new_intent.id,
             from_state=PublishIntentState.DRAFT.value,
-            to_state=PublishIntentState.APPROVED.value,
-            reason="PublishIntent created and approved for scheduling.",
+            to_state=target_state,
+            reason=trans_reason,
             actor=actor,
         )
         session.add(trans_new)
@@ -181,12 +198,52 @@ class PublishIntentService:
         await session.commit()
         await session.refresh(new_intent)
         logger.info(
-            "PublishIntent created and approved",
+            "PublishIntent created",
             intent_id=str(new_intent.id),
             task_id=str(new_intent.task_id),
+            state=new_intent.state,
             revision_number=new_intent.revision_number,
         )
         return new_intent
+
+    @classmethod
+    async def approve_intent(
+        cls,
+        session: AsyncSession,
+        intent_id: UUID,
+        *,
+        actor: str = "USER",
+        reason: str = "Human pre-execution approval granted.",
+    ) -> PublishIntent:
+        """Approve a DRAFT PublishIntent for scheduling and execution."""
+        stmt = select(PublishIntent).where(PublishIntent.id == intent_id).with_for_update()
+        res = await session.execute(stmt)
+        intent = res.scalar_one_or_none()
+        if not intent:
+            raise PublishIntentServiceError(f"PublishIntent {intent_id} not found.")
+
+        if intent.state != PublishIntentState.DRAFT.value:
+            raise PublishIntentServiceError(
+                f"Cannot approve PublishIntent in state '{intent.state}'. Must be in DRAFT state."
+            )
+
+        old_state = intent.state
+        intent.state = PublishIntentState.APPROVED.value
+        intent.updated_at = datetime.now(UTC)
+
+        trans = PublishIntentTransition(
+            id=uuid4(),
+            publish_intent_id=intent.id,
+            from_state=old_state,
+            to_state=PublishIntentState.APPROVED.value,
+            reason=reason,
+            actor=actor,
+        )
+        session.add(trans)
+        await session.commit()
+        await session.refresh(intent)
+        logger.info("PublishIntent approved", intent_id=str(intent.id), actor=actor)
+        return intent
 
     @classmethod
     async def cancel_intent(

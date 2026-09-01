@@ -265,7 +265,7 @@ async def test_publish_intent_service_create_and_supersede(
         made_for_kids=False,
     )
     intent1 = await PublishIntentService.create_publish_intent(db_session, payload)
-    assert intent1.state == PublishIntentState.APPROVED.value
+    assert intent1.state == PublishIntentState.DRAFT.value
     assert intent1.revision_number == 1
     assert intent1.supersedes_intent_id is None
 
@@ -277,7 +277,12 @@ async def test_publish_intent_service_create_and_supersede(
     )
     transitions = res_trans.scalars().all()
     assert len(transitions) == 1
-    assert transitions[0].to_state == "APPROVED"
+    assert transitions[0].to_state == "DRAFT"
+
+    # Approve intent1
+    await PublishIntentService.approve_intent(db_session, intent1.id)
+    await db_session.refresh(intent1)
+    assert intent1.state == PublishIntentState.APPROVED.value
 
     # Create new intent with changed title -> Must supersede intent1
     payload2 = PublishIntentCreate(
@@ -294,6 +299,7 @@ async def test_publish_intent_service_create_and_supersede(
     intent2 = await PublishIntentService.create_publish_intent(db_session, payload2)
     assert intent2.revision_number == 2
     assert intent2.supersedes_intent_id == intent1.id
+    assert intent2.state == PublishIntentState.DRAFT.value
 
     # Verify intent1 is now SUPERSEDED
     await db_session.refresh(intent1)
@@ -335,7 +341,9 @@ async def test_privacy_fallback_policy_rejection_and_opt_in(
         made_for_kids=False,
         platform_custom_options={"privacy_fallback_allowed": False},
     )
-    await PublishIntentService.create_publish_intent(db_session, payload_blocked)
+    await PublishIntentService.create_publish_intent(
+        db_session, payload_blocked, initial_state=PublishIntentState.APPROVED
+    )
 
     attempt_blocked = await PublishExecutionService.execute_publish(db_session, f["task"].id)
     assert attempt_blocked.state == PublishAttemptState.BLOCKED_GUARDIAN.value
@@ -378,7 +386,9 @@ async def test_privacy_fallback_policy_rejection_and_opt_in(
         made_for_kids=False,
         platform_custom_options={"privacy_fallback_allowed": True},
     )
-    intent_opt_in = await PublishIntentService.create_publish_intent(db_session, payload_opt_in)
+    intent_opt_in = await PublishIntentService.create_publish_intent(
+        db_session, payload_opt_in, initial_state=PublishIntentState.APPROVED
+    )
 
     attempt_opt_in = await PublishExecutionService.execute_publish(db_session, f["task"].id)
     assert attempt_opt_in.state == PublishAttemptState.SUCCEEDED.value
@@ -411,7 +421,9 @@ async def test_handoff_outbox_and_scheduler_relay(
         title="Retry Video",
         made_for_kids=False,
     )
-    intent = await PublishIntentService.create_publish_intent(db_session, payload)
+    intent = await PublishIntentService.create_publish_intent(
+        db_session, payload, initial_state=PublishIntentState.APPROVED
+    )
 
     attempt = await PublishExecutionService.execute_publish(db_session, f["task"].id)
     assert attempt.state == PublishAttemptState.RETRYABLE_FAILED.value
@@ -534,7 +546,9 @@ async def test_scheduler_pins_exact_intent_checksum_and_revision(
         tags=["pinned"],
         made_for_kids=False,
     )
-    intent = await PublishIntentService.create_publish_intent(db_session, payload)
+    intent = await PublishIntentService.create_publish_intent(
+        db_session, payload, initial_state=PublishIntentState.APPROVED
+    )
 
     # 2. Setup schedule policy
     _policy = await SchedulePolicyService.create_policy(
@@ -618,7 +632,9 @@ async def test_final_timeout_becomes_unknown_and_prevents_blind_reupload(
         tags=[],
         made_for_kids=False,
     )
-    await PublishIntentService.create_publish_intent(db_session, payload)
+    await PublishIntentService.create_publish_intent(
+        db_session, payload, initial_state=PublishIntentState.APPROVED
+    )
 
     attempt = await PublishExecutionService.execute_publish(db_session, f["task"].id)
     assert attempt.state == PublishAttemptState.UNKNOWN.value
@@ -694,7 +710,9 @@ async def test_old_worker_cannot_send_chunk_after_lease_expiry(
         tags=[],
         made_for_kids=False,
     )
-    intent = await PublishIntentService.create_publish_intent(db_session, payload)
+    intent = await PublishIntentService.create_publish_intent(
+        db_session, payload, initial_state=PublishIntentState.APPROVED
+    )
 
     # Make init_res expire the intent lease before the chunk loop
     async def mock_init_and_expire(*args, **kwargs):
@@ -805,7 +823,9 @@ async def test_artifact_path_traversal_rejected(db_session: AsyncSession, setup_
         tags=[],
         made_for_kids=False,
     )
-    await PublishIntentService.create_publish_intent(db_session, payload)
+    await PublishIntentService.create_publish_intent(
+        db_session, payload, initial_state=PublishIntentState.APPROVED
+    )
 
     attempt = await PublishExecutionService.execute_publish(db_session, f["task"].id)
     assert attempt.state == PublishAttemptState.PERMANENT_FAILED.value

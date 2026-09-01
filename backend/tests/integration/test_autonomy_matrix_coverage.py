@@ -2052,6 +2052,7 @@ async def test_duplicate_publish_action_does_not_duplicate_publish_attempt(
         PrivacyStatus,
         PublishAttemptState,
         PublishIntentCreate,
+        PublishIntentState,
     )
     from omega.infrastructure.models import (
         CredentialVault,
@@ -2174,7 +2175,9 @@ async def test_duplicate_publish_action_does_not_duplicate_publish_attempt(
         requested_privacy_status=PrivacyStatus.PRIVATE,
         made_for_kids=False,
     )
-    intent = await PublishIntentService.create_publish_intent(db_session, payload)
+    intent = await PublishIntentService.create_publish_intent(
+        db_session, payload, initial_state=PublishIntentState.APPROVED
+    )
     assert intent.state == "APPROVED"
 
     mock_init = AsyncMock(

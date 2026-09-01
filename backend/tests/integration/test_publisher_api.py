@@ -231,7 +231,7 @@ async def test_publisher_accounts_api(api_client: AsyncClient, api_publisher_fix
 
 @pytest.mark.asyncio
 async def test_create_and_get_publish_intent_api(api_client: AsyncClient, api_publisher_fixtures):
-    """Verify creating and retrieving PublishIntents via API."""
+    """Verify creating and retrieving PublishIntents via API defaults to DRAFT state."""
     f = api_publisher_fixtures
     payload = {
         "mission_id": str(f["mission"].id),
@@ -252,12 +252,52 @@ async def test_create_and_get_publish_intent_api(api_client: AsyncClient, api_pu
     assert create_resp.status_code == 201
     intent_data = create_resp.json()
     assert intent_data["title"] == "API Created Intent"
-    assert intent_data["state"] == "APPROVED"
+    assert intent_data["state"] == "DRAFT"
     assert intent_data["revision_number"] == 1
 
     get_resp = await api_client.get(f"/api/v1/publisher/intents/{intent_data['id']}")
     assert get_resp.status_code == 200
     assert get_resp.json()["id"] == intent_data["id"]
+    assert get_resp.json()["state"] == "DRAFT"
+
+    # Test approve intent endpoint
+    approve_resp = await api_client.post(f"/api/v1/publisher/intents/{intent_data['id']}/approve")
+    assert approve_resp.status_code == 200
+    assert approve_resp.json()["state"] == "APPROVED"
+
+
+@pytest.mark.asyncio
+async def test_draft_intent_blocks_execution_until_approved(
+    api_client: AsyncClient, api_publisher_fixtures
+):
+    """Verify execution is refused while intent is DRAFT, and allowed once approved."""
+    f = api_publisher_fixtures
+    payload = {
+        "mission_id": str(f["mission"].id),
+        "task_id": str(f["task"].id),
+        "channel_id": str(f["channel"].id),
+        "platform_account_id": str(f["account"].id),
+        "media_artifact_id": str(f["artifact"].id),
+        "media_artifact_checksum": f["artifact"].content_hash,
+        "title": "Gated Execution Intent",
+        "description": "Gated Desc",
+        "made_for_kids": False,
+    }
+
+    create_resp = await api_client.post("/api/v1/publisher/intents", json=payload)
+    assert create_resp.status_code == 201
+    intent_id = create_resp.json()["id"]
+    assert create_resp.json()["state"] == "DRAFT"
+
+    # Execution should fail with 400 because intent is in DRAFT
+    exec_resp = await api_client.post("/api/v1/publisher/execute", json={"task_id": str(f["task"].id)})
+    assert exec_resp.status_code == 400
+    assert "approved" in exec_resp.json()["detail"].lower()
+
+    # Now approve the intent
+    approve_resp = await api_client.post(f"/api/v1/publisher/intents/{intent_id}/approve")
+    assert approve_resp.status_code == 200
+    assert approve_resp.json()["state"] == "APPROVED"
 
 
 @pytest.mark.asyncio

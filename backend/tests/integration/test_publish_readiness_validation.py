@@ -269,7 +269,9 @@ async def setup_shadow_fixtures(db_session: AsyncSession, monkeypatch):
         requested_privacy_status=PrivacyStatus.PRIVATE,
         made_for_kids=False,
     )
-    intent = await PublishIntentService.create_publish_intent(db_session, intent_payload)
+    intent = await PublishIntentService.create_publish_intent(
+        db_session, intent_payload, initial_state=PublishIntentState.APPROVED
+    )
 
     await db_session.commit()
     return {

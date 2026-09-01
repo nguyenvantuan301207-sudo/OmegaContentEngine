@@ -2165,6 +2165,12 @@ export async function createPublishIntent(payload: {
   });
 }
 
+export async function approvePublishIntent(intentId: string): Promise<PublishIntent> {
+  return apiFetch(`/api/v1/publisher/intents/${intentId}/approve`, {
+    method: "POST",
+  });
+}
+
 export async function listPublishIntents(params?: {
   channel_id?: string;
   mission_id?: string;

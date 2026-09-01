@@ -6,15 +6,16 @@ Handles task retrieval and human approval/rejection gates.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.orchestrator import evaluate_mission
 from omega.domain.decision import Actor, DecisionType
+from omega.domain.publisher import PublishIntentState
 from omega.domain.task import TaskResponse, TaskState, validate_task_transition
-from omega.infrastructure.models import DecisionLog, Task
+from omega.infrastructure.models import DecisionLog, PublishIntent, PublishIntentTransition, Task
 from omega.logging import get_logger
 
 logger = get_logger(service="omega-task-service")
@@ -59,6 +60,29 @@ async def approve_task(session: AsyncSession, task_id: UUID) -> TaskResponse | N
             actor=Actor.USER.value,
         )
     )
+
+    # Also transition any linked DRAFT PublishIntents for this task to APPROVED
+    intents_res = await session.execute(
+        select(PublishIntent)
+        .where(
+            PublishIntent.task_id == task_id,
+            PublishIntent.state == PublishIntentState.DRAFT.value,
+        )
+        .with_for_update()
+    )
+    for intent in intents_res.scalars().all():
+        intent.state = PublishIntentState.APPROVED.value
+        intent.updated_at = datetime.now(UTC)
+        session.add(
+            PublishIntentTransition(
+                id=uuid4(),
+                publish_intent_id=intent.id,
+                from_state=PublishIntentState.DRAFT.value,
+                to_state=PublishIntentState.APPROVED.value,
+                reason="Human pre-execution approval granted via task approval.",
+                actor=Actor.USER.value,
+            )
+        )
 
     await session.commit()
     logger.info("Task approved by user", task_id=str(task.id), mission_id=str(task.mission_id))
