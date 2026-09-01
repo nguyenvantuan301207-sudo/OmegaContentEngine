@@ -193,3 +193,34 @@ def test_open_high_conflict_triggers_blocking():
 
     assert status == ScriptQAStatus.BLOCKED
     assert any(f["rule_code"] == QARuleCode.OPEN_HIGH_RESEARCH_CONFLICT.value for f in findings)
+
+
+def test_duration_below_channel_dna_minimum_flagged():
+    """Verify script with duration far below DNA minimum is flagged."""
+    script_data = {
+        "hook_text": "Engaging hook.",
+        "sections": [
+            {
+                "heading": "Intro",
+                "narration_text": "Brief section overview.",
+                "statements": [],
+            }
+        ],
+        "estimated_duration_seconds": 80,  # 80s vs 300s target
+    }
+    dna_dict = {
+        "content_strategy": {
+            "default_duration_min_seconds": 300,
+            "default_duration_max_seconds": 900,
+        }
+    }
+
+    status, findings = run_content_qa_checks(
+        script_data=script_data,
+        target_duration_seconds=300,
+        dna_dict=dna_dict,
+        brief_dict={},
+    )
+
+    assert status == ScriptQAStatus.PASSED_WITH_WARNINGS
+    assert any(f["rule_code"] == QARuleCode.DURATION_OUT_OF_BOUNDS.value for f in findings)

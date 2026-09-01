@@ -45,11 +45,25 @@ class FFmpegRenderer:
         video_codec: str = "h264",
         audio_codec: str = "aac",
         duration_sec: float | None = None,
+        motion_effect: str | None = None,
         timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
     ) -> None:
-        """Render a single scene clip by pairing an image with an audio track."""
+        """Render a single scene clip by pairing an image with an audio track and optional motion effect."""
         out_p = Path(output_path)
         out_p.parent.mkdir(parents=True, exist_ok=True)
+
+        me = (motion_effect or "NONE").upper()
+        # Build video filter for subtle 2D motion effects
+        vf_filters: list[str] = []
+        if me in ("KEN_BURNS", "SLOW_ZOOM_IN"):
+            # Subtle slow zoom in: 1.0 -> 1.08 over clip duration
+            vf_filters.append(f"scale={width*2}x{height*2},zoompan=z='min(zoom+0.0005,1.08)':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps}")
+        elif me == "SLOW_ZOOM_OUT":
+            # Subtle slow zoom out: 1.08 -> 1.0 over clip duration
+            vf_filters.append(f"scale={width*2}x{height*2},zoompan=z='if(lte(zoom,1.0),1.08,max(1.001,zoom-0.0005))':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={width}x{height}:fps={fps}")
+        elif me == "PAN_RIGHT":
+            # Subtle horizontal pan
+            vf_filters.append(f"scale={width*2}x{height*2},zoompan=z=1.05:x='if(lte(on,1),(iw-iw/zoom)/2,min((iw-iw/zoom),x+0.5))':y='(ih-ih/zoom)/2':d=1:s={width}x{height}:fps={fps}")
 
         cmd: list[str] = [
             "ffmpeg",
@@ -60,10 +74,14 @@ class FFmpegRenderer:
             str(image_path),
             "-i",
             str(audio_path),
+        ]
+
+        if vf_filters:
+            cmd.extend(["-vf", ",".join(vf_filters)])
+
+        cmd.extend([
             "-c:v",
             "libx264" if video_codec == "h264" else video_codec,
-            "-tune",
-            "stillimage",
             "-c:a",
             "aac" if audio_codec == "aac" else audio_codec,
             "-b:a",
@@ -75,7 +93,7 @@ class FFmpegRenderer:
             "-s",
             f"{width}x{height}",
             "-shortest",
-        ]
+        ])
         if duration_sec:
             cmd.extend(["-t", f"{duration_sec:.3f}"])
 
@@ -116,19 +134,45 @@ class FFmpegRenderer:
         manifest_content = "\n".join(f"file '{Path(p).resolve().as_posix()}'" for p in clip_paths)
         manifest_path.write_text(manifest_content, encoding="utf-8")
 
-        cmd: list[str] = [
-            "ffmpeg",
-            "-y",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-            "-i",
-            str(manifest_path),
-            "-c",
-            "copy",
-            str(out_p),
-        ]
+        if srt_path and Path(srt_path).is_file() and Path(srt_path).stat().st_size > 0:
+            clean_srt = str(Path(srt_path).resolve().as_posix()).replace(":", r"\:")
+            # Subtitle V2 Style: sleek 18pt font, bottom-center margin 40, non-intrusive dark outline box
+            vf_arg = f"subtitles='{clean_srt}':force_style='FontSize=18,PrimaryColour=&H00FFFFFF,OutlineColour=&H80000000,BorderStyle=3,MarginV=40,FontName=Sans,Alignment=2'"
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(manifest_path),
+                "-vf",
+                vf_arg,
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "192k",
+                str(out_p),
+            ]
+        else:
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(manifest_path),
+                "-c",
+                "copy",
+                str(out_p),
+            ]
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,

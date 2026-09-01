@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from omega.application.asset_provider import LocalAssetProvider
 from omega.application.media_storage import LocalMediaStorageProvider
-from omega.application.narration_provider import PlaceholderNarrationProvider
+from omega.application.narration_provider import get_narration_provider
 from omega.application.production_timeline import align_production_timeline
 from omega.application.scene_planner import plan_scenes_from_script
 from omega.application.subtitle_engine import SubtitleEngine
@@ -57,7 +57,7 @@ class ProductionService:
     def __init__(self, storage: LocalMediaStorageProvider | None = None) -> None:
         self.storage = storage or LocalMediaStorageProvider()
         self.asset_provider = LocalAssetProvider(self.storage)
-        self.narration_provider = PlaceholderNarrationProvider(self.storage)
+        self.narration_provider = get_narration_provider(self.storage)
         self.subtitle_engine = SubtitleEngine(self.storage)
 
     async def create_production_request(

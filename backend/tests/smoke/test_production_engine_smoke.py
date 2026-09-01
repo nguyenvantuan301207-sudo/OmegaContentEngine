@@ -200,7 +200,7 @@ async def test_production_engine_e2e_smoke(
         qa_res = await client.get(f"/api/v1/channels/{channel_id}/production/{prod_req_id}/qa")
         assert qa_res.status_code == 200
         qa_data = qa_res.json()
-        assert qa_data["status"] in ("PASSED", "PASSED_WITH_WARNINGS")
+        assert qa_data["status"] in ("PASSED", "PASSED_WITH_WARNINGS"), f"QA findings: {qa_data.get('findings')}"
 
         # 10. Verify Media Streaming
         stream_res = await client.get(

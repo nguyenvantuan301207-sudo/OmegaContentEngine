@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,42 @@ class MediaProbe:
                 f"Failed to parse ffprobe JSON output for '{file_path}': {exc}"
             ) from exc
 
-        return self._extract_summary(data, p.stat().st_size)
+        summary = self._extract_summary(data, p.stat().st_size)
+        if summary.get("has_audio"):
+            vol = await self.detect_audio_volume(p)
+            summary["mean_volume_db"] = vol.get("mean_volume_db")
+            summary["max_volume_db"] = vol.get("max_volume_db")
+        else:
+            summary["mean_volume_db"] = None
+            summary["max_volume_db"] = None
+        return summary
+
+    async def detect_audio_volume(self, file_path: Path | str) -> dict[str, float | None]:
+        """Detect mean and max audio volume in dBFS via FFmpeg volumedetect filter."""
+        p = Path(file_path).resolve()
+        cmd = ["ffmpeg", "-y", "-i", str(p), "-af", "volumedetect", "-f", "null", "-"]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+            text = stderr.decode("utf-8", errors="replace") if stderr else ""
+            mean_vol: float | None = None
+            max_vol: float | None = None
+            for line in text.splitlines():
+                if "mean_volume:" in line:
+                    parts = line.split("mean_volume:")[-1].replace("dB", "").strip()
+                    with contextlib.suppress(ValueError):
+                        mean_vol = float(parts)
+                elif "max_volume:" in line:
+                    parts = line.split("max_volume:")[-1].replace("dB", "").strip()
+                    with contextlib.suppress(ValueError):
+                        max_vol = float(parts)
+            return {"mean_volume_db": mean_vol, "max_volume_db": max_vol}
+        except Exception:
+            return {"mean_volume_db": None, "max_volume_db": None}
 
     def _extract_summary(self, raw_data: dict[str, Any], file_size_bytes: int) -> dict[str, Any]:
         """Extract clean normalized metadata summary from raw ffprobe JSON."""
@@ -61,6 +97,7 @@ class MediaProbe:
 
         video_stream: dict[str, Any] | None = None
         audio_stream: dict[str, Any] | None = None
+        subtitle_streams: list[dict[str, Any]] = []
 
         for stream in streams:
             codec_type = stream.get("codec_type")
@@ -68,6 +105,8 @@ class MediaProbe:
                 video_stream = stream
             elif codec_type == "audio" and not audio_stream:
                 audio_stream = stream
+            elif codec_type == "subtitle":
+                subtitle_streams.append(stream)
 
         duration_sec = float(format_info.get("duration", 0.0))
         if duration_sec == 0.0 and video_stream:
@@ -97,4 +136,5 @@ class MediaProbe:
             if format_info.get("bit_rate")
             else None,
             "streams_count": len(streams),
+            "subtitle_streams_count": len(subtitle_streams),
         }

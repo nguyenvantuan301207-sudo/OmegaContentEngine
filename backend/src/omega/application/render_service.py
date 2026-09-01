@@ -15,6 +15,7 @@ from omega.application.media_probe import MediaProbe
 from omega.application.media_storage import LocalMediaStorageProvider, compute_sha256
 from omega.application.production_qa import ProductionQAEngine
 from omega.domain.production import (
+    AssetType,
     MediaArtifactType,
     ProductionOutcome,
     ProductionQAStatus,
@@ -176,6 +177,10 @@ class ProductionRenderService:
         assets_list = [
             {
                 "id": a.id,
+                "asset_type": a.asset_type,
+                "provider_type": a.provider_type,
+                "mime_type": a.mime_type,
+                "storage_uri": a.storage_uri,
                 "license_status": a.license_status,
                 "source_ref": a.source_ref,
                 "asset_requirement_id": a.asset_requirement_id,
@@ -239,6 +244,7 @@ class ProductionRenderService:
                 dur_sec = (
                     scene.estimated_duration_ms / 1000.0 if scene.estimated_duration_ms > 0 else 3.0
                 )
+                motion_effect = "SLOW_ZOOM_IN" if str(scene.scene_type) in ("TITLE", "TITLE_MOTION", "DIAGRAM", "INFOGRAPHIC", "STATISTIC", "CTA") else "NONE"
 
                 if img_path and audio_path and img_path.exists() and audio_path.exists():
                     await self.renderer.render_scene_clip(
@@ -251,6 +257,7 @@ class ProductionRenderService:
                         video_codec=video_codec,
                         audio_codec=audio_codec,
                         duration_sec=dur_sec,
+                        motion_effect=motion_effect,
                     )
                 else:
                     # Synthetic placeholder fallback clip
@@ -258,13 +265,31 @@ class ProductionRenderService:
 
                 scene_clips.append(clip_path)
 
+            # Find subtitle asset if generated
+            sub_asset = next(
+                (
+                    a
+                    for a in req.assets
+                    if a.asset_type in ("SUBTITLE", AssetType.SUBTITLE.value)
+                    or (a.mime_type and "subrip" in a.mime_type)
+                ),
+                None,
+            )
+            srt_path = (
+                self.storage.resolve_stored_uri(channel_id, request_id, sub_asset.storage_uri)
+                if sub_asset and sub_asset.storage_uri
+                else None
+            )
+
             # 2. Concatenate scene clips into final staging video
-            if len(scene_clips) == 1:
+            if len(scene_clips) == 1 and (not srt_path or not srt_path.exists()):
                 if staging_output_path.exists():
                     staging_output_path.unlink()
                 scene_clips[0].rename(staging_output_path)
             else:
-                await self.renderer.concatenate_clips(scene_clips, staging_output_path)
+                await self.renderer.concatenate_clips(
+                    scene_clips, staging_output_path, srt_path=srt_path
+                )
 
             # 3. Media probe validation via ffprobe
             probe_summary = await self.probe.probe_file(staging_output_path)
