@@ -14,7 +14,7 @@ class LayerFrameState(BaseModel):
     translate_y: float = 0.0
     scale: float = 1.0
     reveal_progress: float = 1.0
-    highlight_progress: float = 1.0
+    highlight_progress: float = 0.0
     counter_progress: float = 1.0
     type_on_progress: float = 1.0
 

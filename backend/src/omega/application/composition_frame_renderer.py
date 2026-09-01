@@ -13,18 +13,41 @@ class CompositionFrameRenderer:
             return ""
         return html.escape(str(text))
 
+    def _wrap_text(self, text: str, max_width: float, font_size: float) -> list[str]:
+        words = str(text).split()
+        if not words:
+            return []
+        char_width = font_size * 0.6
+        max_chars = max(10, int(max_width / char_width))
+        lines = []
+        curr_line = []
+        curr_len = 0
+        for w in words:
+            if curr_len + len(w) + 1 > max_chars and curr_line:
+                lines.append(" ".join(curr_line))
+                curr_line = [w]
+                curr_len = len(w)
+            else:
+                curr_line.append(w)
+                curr_len += len(w) + 1
+        if curr_line:
+            lines.append(" ".join(curr_line))
+        return lines
+
     def _render_layer(self, layer: Layer, state: LayerFrameState | None) -> str:
-        opacity = state.opacity if state else 1.0
+        state_opacity = state.opacity if state else 1.0
         scale = state.scale if state else 1.0
         tx = state.translate_x if state else 0.0
         ty = state.translate_y if state else 0.0
         reveal = state.reveal_progress if state else 1.0
-        highlight = state.highlight_progress if state else 1.0
+        highlight = state.highlight_progress if state else 0.0
         counter = state.counter_progress if state else 1.0
         type_on = state.type_on_progress if state else 1.0
 
         if state and not state.visible:
             return ""
+
+        final_opacity = max(0.0, min(1.0, layer.opacity * state_opacity * layer.style.get("opacity", 1.0)))
 
         cx = layer.x + layer.width / 2.0
         cy = layer.y + layer.height / 2.0
@@ -39,26 +62,64 @@ class CompositionFrameRenderer:
             clip_path_def = f'<clipPath id="{clip_id}"><rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{clip_w:.2f}" height="{layer.height:.2f}" /></clipPath>'
             clip_attr = f'clip-path="url(#{clip_id})"'
 
-        stroke = "#000000"
-        stroke_width = 1
-        if highlight > 0.0 and layer.type in (LayerType.DIAGRAM_NODE, LayerType.SHAPE, LayerType.IMAGE_SLOT, LayerType.VIDEO_SLOT):
-            stroke = "#FFD700" if highlight > 0.5 else "#333333"
-            stroke_width = 3 if highlight > 0.5 else 1
+        stroke = layer.style.get("border_color", "transparent")
+        stroke_width = 0
+        has_explicit_border = False
+        border_str = layer.style.get("border", "")
+        if border_str:
+            m = re.match(r"(\d+)px solid (.*)", border_str)
+            if m:
+                stroke_width = int(m.group(1))
+                stroke = m.group(2)
+                has_explicit_border = True
+
+        if highlight > 0.0 and layer.type in (LayerType.DIAGRAM_NODE, LayerType.SHAPE, LayerType.IMAGE_SLOT, LayerType.VIDEO_SLOT, LayerType.CODE_BLOCK):
+            if has_explicit_border:
+                stroke_width += int(highlight * 2)
+            else:
+                stroke = "#FFD700" if highlight > 0.5 else stroke
+                stroke_width = 3 if highlight > 0.5 else stroke_width
 
         content_svg = ""
+
         if layer.type == LayerType.TEXT:
             text_val = layer.content.get("text", "")
             if type_on < 1.0:
                 char_count = int(len(text_val) * type_on)
                 text_val = text_val[:char_count]
-            content_svg = f'<text x="{layer.x:.2f}" y="{layer.y + layer.height/2:.2f}" font-family="sans-serif" font-size="24" fill="#FFFFFF">{self._escape(text_val)}</text>'
+
+            font_size = layer.content.get("font_size", 24)
+            weight = layer.content.get("weight", "normal")
+            color = layer.content.get("color", layer.style.get("color", "#FFFFFF"))
+            align = layer.content.get("align", "left")
+
+            if align in ("center", "middle"):
+                x_pos = cx
+                anchor = "middle"
+            elif align in ("right", "end"):
+                x_pos = layer.x + layer.width
+                anchor = "end"
+            else:
+                x_pos = layer.x
+                anchor = "start"
+
+            lines = self._wrap_text(text_val, layer.width, font_size)
+            if lines:
+                content_svg = f'<text x="{x_pos:.2f}" y="{layer.y + font_size:.2f}" font-family="sans-serif" font-size="{font_size}" font-weight="{weight}" fill="{self._escape(color)}" text-anchor="{anchor}">'
+                for i, line in enumerate(lines):
+                    dy = font_size * 1.2 if i > 0 else 0
+                    content_svg += f'<tspan x="{x_pos:.2f}" dy="{dy:.2f}">{self._escape(line)}</tspan>'
+                content_svg += '</text>'
 
         elif layer.type == LayerType.CODE_BLOCK:
             code_val = layer.content.get("code", "")
             if type_on < 1.0:
                 char_count = int(len(code_val) * type_on)
                 code_val = code_val[:char_count]
-            content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="#1E1E1E" rx="8" ry="8" />\n'
+
+            bg = layer.style.get("bg", "#1E1E1E")
+            radius = layer.style.get("radius", 8)
+            content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="{self._escape(bg)}" rx="{radius}" ry="{radius}" stroke="{stroke}" stroke-width="{stroke_width}" />\n'
             lines = code_val.split("\n")
             line_y = layer.y + 30
             for line in lines:
@@ -67,6 +128,9 @@ class CompositionFrameRenderer:
 
         elif layer.type == LayerType.DIAGRAM_NODE:
             label = layer.content.get("label", "")
+            if stroke == "transparent" and stroke_width == 0:
+                stroke = "#000000"
+                stroke_width = 1
             content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="#4A90E2" stroke="{stroke}" stroke-width="{stroke_width}" rx="10" ry="10" />\n'
             content_svg += f'  <text x="{cx:.2f}" y="{cy:.2f}" font-family="sans-serif" font-size="20" fill="#FFFFFF" text-anchor="middle" dominant-baseline="middle">{self._escape(label)}</text>'
 
@@ -88,10 +152,27 @@ class CompositionFrameRenderer:
                         val = f"{prefix}{curr_str}{suffix}"
                     except ValueError:
                         pass
-            content_svg = f'<text x="{cx:.2f}" y="{cy:.2f}" font-family="sans-serif" font-size="48" fill="#FFFFFF" text-anchor="middle" dominant-baseline="middle">{self._escape(val)}</text>'
+
+            font_size = layer.content.get("font_size", 48)
+            color = layer.content.get("color", layer.style.get("color", "#FFFFFF"))
+            align = layer.content.get("align", "center")
+
+            if align in ("left", "start"):
+                x_pos = layer.x
+                anchor = "start"
+            elif align in ("right", "end"):
+                x_pos = layer.x + layer.width
+                anchor = "end"
+            else:
+                x_pos = cx
+                anchor = "middle"
+
+            content_svg = f'<text x="{x_pos:.2f}" y="{cy:.2f}" font-family="sans-serif" font-size="{font_size}" fill="{self._escape(color)}" text-anchor="{anchor}" dominant-baseline="middle">{self._escape(val)}</text>'
 
         elif layer.type == LayerType.SHAPE:
-            content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="#333333" />'
+            bg = layer.style.get("bg", layer.style.get("fill", layer.style.get("color", "#333333")))
+            radius = layer.style.get("radius", 0)
+            content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="{self._escape(bg)}" stroke="{stroke}" stroke-width="{stroke_width}" rx="{radius}" ry="{radius}" />'
 
         elif layer.type == LayerType.DIVIDER:
             content_svg = f'<line x1="{layer.x:.2f}" y1="{layer.y + layer.height/2:.2f}" x2="{layer.x + layer.width:.2f}" y2="{layer.y + layer.height/2:.2f}" stroke="#666666" stroke-width="2" />'
@@ -104,26 +185,37 @@ class CompositionFrameRenderer:
             content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="#222222" stroke="{stroke}" stroke-width="{stroke_width}" data-layer-id="{self._escape(layer.id)}" />'
 
         elif layer.type == LayerType.CHART:
-            content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="#111111" />'
+            data = layer.content.get("data")
+            if data:
+                content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="#111111" />'
+            else:
+                content_svg = ""
 
         else:
-            content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="#FF00FF" />'
+            content_svg = ""
+
+        if not content_svg:
+            return ""
 
         group_svg = ""
         if clip_path_def:
             group_svg += f"  <defs>{clip_path_def}</defs>\n"
 
-        group_svg += f'  <g id="layer_{self._escape(layer.id)}" transform="{transform}" opacity="{opacity:.2f}" {clip_attr}>\n    {content_svg}\n  </g>'
+        group_svg += f'  <g id="layer_{self._escape(layer.id)}" transform="{transform}" opacity="{final_opacity:.2f}" {clip_attr}>\n    {content_svg}\n  </g>'
 
         return group_svg
 
     def render_svg(self, composition: SceneComposition, states: list[LayerFrameState] | None = None) -> str:
         state_map = {s.layer_id: s for s in states} if states else {}
 
+        bg_color = composition.background
+        if not re.match(r'^#[0-9a-fA-F]{3,8}$|^rgba?\([0-9\s,\.]+\)$|^[a-zA-Z]+$', bg_color):
+            bg_color = "#000000"
+
         svg_parts = [
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {composition.width} {composition.height}" width="{composition.width}" height="{composition.height}">',
             '  <!-- COMPOSITION FRAME -->',
-            f'  <rect width="{composition.width}" height="{composition.height}" fill="#000000" />'
+            f'  <rect width="{composition.width}" height="{composition.height}" fill="{self._escape(bg_color)}" />'
         ]
 
         for layer in composition.layers:

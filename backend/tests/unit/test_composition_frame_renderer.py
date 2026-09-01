@@ -149,3 +149,96 @@ def test_scene_composition_immutable(comp_engine, renderer):
     renderer.render_svg(comp, [state])
 
     assert comp.model_dump() == original_dump
+
+
+def test_fidelity_highlight_default_off(comp_engine, renderer):
+    from omega.application.scene_composition import Layer, LayerType, SceneComposition
+    layer = Layer(id="test", type=LayerType.DIAGRAM_NODE, x=0, y=0, width=100, height=100, z_index=1, content={"label": "A"})
+    comp = SceneComposition(width=1920, height=1080, layout_type="TEST", duration_seconds=5.0, scene_index=1, source_storyboard_scene_index=1, visual_strategy=VisualStrategy.DIAGRAM, layers=[layer])
+
+    # Render with no state -> highlight should be 0.0, no #FFD700
+    svg = renderer.render_svg(comp)
+    assert "#FFD700" not in svg
+
+def test_fidelity_highlight_motion(comp_engine, renderer):
+    from omega.application.scene_composition import Layer, LayerType, SceneComposition
+    layer = Layer(id="test", type=LayerType.DIAGRAM_NODE, x=0, y=0, width=100, height=100, z_index=1, content={"label": "A"})
+    comp = SceneComposition(width=1920, height=1080, layout_type="TEST", duration_seconds=5.0, scene_index=1, source_storyboard_scene_index=1, visual_strategy=VisualStrategy.DIAGRAM, layers=[layer])
+
+    state = LayerFrameState(layer_id="test", highlight_progress=1.0)
+    svg = renderer.render_svg(comp, [state])
+    assert "#FFD700" in svg
+
+def test_fidelity_title_fonts_and_align(comp_engine, renderer):
+    comp = comp_engine.compose(create_scene(VisualStrategy.TITLE_MOTION, "My Subtitle"))
+    comp.layers[0].content["text"] = "My Title" # Header
+
+    svg = renderer.render_svg(comp)
+    assert 'font-size="96"' in svg
+    assert 'font-size="48"' in svg
+    assert 'text-anchor="middle"' in svg
+
+def test_fidelity_composition_background(comp_engine, renderer):
+    comp = comp_engine.compose(create_scene(VisualStrategy.TITLE_MOTION))
+    comp.background = "#123456"
+    svg = renderer.render_svg(comp)
+    assert 'fill="#123456"' in svg
+
+def test_fidelity_layer_opacity_combined(comp_engine, renderer):
+    from omega.application.scene_composition import Layer, LayerType, SceneComposition
+    layer = Layer(id="test", type=LayerType.SHAPE, x=0, y=0, width=100, height=100, z_index=1, opacity=0.5, style={"opacity": 0.5})
+    comp = SceneComposition(width=1920, height=1080, layout_type="TEST", duration_seconds=5.0, scene_index=1, source_storyboard_scene_index=1, visual_strategy=VisualStrategy.INFOGRAPHIC, layers=[layer])
+
+    state = LayerFrameState(layer_id="test", opacity=0.5)
+    svg = renderer.render_svg(comp, [state])
+    # 0.5 * 0.5 * 0.5 = 0.125
+    assert 'opacity="0.12"' in svg or 'opacity="0.13"' in svg
+
+def test_fidelity_shape_styles(comp_engine, renderer):
+    from omega.application.scene_composition import Layer, LayerType, SceneComposition
+    layer1 = Layer(id="red", type=LayerType.SHAPE, x=0, y=0, width=100, height=100, z_index=1, style={"bg": "#ff0000"})
+    layer2 = Layer(id="border", type=LayerType.SHAPE, x=0, y=0, width=100, height=100, z_index=1, style={"border": "4px solid red", "fill": "transparent"})
+    comp = SceneComposition(width=1920, height=1080, layout_type="TEST", duration_seconds=5.0, scene_index=1, source_storyboard_scene_index=1, visual_strategy=VisualStrategy.INFOGRAPHIC, layers=[layer1, layer2])
+
+    svg = renderer.render_svg(comp)
+    assert 'fill="#ff0000"' in svg
+    assert 'stroke="red"' in svg
+    assert 'stroke-width="4"' in svg
+    assert 'fill="transparent"' in svg
+
+def test_fidelity_chart_and_unknown(comp_engine, renderer):
+    from omega.application.scene_composition import Layer, LayerType, SceneComposition
+    layer_chart = Layer(id="c", type=LayerType.CHART, x=0, y=0, width=100, height=100, z_index=1, content={})
+
+    comp = SceneComposition(width=1920, height=1080, layout_type="TEST", duration_seconds=5.0, scene_index=1, source_storyboard_scene_index=1, visual_strategy=VisualStrategy.INFOGRAPHIC, layers=[layer_chart])
+
+    svg = renderer.render_svg(comp)
+    # Chart with no data should render empty, so layer string should be empty
+    assert 'layer_c' not in svg
+    assert '#FF00FF' not in svg
+
+
+def test_fidelity_screenshot_highlight(comp_engine, renderer):
+    from omega.application.scene_composition import Layer, LayerType, SceneComposition
+    layer = Layer(id="test", type=LayerType.SHAPE, x=0, y=0, width=100, height=100, z_index=1, style={"border": "4px solid red", "fill": "transparent"})
+    comp = SceneComposition(width=1920, height=1080, layout_type="TEST", duration_seconds=5.0, scene_index=1, source_storyboard_scene_index=1, visual_strategy=VisualStrategy.SCREENSHOT, layers=[layer])
+
+    # Progress 0
+    state0 = LayerFrameState(layer_id="test", highlight_progress=0.0)
+    svg0 = renderer.render_svg(comp, [state0])
+    assert 'stroke="red"' in svg0
+    assert 'stroke-width="4"' in svg0
+    assert 'fill="transparent"' in svg0
+
+    # Progress 0.5
+    state_half = LayerFrameState(layer_id="test", highlight_progress=0.5)
+    svg_half = renderer.render_svg(comp, [state_half])
+    assert 'stroke="red"' in svg_half
+    assert 'stroke-width="5"' in svg_half
+
+    # Progress 1.0
+    state1 = LayerFrameState(layer_id="test", highlight_progress=1.0)
+    svg1 = renderer.render_svg(comp, [state1])
+    assert 'stroke="red"' in svg1
+    assert 'stroke-width="6"' in svg1
+    assert 'fill="transparent"' in svg1
