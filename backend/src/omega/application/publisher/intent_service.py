@@ -9,7 +9,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.domain.publisher import (
@@ -120,7 +120,14 @@ class PublishIntentService:
         existing_res = await session.execute(stmt)
         existing_intent = existing_res.scalar_one_or_none()
 
-        revision_number = 1
+        max_rev = (
+            await session.execute(
+                select(func.max(PublishIntent.revision_number)).where(
+                    PublishIntent.task_id == payload.task_id
+                )
+            )
+        ).scalar() or 0
+        revision_number = max_rev + 1
         supersedes_intent_id = None
 
         if existing_intent:
