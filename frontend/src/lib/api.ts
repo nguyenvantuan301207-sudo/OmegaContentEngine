@@ -476,15 +476,31 @@ export async function getChannels(
   state?: string,
   platform?: string,
   limit?: number,
-  offset?: number
+  offset?: number,
+  search?: string
 ): Promise<Channel[]> {
   const params = new URLSearchParams();
-  if (state) params.set("state", state);
+  if (state && state !== "ALL") params.set("state", state);
   if (platform) params.set("platform", platform);
   if (limit !== undefined) params.set("limit", String(limit));
   if (offset !== undefined) params.set("offset", String(offset));
+  if (search && search.trim()) params.set("search", search.trim());
   const queryStr = params.toString() ? `?${params.toString()}` : "";
   return apiFetch(`/api/v1/channels${queryStr}`);
+}
+
+export async function getChannelCount(
+  state?: string,
+  platform?: string,
+  search?: string
+): Promise<number> {
+  const params = new URLSearchParams();
+  if (state && state !== "ALL") params.set("state", state);
+  if (platform) params.set("platform", platform);
+  if (search && search.trim()) params.set("search", search.trim());
+  const queryStr = params.toString() ? `?${params.toString()}` : "";
+  const data = await apiFetch<{ total: number }>(`/api/v1/channels/count${queryStr}`);
+  return data.total ?? 0;
 }
 
 export async function getChannel(channelId: string): Promise<Channel> {

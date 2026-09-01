@@ -11,7 +11,7 @@ import uuid
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.domain.channel import (
@@ -127,20 +127,57 @@ async def get_channel_by_slug(session: AsyncSession, slug: str) -> ChannelRespon
     return ChannelResponse.model_validate(channel)
 
 
+def _apply_channel_filters(
+    query,
+    state: str | None = None,
+    platform: str | None = None,
+    search: str | None = None,
+):
+    if state and state != "ALL":
+        query = query.where(Channel.state == state)
+    if platform:
+        query = query.where(Channel.platform == platform)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        cond = or_(
+            Channel.name.ilike(term),
+            Channel.slug.ilike(term),
+            Channel.platform_channel_id.ilike(term),
+        )
+        try:
+            val_uuid = UUID(search.strip())
+            cond = or_(cond, Channel.id == val_uuid)
+        except ValueError:
+            pass
+        query = query.where(cond)
+    return query
+
+
+async def count_channels(
+    session: AsyncSession,
+    state: str | None = None,
+    platform: str | None = None,
+    search: str | None = None,
+) -> int:
+    """Count total channels matching optional filters and search query."""
+    query = select(func.count(Channel.id))
+    query = _apply_channel_filters(query, state=state, platform=platform, search=search)
+    res = await session.execute(query)
+    return res.scalar() or 0
+
+
 async def list_channels(
     session: AsyncSession,
     state: str | None = None,
     platform: str | None = None,
+    search: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ) -> list[ChannelResponse]:
-    """List channels with optional filtering and pagination."""
-    query = select(Channel).order_by(Channel.created_at.desc()).limit(limit).offset(offset)
-    if state:
-        query = query.where(Channel.state == state)
-    if platform:
-        query = query.where(Channel.platform == platform)
-
+    """List channels with optional filtering, search, and pagination."""
+    query = select(Channel).order_by(Channel.created_at.desc())
+    query = _apply_channel_filters(query, state=state, platform=platform, search=search)
+    query = query.limit(limit).offset(offset)
     res = await session.execute(query)
     channels = res.scalars().all()
     return [ChannelResponse.model_validate(c) for c in channels]

@@ -40,17 +40,32 @@ async def create_channel(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
+@router.get("/count", response_model=dict[str, int])
+async def count_channels(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    state: str | None = None,
+    platform: str | None = None,
+    search: str | None = None,
+) -> dict[str, int]:
+    """Count channels matching optional state, platform, and search query filters."""
+    total = await channel_service.count_channels(
+        db, state=state, platform=platform, search=search
+    )
+    return {"total": total}
+
+
 @router.get("", response_model=list[ChannelResponse])
 async def list_channels(
     db: Annotated[AsyncSession, Depends(get_db)],
     state: str | None = None,
     platform: str | None = None,
-    limit: Annotated[int, Query(ge=1, le=100)] = 100,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[ChannelResponse]:
-    """List channels with pagination and optional filters."""
+    """List channels with pagination, search, and optional filters."""
     return await channel_service.list_channels(
-        db, state=state, platform=platform, limit=limit, offset=offset
+        db, state=state, platform=platform, search=search, limit=limit, offset=offset
     )
 
 
