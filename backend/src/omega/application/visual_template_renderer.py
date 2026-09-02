@@ -6,7 +6,8 @@ from pydantic import BaseModel, ConfigDict
 
 from omega.application.scene_template_registry import SceneTemplateRegistry, TemplateInputKey
 from omega.application.template_payload_resolver import TemplatePayload
-from omega.application.visual_direction import VisualTemplateId
+from omega.application.visual_asset_binding import BoundVisualAsset
+from omega.application.visual_direction import VisualAssetKind, VisualTemplateId
 
 
 class RenderedTemplateDocument(BaseModel):
@@ -29,7 +30,11 @@ class VisualTemplateRenderer:
     def __init__(self, registry: SceneTemplateRegistry | None = None):
         self.registry = registry or SceneTemplateRegistry()
 
-    def render(self, payload: TemplatePayload) -> RenderedTemplateDocument:
+    def render(
+        self,
+        payload: TemplatePayload,
+        assets: tuple[BoundVisualAsset, ...] = (),
+    ) -> RenderedTemplateDocument:
         if payload.template_id not in (
             VisualTemplateId.HERO_TITLE,
             VisualTemplateId.FLOW_DIAGRAM,
@@ -38,6 +43,9 @@ class VisualTemplateRenderer:
             VisualTemplateId.IMAGE_EXPLAINER,
         ):
             raise VisualTemplateRenderError(f"Unsupported template_id {payload.template_id}")
+
+        if payload.template_id != VisualTemplateId.IMAGE_EXPLAINER and assets:
+            raise VisualTemplateRenderError("Unexpected bound assets for template")
 
         definition = self.registry.get(payload.template_id)
 
@@ -65,7 +73,7 @@ class VisualTemplateRenderer:
         elif payload.template_id == VisualTemplateId.CODE_EDITOR:
             html_content, semantic_ids = self._render_code_editor(payload)
         elif payload.template_id == VisualTemplateId.IMAGE_EXPLAINER:
-            html_content, semantic_ids = self._render_image_explainer(payload)
+            html_content, semantic_ids = self._render_image_explainer(payload, assets)
 
         # Wrap in full HTML document
         final_html = self._wrap_in_document(html_content)
@@ -357,8 +365,26 @@ class VisualTemplateRenderer:
         """
         return content, semantic_ids
 
-    def _render_image_explainer(self, payload: TemplatePayload) -> tuple[str, list[str]]:
-        body = html.escape(payload.inputs[TemplateInputKey.BODY])
+    def _render_image_explainer(
+        self,
+        payload: TemplatePayload,
+        assets: tuple[BoundVisualAsset, ...],
+    ) -> tuple[str, list[str]]:
+        if len(assets) == 0:
+            raise VisualTemplateRenderError("Missing required IMAGE asset for IMAGE_EXPLAINER")
+        if len(assets) > 1:
+            raise VisualTemplateRenderError("Multiple IMAGE assets provided for IMAGE_EXPLAINER")
+
+        bound_asset = assets[0]
+        if bound_asset.kind != VisualAssetKind.IMAGE:
+            raise VisualTemplateRenderError("Invalid asset kind for IMAGE_EXPLAINER")
+
+        allowed_mimes = ("image/jpeg", "image/png", "image/webp")
+        if bound_asset.mime_type not in allowed_mimes:
+            raise VisualTemplateRenderError("Invalid image MIME for IMAGE_EXPLAINER")
+
+        raw_body = payload.inputs[TemplateInputKey.BODY]
+        body = html.escape(raw_body)
         title = payload.inputs.get(TemplateInputKey.TITLE)
         caption = payload.inputs.get(TemplateInputKey.CAPTION)
 
@@ -376,6 +402,12 @@ class VisualTemplateRenderer:
             caption_html = f'<div id="image-caption" class="image-caption">{esc_caption}</div>'
             semantic_ids.append("image-caption")
 
+        alt_raw = caption or title or raw_body or ""
+        esc_alt = html.escape(alt_raw, quote=True)
+        esc_src = html.escape(bound_asset.data_uri, quote=True)
+
+        img_html = f'<img id="image-element" class="image-asset" src="{esc_src}" alt="{esc_alt}" />'
+
         content = f"""
         <style>
         .split-container {{ display: flex; height: 100%; width: 100%; gap: 60px; }}
@@ -385,7 +417,7 @@ class VisualTemplateRenderer:
         .image-caption {{ font-size: 24px; color: var(--text-secondary); border-left: 4px solid var(--surface-border); padding-left: 16px; font-style: italic; word-wrap: break-word; }}
         .split-media {{ flex: 1; display: flex; align-items: center; justify-content: center; }}
         .image-frame {{ width: 100%; height: 800px; background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(99, 102, 241, 0.1)); border: 1px solid var(--accent); border-radius: 20px; box-shadow: inset 0 0 100px rgba(0,0,0,0.5), 0 20px 40px rgba(0,0,0,0.3); overflow: hidden; position: relative; }}
-        .image-frame::after {{ content: ''; position: absolute; top: 0; left: 0; width: 100%; height: 100%; background-image: repeating-linear-gradient(45deg, transparent, transparent 10px, rgba(255,255,255,0.02) 10px, rgba(255,255,255,0.02) 20px); }}
+        .image-asset {{ width: 100%; height: 100%; object-fit: cover; display: block; }}
         </style>
         <div class="split-container">
             <div class="split-text">
@@ -394,7 +426,9 @@ class VisualTemplateRenderer:
                 {caption_html}
             </div>
             <div class="split-media">
-                <div id="image-frame" data-asset-kind="IMAGE" data-motion-role="image-frame" class="image-frame"></div>
+                <div id="image-frame" data-asset-kind="IMAGE" data-motion-role="image-frame" class="image-frame">
+                    {img_html}
+                </div>
             </div>
         </div>
         """

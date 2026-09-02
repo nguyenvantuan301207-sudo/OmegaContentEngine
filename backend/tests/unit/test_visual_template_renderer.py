@@ -2,7 +2,8 @@ import pytest
 
 from omega.application.scene_template_registry import TemplateInputKey
 from omega.application.template_payload_resolver import TemplatePayload
-from omega.application.visual_direction import VisualTemplateId
+from omega.application.visual_asset_binding import BoundVisualAsset
+from omega.application.visual_direction import VisualAssetKind, VisualTemplateId
 from omega.application.visual_template_renderer import (
     VisualTemplateRenderer,
     VisualTemplateRenderError,
@@ -148,13 +149,31 @@ def test_code_editor(renderer):
     assert 'data-motion-role="code-panel"' in doc.html
     assert 'data-motion-role="code-content"' in doc.html
 
+def make_bound_asset(
+    kind=VisualAssetKind.IMAGE,
+    mime_type="image/jpeg",
+    data_uri="data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+    content_sha256="0" * 64,
+):
+    return BoundVisualAsset(
+        asset_id="asset_1",
+        kind=kind,
+        mime_type=mime_type,
+        content_sha256=content_sha256,
+        data_uri=data_uri,
+        width=1920,
+        height=1080,
+    )
+
+
 def test_image_explainer(renderer):
     payload = create_payload(VisualTemplateId.IMAGE_EXPLAINER, {
         TemplateInputKey.BODY: "Some body text",
         TemplateInputKey.TITLE: "Image Title",
-        TemplateInputKey.CAPTION: "Image Caption"
+        TemplateInputKey.CAPTION: "Image Caption",
     })
-    doc = renderer.render(payload)
+    asset = make_bound_asset()
+    doc = renderer.render(payload, assets=(asset,))
 
     assert "Some body text" in doc.html
     assert "Image Title" in doc.html
@@ -162,3 +181,193 @@ def test_image_explainer(renderer):
     assert 'data-asset-kind="IMAGE"' in doc.html
     assert 'data-motion-role="image-frame"' in doc.html
     assert "placeholder" not in doc.html.lower()
+    assert '<img id="image-element" class="image-asset"' in doc.html
+    assert 'src="data:image/jpeg;base64,/9j/4AAQSkZJRg=="' in doc.html
+    assert 'alt="Image Caption"' in doc.html
+    assert "http://" not in doc.html
+    assert "https://" not in doc.html
+
+
+def test_image_explainer_missing_asset_fails(renderer):
+    payload = create_payload(VisualTemplateId.IMAGE_EXPLAINER, {
+        TemplateInputKey.BODY: "Some body text",
+    })
+    with pytest.raises(
+        VisualTemplateRenderError,
+        match=r"^Missing required IMAGE asset for IMAGE_EXPLAINER$",
+    ):
+        renderer.render(payload, assets=())
+
+
+def test_image_explainer_multiple_assets_fail(renderer):
+    payload = create_payload(VisualTemplateId.IMAGE_EXPLAINER, {
+        TemplateInputKey.BODY: "Some body text",
+    })
+    a1 = make_bound_asset()
+    a2 = make_bound_asset()
+    with pytest.raises(
+        VisualTemplateRenderError,
+        match=r"^Multiple IMAGE assets provided for IMAGE_EXPLAINER$",
+    ):
+        renderer.render(payload, assets=(a1, a2))
+
+
+def test_image_explainer_wrong_asset_kind_fails(renderer):
+    payload = create_payload(VisualTemplateId.IMAGE_EXPLAINER, {
+        TemplateInputKey.BODY: "Some body text",
+    })
+    asset = make_bound_asset(kind=VisualAssetKind.BROLL, mime_type="video/mp4")
+    with pytest.raises(
+        VisualTemplateRenderError,
+        match=r"^Invalid asset kind for IMAGE_EXPLAINER$",
+    ):
+        renderer.render(payload, assets=(asset,))
+
+
+def test_image_explainer_unsupported_mime_fails():
+    with pytest.raises(
+        ValueError,
+        match=r"Unsupported bound image MIME type",
+    ):
+        make_bound_asset(
+            mime_type="image/gif",
+            data_uri="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7",
+        )
+
+
+def test_image_explainer_alt_escaping(renderer):
+    payload = create_payload(VisualTemplateId.IMAGE_EXPLAINER, {
+        TemplateInputKey.BODY: "Body & text",
+        TemplateInputKey.CAPTION: 'Caption with "quotes" & <tags>',
+    })
+    asset = make_bound_asset()
+    doc = renderer.render(payload, assets=(asset,))
+
+    assert 'alt="Caption with &quot;quotes&quot; &amp; &lt;tags&gt;"' in doc.html
+
+
+def test_image_explainer_determinism(renderer):
+    payload = create_payload(VisualTemplateId.IMAGE_EXPLAINER, {
+        TemplateInputKey.BODY: "Body text",
+        TemplateInputKey.TITLE: "Title",
+    })
+    asset = make_bound_asset()
+
+    doc1 = renderer.render(payload, assets=(asset,))
+    doc2 = renderer.render(payload, assets=(asset,))
+
+    assert doc1.content_sha256 == doc2.content_sha256
+    assert doc1.html == doc2.html
+
+
+def test_non_image_template_unexpected_asset_fails(renderer):
+    payload = create_payload(VisualTemplateId.HERO_TITLE, {
+        TemplateInputKey.TITLE: "Hero Title",
+    })
+    asset = make_bound_asset()
+
+    with pytest.raises(
+        VisualTemplateRenderError,
+        match=r"^Unexpected bound assets for template$",
+    ):
+        renderer.render(payload, assets=(asset,))
+
+
+def test_bound_visual_asset_valid_formats():
+    # JPEG
+    b_jpeg = BoundVisualAsset(
+        asset_id="1",
+        kind=VisualAssetKind.IMAGE,
+        mime_type="image/jpeg",
+        content_sha256="a" * 64,
+        data_uri="data:image/jpeg;base64,/9j/4AAQSkZJRg==",
+    )
+    assert b_jpeg.mime_type == "image/jpeg"
+
+    # PNG
+    b_png = BoundVisualAsset(
+        asset_id="2",
+        kind=VisualAssetKind.IMAGE,
+        mime_type="image/png",
+        content_sha256="b" * 64,
+        data_uri="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+    )
+    assert b_png.mime_type == "image/png"
+
+    # WEBP
+    b_webp = BoundVisualAsset(
+        asset_id="3",
+        kind=VisualAssetKind.IMAGE,
+        mime_type="image/webp",
+        content_sha256="c" * 64,
+        data_uri="data:image/webp;base64,UklGRg==",
+    )
+    assert b_webp.mime_type == "image/webp"
+
+
+def test_bound_visual_asset_remote_urls_rejected():
+    with pytest.raises(ValueError, match=r"data_uri must begin with exact"):
+        BoundVisualAsset(
+            asset_id="1",
+            kind=VisualAssetKind.IMAGE,
+            mime_type="image/jpeg",
+            content_sha256="a" * 64,
+            data_uri="https://example.com/image.jpg",
+        )
+
+    with pytest.raises(ValueError, match=r"data_uri must begin with exact"):
+        BoundVisualAsset(
+            asset_id="1",
+            kind=VisualAssetKind.IMAGE,
+            mime_type="image/jpeg",
+            content_sha256="a" * 64,
+            data_uri="http://example.com/image.jpg",
+        )
+
+    with pytest.raises(ValueError, match=r"data_uri must begin with exact"):
+        BoundVisualAsset(
+            asset_id="1",
+            kind=VisualAssetKind.IMAGE,
+            mime_type="image/jpeg",
+            content_sha256="a" * 64,
+            data_uri="file:///tmp/image.jpg",
+        )
+
+
+def test_bound_visual_asset_mime_mismatch_rejected():
+    with pytest.raises(ValueError, match=r"data_uri MIME does not match mime_type"):
+        BoundVisualAsset(
+            asset_id="1",
+            kind=VisualAssetKind.IMAGE,
+            mime_type="image/jpeg",
+            content_sha256="a" * 64,
+            data_uri="data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+        )
+
+
+def test_bound_visual_asset_malformed_base64_rejected():
+    with pytest.raises(ValueError, match=r"data_uri must contain valid base64 image data"):
+        BoundVisualAsset(
+            asset_id="1",
+            kind=VisualAssetKind.IMAGE,
+            mime_type="image/jpeg",
+            content_sha256="a" * 64,
+            data_uri="data:image/jpeg;base64,not_valid_base64!@#$",
+        )
+
+
+def test_bound_visual_asset_empty_payload_rejected():
+    with pytest.raises(ValueError, match=r"data_uri must contain non-empty base64 payload"):
+        BoundVisualAsset(
+            asset_id="1",
+            kind=VisualAssetKind.IMAGE,
+            mime_type="image/jpeg",
+            content_sha256="a" * 64,
+            data_uri="data:image/jpeg;base64,",
+        )
+
+
+def test_renderer_cannot_receive_remotely_backed_asset(renderer):
+    # Proves remote URL cannot bypass to renderer
+    with pytest.raises(ValueError, match=r"data_uri must begin with exact"):
+        make_bound_asset(data_uri="https://attacker.com/malicious.jpg")
