@@ -223,49 +223,98 @@ class PexelsAssetProvider:
         if candidate.kind not in (VisualAssetKind.IMAGE, VisualAssetKind.VIDEO, VisualAssetKind.BROLL):
             raise PexelsAssetProviderError(f"Unsupported kind: {candidate.kind}")
 
-        if not candidate.source_url.startswith("https://"):
+        source_url_obj = httpx.URL(candidate.source_url)
+        if source_url_obj.scheme != "https":
             raise PexelsAssetProviderError(f"Final URL scheme must be https: {candidate.source_url}")
+
+        if candidate.kind == VisualAssetKind.IMAGE:
+            if candidate.mime_type not in ("image/jpeg", "image/png", "image/webp"):
+                raise PexelsAssetProviderError(f"Unsupported image candidate MIME: {candidate.mime_type}")
+        else:
+            if candidate.mime_type != "video/mp4":
+                raise PexelsAssetProviderError(f"Unsupported video candidate MIME: {candidate.mime_type}")
+
+        search_query = candidate.metadata.get("search_query")
+        if not isinstance(search_query, str):
+            raise PexelsAssetProviderError("Missing or invalid search_query in metadata")
+        search_query = search_query.strip()
+        if not search_query:
+            raise PexelsAssetProviderError("Empty search_query in metadata")
 
         max_size = 25 * 1024 * 1024 if candidate.kind == VisualAssetKind.IMAGE else 150 * 1024 * 1024
 
         client = await self._get_client()
-        try:
-            response = await client.get(candidate.source_url, follow_redirects=True, headers={"User-Agent": "Omega/1.0"})
-            response.raise_for_status()
-        except httpx.HTTPStatusError as e:
-            raise PexelsAssetProviderError(f"Download HTTP {e.response.status_code}") from None
-        except httpx.RequestError as e:
-            raise PexelsAssetProviderError(f"Download network error: {type(e).__name__}") from None
+        buffer = bytearray()
 
-        if str(response.url).startswith("http://"):
-            raise PexelsAssetProviderError("Redirected to non-https URL")
+        current_url = candidate.source_url
+        redirect_count = 0
+        max_redirects = 5
 
-        content_length = response.headers.get("Content-Length")
-        if content_length and int(content_length) > max_size:
-            raise PexelsAssetProviderError(f"Content-Length exceeds limit of {max_size} bytes")
+        while True:
+            if redirect_count > max_redirects:
+                raise PexelsAssetProviderError("Redirect limit exceeded")
 
-        content = response.content
-        if not content:
+            try:
+                async with client.stream("GET", current_url, follow_redirects=False, headers={"User-Agent": "Omega/1.0"}) as response:
+                    if response.status_code in (301, 302, 303, 307, 308):
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise PexelsAssetProviderError("Missing Location in redirect")
+
+                        next_url = response.url.join(location)
+                        if next_url.scheme != "https":
+                            raise PexelsAssetProviderError("Redirected to non-https URL")
+
+                        current_url = str(next_url)
+                        redirect_count += 1
+                        continue
+
+                    response.raise_for_status()
+
+                    content_length_str = response.headers.get("Content-Length")
+                    if content_length_str:
+                        try:
+                            content_length = int(content_length_str)
+                        except ValueError:
+                            raise PexelsAssetProviderError("Malformed Content-Length") from None
+                        if content_length < 0:
+                            raise PexelsAssetProviderError("Malformed Content-Length")
+                        if content_length > max_size:
+                            raise PexelsAssetProviderError(f"Content-Length exceeds limit of {max_size} bytes")
+
+                    content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+                    if candidate.kind == VisualAssetKind.IMAGE:
+                        if content_type not in ("image/jpeg", "image/png", "image/webp"):
+                            raise PexelsAssetProviderError(f"Invalid image Content-Type: {content_type}")
+                    else:
+                        if content_type != "video/mp4":
+                            raise PexelsAssetProviderError(f"Invalid video Content-Type: {content_type}")
+
+                    if content_type != candidate.mime_type:
+                        raise PexelsAssetProviderError(f"Response MIME {content_type} does not match candidate MIME {candidate.mime_type}")
+
+                    async for chunk in response.aiter_bytes():
+                        buffer.extend(chunk)
+                        if len(buffer) > max_size:
+                            raise PexelsAssetProviderError(f"Received body exceeds limit of {max_size} bytes")
+
+                    break
+
+            except httpx.HTTPStatusError as e:
+                raise PexelsAssetProviderError(f"Download HTTP {e.response.status_code}") from None
+            except httpx.RequestError as e:
+                raise PexelsAssetProviderError(f"Download network error: {type(e).__name__}") from None
+
+        if not buffer:
             raise PexelsAssetProviderError("Empty response body")
 
-        if len(content) > max_size:
-            raise PexelsAssetProviderError(f"Received body exceeds limit of {max_size} bytes")
-
-        content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-        if candidate.kind == VisualAssetKind.IMAGE:
-            if content_type not in ("image/jpeg", "image/png", "image/webp"):
-                raise PexelsAssetProviderError(f"Invalid image Content-Type: {content_type}")
-        else:
-            if content_type != "video/mp4":
-                raise PexelsAssetProviderError(f"Invalid video Content-Type: {content_type}")
-
-        search_query = candidate.metadata.get("search_query", "")
+        content = bytes(buffer)
 
         return self._cache.store(
             content=content,
             kind=candidate.kind,
             provider="pexels",
-            mime_type=content_type,
+            mime_type=candidate.mime_type,
             query=search_query,
             source_url=candidate.source_url,
             source_page_url=candidate.source_page_url,

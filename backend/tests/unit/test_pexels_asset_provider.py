@@ -253,33 +253,179 @@ async def test_fetch_success(dummy_cache: VisualAssetCache):
 
 
 @pytest.mark.asyncio
-async def test_mime_and_size_safety(dummy_cache: VisualAssetCache):
-    def mock_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/wrong_mime":
-            return httpx.Response(200, content=b"data", headers={"Content-Type": "text/html"})
-        if request.url.path == "/too_big":
-            return httpx.Response(200, content=b"a" * 10, headers={"Content-Type": "image/jpeg", "Content-Length": "999999999"})
+async def test_stream_size_abort(dummy_cache: VisualAssetCache):
+    async def mock_stream(request: httpx.Request) -> httpx.Response:
+        # Simulate a 25 MiB + 1 byte stream without Content-Length
+        async def generator():
+            yield b"a" * (25 * 1024 * 1024)
+            yield b"b"
+            yield b"c"
 
-        return httpx.Response(500)
+        return httpx.Response(200, content=generator(), headers={"Content-Type": "image/jpeg"})
 
-    transport = httpx.MockTransport(mock_handler)
+    transport = httpx.MockTransport(mock_stream)
     async with httpx.AsyncClient(transport=transport) as client:
         provider = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
 
-        c_mime = VisualAssetCandidate(
+        c = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
-            source_url="https://test/wrong_mime", source_page_url=None, mime_type="image/jpeg",
+            source_url="https://test/stream", source_page_url=None, mime_type="image/jpeg",
             width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
-            attribution_text=None, metadata={}
+            attribution_text=None, metadata={"search_query": "q"}
         )
-        with pytest.raises(PexelsAssetProviderError, match="Invalid image Content-Type: text/html"):
-            await provider.fetch(c_mime)
+        with pytest.raises(PexelsAssetProviderError, match="Received body exceeds limit"):
+            await provider.fetch(c)
 
-        c_size = VisualAssetCandidate(
+@pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_content_length_validation(dummy_cache: VisualAssetCache):
+    def mock_handler_malformed(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/jpeg", "Content-Length": "nonsense"})
+
+    transport = httpx.MockTransport(mock_handler_malformed)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        c = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
-            source_url="https://test/too_big", source_page_url=None, mime_type="image/jpeg",
+            source_url="https://test/x", source_page_url=None, mime_type="image/jpeg",
             width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
-            attribution_text=None, metadata={}
+            attribution_text=None, metadata={"search_query": "q"}
         )
+        with pytest.raises(PexelsAssetProviderError, match="Malformed Content-Length"):
+            await provider.fetch(c)
+
+    def mock_handler_oversize(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"a" * 10, headers={"Content-Type": "image/jpeg", "Content-Length": str(25 * 1024 * 1024 + 1)})
+
+    transport = httpx.MockTransport(mock_handler_oversize)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
         with pytest.raises(PexelsAssetProviderError, match="Content-Length exceeds limit"):
-            await provider.fetch(c_size)
+            await provider.fetch(c)
+
+@pytest.mark.asyncio
+async def test_https_validation(dummy_cache: VisualAssetCache):
+    provider = PexelsAssetProvider("test-api-key", dummy_cache)
+    c_http = VisualAssetCandidate(
+        provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+        source_url="http://example.test/file.jpg", source_page_url=None, mime_type="image/jpeg",
+        width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+        attribution_text=None, metadata={"search_query": "q"}
+    )
+    with pytest.raises(PexelsAssetProviderError, match="Final URL scheme must be https"):
+        await provider.fetch(c_http)
+
+    requested_urls = []
+    # Redirect to http
+    def mock_redirect(request: httpx.Request) -> httpx.Response:
+        requested_urls.append(str(request.url))
+        if request.url.scheme == "https":
+            return httpx.Response(302, headers={"Location": "http://redirect.test/file.jpg"})
+        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/jpeg"})
+
+    transport = httpx.MockTransport(mock_redirect)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider2 = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        c_https = VisualAssetCandidate(
+            provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+            source_url="https://example.test/file.jpg", source_page_url=None, mime_type="image/jpeg",
+            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            attribution_text=None, metadata={"search_query": "q"}
+        )
+        with pytest.raises(PexelsAssetProviderError, match="Redirected to non-https URL"):
+            await provider2.fetch(c_https)
+
+        assert len(requested_urls) == 1
+        assert requested_urls[0] == "https://example.test/file.jpg"
+
+    requested_urls_safe = []
+    # Safe redirect to https
+    def mock_safe_redirect(request: httpx.Request) -> httpx.Response:
+        requested_urls_safe.append(str(request.url))
+        if str(request.url) == "https://one.test/file":
+            return httpx.Response(302, headers={"Location": "https://two.test/file"})
+        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/jpeg", "Content-Length": "4"})
+
+    transport_safe = httpx.MockTransport(mock_safe_redirect)
+    async with httpx.AsyncClient(transport=transport_safe) as client:
+        provider3 = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        c_safe = VisualAssetCandidate(
+            provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+            source_url="https://one.test/file", source_page_url=None, mime_type="image/jpeg",
+            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            attribution_text=None, metadata={"search_query": "q"}
+        )
+        await provider3.fetch(c_safe)
+
+        assert len(requested_urls_safe) == 2
+        assert requested_urls_safe[0] == "https://one.test/file"
+        assert requested_urls_safe[1] == "https://two.test/file"
+
+    # Redirect limit
+    def mock_redirect_loop(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://loop.test/file"})
+
+    transport_loop = httpx.MockTransport(mock_redirect_loop)
+    async with httpx.AsyncClient(transport=transport_loop) as client:
+        provider4 = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        c_loop = VisualAssetCandidate(
+            provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+            source_url="https://loop.test/file", source_page_url=None, mime_type="image/jpeg",
+            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            attribution_text=None, metadata={"search_query": "q"}
+        )
+        with pytest.raises(PexelsAssetProviderError, match="Redirect limit exceeded"):
+            await provider4.fetch(c_loop)
+
+@pytest.mark.asyncio
+async def test_mime_validation(dummy_cache: VisualAssetCache):
+    provider = PexelsAssetProvider("test-api-key", dummy_cache)
+
+    # Pre-flight invalid candidate mime
+    c_img_mp4 = VisualAssetCandidate(
+        provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+        source_url="https://test/file.jpg", source_page_url=None, mime_type="video/mp4",
+        width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+        attribution_text=None, metadata={"search_query": "q"}
+    )
+    with pytest.raises(PexelsAssetProviderError, match="Unsupported image candidate MIME: video/mp4"):
+        await provider.fetch(c_img_mp4)
+
+    c_vid_jpg = VisualAssetCandidate(
+        provider_id="1", kind=VisualAssetKind.VIDEO, provider="pexels",
+        source_url="https://test/file.mp4", source_page_url=None, mime_type="image/jpeg",
+        width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+        attribution_text=None, metadata={"search_query": "q"}
+    )
+    with pytest.raises(PexelsAssetProviderError, match="Unsupported video candidate MIME: image/jpeg"):
+        await provider.fetch(c_vid_jpg)
+
+    # Response mismatch
+    def mock_handler_mismatch(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/png"})
+
+    transport = httpx.MockTransport(mock_handler_mismatch)
+    async with httpx.AsyncClient(transport=transport) as client:
+        provider2 = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        c_mismatch = VisualAssetCandidate(
+            provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+            source_url="https://test/file.jpg", source_page_url=None, mime_type="image/jpeg",
+            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            attribution_text=None, metadata={"search_query": "q"}
+        )
+        with pytest.raises(PexelsAssetProviderError, match="Response MIME image/png does not match candidate MIME image/jpeg"):
+            await provider2.fetch(c_mismatch)
+
+@pytest.mark.asyncio
+async def test_search_query_validation(dummy_cache: VisualAssetCache):
+    provider = PexelsAssetProvider("test-api-key", dummy_cache)
+
+    for invalid_meta in [{}, {"search_query": ""}, {"search_query": "   "}, {"search_query": 123}]:
+        c = VisualAssetCandidate(
+            provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+            source_url="https://test/file.jpg", source_page_url=None, mime_type="image/jpeg",
+            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            attribution_text=None, metadata=invalid_meta
+        )
+        with pytest.raises(PexelsAssetProviderError, match="search_query"):
+            await provider.fetch(c)
