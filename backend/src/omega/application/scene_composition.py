@@ -217,17 +217,18 @@ class SceneCompositionEngine:
         return None
 
     def _extract_diagram_nodes(self, scene: StoryboardScene) -> list[str]:
-        text = f"{scene.visual_brief} {scene.on_screen_text} {scene.narration_excerpt}".replace(".", " ").replace(",", " ")
+        text = f"{scene.visual_brief} {scene.on_screen_text} {scene.narration_excerpt}"
         entities = []
-        matches = re.finditer(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', text)
-        for match in matches:
-            entity = match.group(1).strip()
-            entity = re.sub(r'^(The|A|An)\s+', '', entity)
-            if entity not in entities and len(entity) > 2 and entity.lower() not in ["test", "this", "that", "these", "those"]:
-                entities.append(entity)
+        for clause in re.split(r'[,.;!?-]', text):
+            matches = re.finditer(r'\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b', clause)
+            for match in matches:
+                entity = match.group(1).strip()
+                entity = re.sub(r'^(The|A|An)\s+', '', entity)
+                if entity not in entities and len(entity) > 2 and entity.lower() not in ["test", "this", "that", "these", "those"]:
+                    entities.append(entity)
         if len(entities) >= 2:
             return entities[:3]
-        words = [w.capitalize() for w in text.split() if len(w) > 3]
+        words = [w.capitalize() for w in text.replace(".", " ").replace(",", " ").split() if len(w) > 3]
         if len(words) >= 2:
             return words[:3]
         return []

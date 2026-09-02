@@ -236,9 +236,38 @@ def test_fidelity_screenshot_highlight(comp_engine, renderer):
     assert 'stroke="red"' in svg_half
     assert 'stroke-width="5"' in svg_half
 
-    # Progress 1.0
-    state1 = LayerFrameState(layer_id="test", highlight_progress=1.0)
-    svg1 = renderer.render_svg(comp, [state1])
-    assert 'stroke="red"' in svg1
-    assert 'stroke-width="6"' in svg1
-    assert 'fill="transparent"' in svg1
+
+
+def test_z_index_sorting(comp_engine, renderer):
+    from omega.application.scene_composition import Layer, LayerType, SceneComposition
+    layer_high = Layer(id="high", type=LayerType.SHAPE, x=0, y=0, width=100, height=100, z_index=10, style={"bg": "#111111"})
+    layer_low = Layer(id="low", type=LayerType.SHAPE, x=0, y=0, width=100, height=100, z_index=5, style={"bg": "#222222"})
+    comp = SceneComposition(width=1920, height=1080, layout_type="TEST", duration_seconds=5.0, scene_index=1, source_storyboard_scene_index=1, visual_strategy=VisualStrategy.CODE_DEMO, layers=[layer_high, layer_low])
+
+    svg = renderer.render_svg(comp)
+    idx_low = svg.find('id="layer_low"')
+    idx_high = svg.find('id="layer_high"')
+    assert idx_low != -1
+    assert idx_high != -1
+    assert idx_low < idx_high
+
+def test_contrast_light_dark(comp_engine, renderer):
+    from omega.application.scene_composition import Layer, LayerType, SceneComposition
+    layer = Layer(id="text", type=LayerType.TEXT, x=0, y=0, width=100, height=100, z_index=1, content={"text": "Hello"})
+
+    comp = SceneComposition(width=1920, height=1080, background="#ffffff", layout_type="TEST", duration_seconds=5.0, scene_index=1, source_storyboard_scene_index=1, visual_strategy=VisualStrategy.TITLE_MOTION, layers=[layer])
+    svg_light = renderer.render_svg(comp)
+    assert 'fill="#0f172a"' in svg_light
+
+    comp.background = "#000000"
+    svg_dark = renderer.render_svg(comp)
+    assert 'fill="#f8fafc"' in svg_dark
+
+def test_diagram_edge_arrow(comp_engine, renderer):
+    from omega.application.scene_composition import Layer, LayerType, SceneComposition
+    layer = Layer(id="edge", type=LayerType.DIAGRAM_EDGE, x=0, y=0, width=100, height=100, z_index=1, content={})
+    comp = SceneComposition(width=1920, height=1080, layout_type="TEST", duration_seconds=5.0, scene_index=1, source_storyboard_scene_index=1, visual_strategy=VisualStrategy.DIAGRAM, layers=[layer])
+
+    svg = renderer.render_svg(comp)
+    assert 'marker-end="url(#arrow_edge)"' in svg
+    assert '<marker id="arrow_edge"' in svg

@@ -13,6 +13,19 @@ class CompositionFrameRenderer:
             return ""
         return html.escape(str(text))
 
+    def _is_light_color(self, hex_color: str) -> bool:
+        hex_color = hex_color.lstrip('#')
+        if len(hex_color) == 3:
+            hex_color = ''.join(c*2 for c in hex_color)
+        if len(hex_color) != 6:
+            return True
+        try:
+            r, g, b = int(hex_color[0:2], 16), int(hex_color[2:4], 16), int(hex_color[4:6], 16)
+            luminance = (0.299*r + 0.587*g + 0.114*b) / 255
+            return luminance > 0.5
+        except ValueError:
+            return True
+
     def _wrap_text(self, text: str, max_width: float, font_size: float) -> list[str]:
         words = str(text).split()
         if not words:
@@ -34,7 +47,7 @@ class CompositionFrameRenderer:
             lines.append(" ".join(curr_line))
         return lines
 
-    def _render_layer(self, layer: Layer, state: LayerFrameState | None) -> str:
+    def _render_layer(self, layer: Layer, state: LayerFrameState | None, default_fg: str = "#FFFFFF") -> str:
         state_opacity = state.opacity if state else 1.0
         scale = state.scale if state else 1.0
         tx = state.translate_x if state else 0.0
@@ -90,7 +103,7 @@ class CompositionFrameRenderer:
 
             font_size = layer.content.get("font_size", 24)
             weight = layer.content.get("weight", "normal")
-            color = layer.content.get("color", layer.style.get("color", "#FFFFFF"))
+            color = layer.content.get("color", layer.style.get("color", default_fg))
             align = layer.content.get("align", "left")
 
             if align in ("center", "middle"):
@@ -129,13 +142,16 @@ class CompositionFrameRenderer:
         elif layer.type == LayerType.DIAGRAM_NODE:
             label = layer.content.get("label", "")
             if stroke == "transparent" and stroke_width == 0:
-                stroke = "#000000"
+                stroke = default_fg
                 stroke_width = 1
             content_svg = f'<rect x="{layer.x:.2f}" y="{layer.y:.2f}" width="{layer.width:.2f}" height="{layer.height:.2f}" fill="#4A90E2" stroke="{stroke}" stroke-width="{stroke_width}" rx="10" ry="10" />\n'
             content_svg += f'  <text x="{cx:.2f}" y="{cy:.2f}" font-family="sans-serif" font-size="20" fill="#FFFFFF" text-anchor="middle" dominant-baseline="middle">{self._escape(label)}</text>'
 
         elif layer.type == LayerType.DIAGRAM_EDGE:
-            content_svg = f'<line x1="{layer.x:.2f}" y1="{layer.y:.2f}" x2="{layer.x + layer.width:.2f}" y2="{layer.y + layer.height:.2f}" stroke="#FFFFFF" stroke-width="4" />'
+            edge_stroke = stroke if has_explicit_border else default_fg
+            marker_def = f'<marker id="arrow_{self._escape(layer.id)}" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto" markerUnits="strokeWidth"><path d="M0,0 L0,6 L9,3 z" fill="{self._escape(edge_stroke)}" /></marker>'
+            clip_path_def += marker_def
+            content_svg = f'<line x1="{layer.x:.2f}" y1="{layer.y:.2f}" x2="{layer.x + layer.width:.2f}" y2="{layer.y + layer.height:.2f}" stroke="{self._escape(edge_stroke)}" stroke-width="4" marker-end="url(#arrow_{self._escape(layer.id)})" />'
 
         elif layer.type == LayerType.METRIC:
             val = str(layer.content.get("value", ""))
@@ -154,7 +170,7 @@ class CompositionFrameRenderer:
                         pass
 
             font_size = layer.content.get("font_size", 48)
-            color = layer.content.get("color", layer.style.get("color", "#FFFFFF"))
+            color = layer.content.get("color", layer.style.get("color", default_fg))
             align = layer.content.get("align", "center")
 
             if align in ("left", "start"):
@@ -212,14 +228,20 @@ class CompositionFrameRenderer:
         if not re.match(r'^#[0-9a-fA-F]{3,8}$|^rgba?\([0-9\s,\.]+\)$|^[a-zA-Z]+$', bg_color):
             bg_color = "#000000"
 
+        is_light = self._is_light_color(bg_color)
+        default_fg = "#0f172a" if is_light else "#f8fafc"
+
         svg_parts = [
             f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {composition.width} {composition.height}" width="{composition.width}" height="{composition.height}">',
             '  <!-- COMPOSITION FRAME -->',
             f'  <rect width="{composition.width}" height="{composition.height}" fill="{self._escape(bg_color)}" />'
         ]
 
-        for layer in composition.layers:
-            svg_parts.append(self._render_layer(layer, state_map.get(layer.id)))
+        # Sort layers by z_index, preserving original order for equal z_index
+        sorted_layers = sorted(composition.layers, key=lambda lyr: getattr(lyr, "z_index", 0))
+
+        for layer in sorted_layers:
+            svg_parts.append(self._render_layer(layer, state_map.get(layer.id), default_fg))
 
         svg_parts.append("</svg>")
         return "\n".join(svg_parts)
