@@ -223,7 +223,11 @@ class PexelsAssetProvider:
         if candidate.kind not in (VisualAssetKind.IMAGE, VisualAssetKind.VIDEO, VisualAssetKind.BROLL):
             raise PexelsAssetProviderError(f"Unsupported kind: {candidate.kind}")
 
-        source_url_obj = httpx.URL(candidate.source_url)
+        try:
+            source_url_obj = httpx.URL(candidate.source_url)
+        except httpx.InvalidURL as e:
+            raise PexelsAssetProviderError("Invalid candidate source URL") from e
+
         if source_url_obj.scheme != "https":
             raise PexelsAssetProviderError(f"Final URL scheme must be https: {candidate.source_url}")
 
@@ -246,10 +250,7 @@ class PexelsAssetProvider:
         client = await self._get_client()
         buffer = bytearray()
 
-        try:
-            _ = httpx.URL(candidate.source_url)
-        except httpx.InvalidURL as e:
-            raise PexelsAssetProviderError("Invalid candidate source URL") from e
+
 
         current_url = candidate.source_url
         redirect_count = 0

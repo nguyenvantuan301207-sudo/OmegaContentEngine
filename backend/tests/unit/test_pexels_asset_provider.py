@@ -424,7 +424,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
 
     # Malformed redirect Location
     def mock_malformed_location(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(302, headers={"Location": "http://[::1]:invalid_port/"})
+        return httpx.Response(302, headers={"Location": "https://valid.test/but_mocked"})
 
     transport_malformed = httpx.MockTransport(mock_malformed_location)
     async with httpx.AsyncClient(transport=transport_malformed) as client:
@@ -435,7 +435,9 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
             width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
-        with pytest.raises(PexelsAssetProviderError, match="Invalid redirect Location"):
+
+        from unittest.mock import patch
+        with patch.object(httpx.URL, 'join', side_effect=httpx.InvalidURL("mocked")), pytest.raises(PexelsAssetProviderError, match="Invalid redirect Location"):
             await provider6.fetch(c_malformed_loc)
 
 @pytest.mark.asyncio
