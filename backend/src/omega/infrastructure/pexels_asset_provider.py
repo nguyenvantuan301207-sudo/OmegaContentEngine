@@ -246,22 +246,31 @@ class PexelsAssetProvider:
         client = await self._get_client()
         buffer = bytearray()
 
+        try:
+            _ = httpx.URL(candidate.source_url)
+        except httpx.InvalidURL as e:
+            raise PexelsAssetProviderError("Invalid candidate source URL") from e
+
         current_url = candidate.source_url
         redirect_count = 0
         max_redirects = 5
 
         while True:
-            if redirect_count > max_redirects:
-                raise PexelsAssetProviderError("Redirect limit exceeded")
-
             try:
                 async with client.stream("GET", current_url, follow_redirects=False, headers={"User-Agent": "Omega/1.0"}) as response:
                     if response.status_code in (301, 302, 303, 307, 308):
+                        if redirect_count >= max_redirects:
+                            raise PexelsAssetProviderError("Redirect limit exceeded")
+
                         location = response.headers.get("Location")
                         if not location:
                             raise PexelsAssetProviderError("Missing Location in redirect")
 
-                        next_url = response.url.join(location)
+                        try:
+                            next_url = response.url.join(location)
+                        except httpx.InvalidURL as e:
+                            raise PexelsAssetProviderError("Invalid redirect Location") from e
+
                         if next_url.scheme != "https":
                             raise PexelsAssetProviderError("Redirected to non-https URL")
 

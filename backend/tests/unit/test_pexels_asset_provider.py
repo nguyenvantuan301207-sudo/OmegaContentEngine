@@ -362,7 +362,9 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
         assert requested_urls_safe[1] == "https://two.test/file"
 
     # Redirect limit
+    requested_urls_loop = []
     def mock_redirect_loop(request: httpx.Request) -> httpx.Response:
+        requested_urls_loop.append(str(request.url))
         return httpx.Response(302, headers={"Location": "https://loop.test/file"})
 
     transport_loop = httpx.MockTransport(mock_redirect_loop)
@@ -376,6 +378,65 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
         )
         with pytest.raises(PexelsAssetProviderError, match="Redirect limit exceeded"):
             await provider4.fetch(c_loop)
+
+        assert len(requested_urls_loop) == 6
+
+    # Exactly five redirect success
+    requested_urls_exact = []
+    def mock_exact_five_redirects(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        requested_urls_exact.append(url)
+        if url == "https://start.test/file":
+            return httpx.Response(302, headers={"Location": "https://hop1.test/file"})
+        if url == "https://hop1.test/file":
+            return httpx.Response(302, headers={"Location": "https://hop2.test/file"})
+        if url == "https://hop2.test/file":
+            return httpx.Response(302, headers={"Location": "https://hop3.test/file"})
+        if url == "https://hop3.test/file":
+            return httpx.Response(302, headers={"Location": "https://hop4.test/file"})
+        if url == "https://hop4.test/file":
+            return httpx.Response(302, headers={"Location": "https://final.test/file"})
+
+        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/jpeg", "Content-Length": "4"})
+
+    transport_exact = httpx.MockTransport(mock_exact_five_redirects)
+    async with httpx.AsyncClient(transport=transport_exact) as client:
+        provider_exact = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        c_exact = VisualAssetCandidate(
+            provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+            source_url="https://start.test/file", source_page_url=None, mime_type="image/jpeg",
+            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            attribution_text=None, metadata={"search_query": "q"}
+        )
+        await provider_exact.fetch(c_exact)
+        assert len(requested_urls_exact) == 6
+
+    # Malformed source URL
+    provider5 = PexelsAssetProvider("test-api-key", dummy_cache)
+    c_malformed_source = VisualAssetCandidate(
+        provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+        source_url="http://[::1]:invalid_port/", source_page_url=None, mime_type="image/jpeg",
+        width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+        attribution_text=None, metadata={"search_query": "q"}
+    )
+    with pytest.raises(PexelsAssetProviderError, match="Invalid candidate source URL"):
+        await provider5.fetch(c_malformed_source)
+
+    # Malformed redirect Location
+    def mock_malformed_location(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "http://[::1]:invalid_port/"})
+
+    transport_malformed = httpx.MockTransport(mock_malformed_location)
+    async with httpx.AsyncClient(transport=transport_malformed) as client:
+        provider6 = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        c_malformed_loc = VisualAssetCandidate(
+            provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
+            source_url="https://test/file", source_page_url=None, mime_type="image/jpeg",
+            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            attribution_text=None, metadata={"search_query": "q"}
+        )
+        with pytest.raises(PexelsAssetProviderError, match="Invalid redirect Location"):
+            await provider6.fetch(c_malformed_loc)
 
 @pytest.mark.asyncio
 async def test_mime_validation(dummy_cache: VisualAssetCache):
