@@ -173,3 +173,75 @@ def test_cache_portability(tmp_path: Path):
     assert isinstance(asset2.local_path, Path)
     assert str(tmp_path) in str(asset2.local_path)
     assert asset2.local_path.exists()
+
+def test_store_input_validation(tmp_path: Path):
+    cache = VisualAssetCache(tmp_path)
+    content = b"data"
+
+    for invalid_val in ["", "   "]:
+        with pytest.raises(VisualAssetCacheError, match="Provider cannot be empty"):
+            cache.store(content, VisualAssetKind.IMAGE, invalid_val, "image/png", "query")
+
+        with pytest.raises(VisualAssetCacheError, match="Query cannot be empty"):
+            cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", invalid_val)
+
+def test_first_store_replace_failure_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import os
+    cache = VisualAssetCache(tmp_path)
+    content = b"rollback_test"
+    expected_hash = hashlib.sha256(content).hexdigest()
+
+    original_replace = os.replace
+
+    replace_calls = 0
+    def mock_replace(src, dst):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise OSError("Simulated second replace failure")
+        original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", mock_replace)
+
+    with pytest.raises(VisualAssetCacheError, match="Failed to replace final cache files"):
+        cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "query")
+
+    assert replace_calls == 2
+
+    target_dir = tmp_path / "sha256" / expected_hash[:2] / expected_hash
+    if target_dir.exists():
+        assert not (target_dir / "asset.bin").exists()
+        assert not (target_dir / "metadata.json").exists()
+
+    assert cache.get(expected_hash) is None
+
+def test_existing_entry_replace_failure_preservation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    import os
+    cache = VisualAssetCache(tmp_path)
+    content = b"existing_test"
+    expected_hash = hashlib.sha256(content).hexdigest()
+
+    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "query")
+
+    assert cache.get(expected_hash) is not None
+
+    original_replace = os.replace
+
+    replace_calls = 0
+    def mock_replace(src, dst):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 2:
+            raise OSError("Simulated second replace failure")
+        original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", mock_replace)
+
+    with pytest.raises(VisualAssetCacheError, match="Failed to replace final cache files"):
+        cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "query2")
+
+    assert replace_calls == 2
+
+    retrieved = cache.get(expected_hash)
+    assert retrieved is not None
+    assert retrieved.query == "query"

@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import json
 import os
@@ -51,6 +52,14 @@ class VisualAssetCache:
         if not content:
             raise VisualAssetCacheError("Content cannot be empty")
 
+        if not provider or not provider.strip():
+            raise VisualAssetCacheError("Provider cannot be empty")
+        provider = provider.strip()
+
+        if not query or not query.strip():
+            raise VisualAssetCacheError("Query cannot be empty")
+        query = query.strip()
+
         if mime_type not in self.ALLOWED_MIME_TYPES:
             raise VisualAssetCacheError(f"Unsupported MIME type: {mime_type}")
 
@@ -102,14 +111,29 @@ class VisualAssetCache:
                 os.remove(temp_meta_path)
             raise VisualAssetCacheError(f"Failed to write metadata temp file: {e}") from e
 
+        asset_existed_before = asset_file.exists()
+        metadata_existed_before = meta_file.exists()
+        complete_entry_existed = asset_existed_before and metadata_existed_before
+
+        asset_replaced = False
         try:
             os.replace(temp_path, asset_file)
+            asset_replaced = True
             os.replace(temp_meta_path, meta_file)
         except Exception as e:
             if os.path.exists(temp_path):
                 os.remove(temp_path)
             if os.path.exists(temp_meta_path):
                 os.remove(temp_meta_path)
+
+            if not complete_entry_existed:
+                if asset_replaced and asset_file.exists():
+                    with contextlib.suppress(OSError):
+                        os.remove(asset_file)
+                if meta_file.exists():
+                    with contextlib.suppress(OSError):
+                        os.remove(meta_file)
+
             raise VisualAssetCacheError(f"Failed to replace final cache files: {e}") from e
 
         meta_dict["local_path"] = asset_file.absolute()
