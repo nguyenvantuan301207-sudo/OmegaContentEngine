@@ -92,6 +92,8 @@ class VisualDomMotionRuntime:
             style = self._profile_code_type_on(time_seconds, duration_seconds)
         elif motion_profile == "image_explainer":
             style = self._profile_image_explainer(time_seconds, duration_seconds)
+        elif motion_profile == "broll_overlay":
+            style = self._profile_broll_overlay(time_seconds, duration_seconds)
         else:
             raise VisualDomMotionError(f"Unknown motion profile: {motion_profile}")
 
@@ -284,6 +286,45 @@ class VisualDomMotionRuntime:
         style.append(f"""
         #image-frame {{
             transform: scale({self._fmt_float(frame_scale)});
+        }}
+        """)
+
+        return "".join(style)
+
+    def _profile_broll_overlay(self, t: float, d: float) -> str:
+        p_title = self._ease_out(self._progress(t, 0.1, 0.8, d))
+        p_body = self._ease_out(self._progress(t, 0.35, 1.05, d))
+        p_caption = self._ease_out(self._progress(t, 0.65, 1.35, d))
+        p_scrim = self._progress(t, 0.0, min(0.6, d), d)
+
+        style = []
+        style.append(f"""
+        #broll-scrim {{
+            opacity: {self._fmt_float(p_scrim)};
+        }}
+        """)
+
+        trans_title = 12.0 * (1.0 - p_title)
+        style.append(f"""
+        #broll-title {{
+            opacity: {self._fmt_float(p_title)};
+            transform: translate3d(0, {self._fmt_float(trans_title)}px, 0);
+        }}
+        """)
+
+        trans_body = 16.0 * (1.0 - p_body)
+        style.append(f"""
+        #broll-body {{
+            opacity: {self._fmt_float(p_body)};
+            transform: translate3d(0, {self._fmt_float(trans_body)}px, 0);
+        }}
+        """)
+
+        trans_caption = 12.0 * (1.0 - p_caption)
+        style.append(f"""
+        #broll-caption {{
+            opacity: {self._fmt_float(p_caption)};
+            transform: translate3d(0, {self._fmt_float(trans_caption)}px, 0);
         }}
         """)
 

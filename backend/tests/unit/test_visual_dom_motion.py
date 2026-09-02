@@ -223,3 +223,35 @@ def test_style_injection_hardening(hero_doc):
     )
     with pytest.raises(VisualDomMotionError, match="missing </head>"):
         runtime.render_frame(bad_doc3, "title_reveal", 2.5, 5.0)
+
+
+def test_broll_overlay_profile_motion():
+    runtime = VisualDomMotionRuntime()
+    doc = RenderedTemplateDocument(
+        scene_index=1,
+        template_id=VisualTemplateId.BROLL_EXPLAINER,
+        width=1920,
+        height=1080,
+        html="""<!doctype html><html><head></head><body>
+        <div id="broll-scrim"></div>
+        <div id="broll-title">Title</div>
+        <div id="broll-body">Body</div>
+        <div id="broll-caption">Caption</div>
+        </body></html>""",
+        semantic_element_ids=("broll-scrim", "broll-title", "broll-body", "broll-caption"),
+        content_sha256="initial",
+    )
+
+    f1 = runtime.render_frame(doc, "broll_overlay", 0.0, 5.0)
+    assert "omega-dom-motion-state" in f1.html
+    assert "#broll-scrim" in f1.html
+    assert "#broll-title" in f1.html
+    assert "#broll-body" in f1.html
+    assert "#broll-caption" in f1.html
+
+    f2 = runtime.render_frame(doc, "broll_overlay", 2.5, 5.0)
+    assert f1.content_sha256 != f2.content_sha256
+
+    # Determinism
+    f2_again = runtime.render_frame(doc, "broll_overlay", 2.5, 5.0)
+    assert f2.content_sha256 == f2_again.content_sha256

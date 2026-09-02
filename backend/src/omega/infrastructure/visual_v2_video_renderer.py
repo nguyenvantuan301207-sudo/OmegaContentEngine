@@ -7,6 +7,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from omega.application.visual_asset_binding import BoundBrollAsset
 from omega.application.visual_direction import VisualTemplateId
 from omega.application.visual_dom_motion import VisualDomMotionError, VisualDomMotionRuntime
 from omega.application.visual_template_renderer import RenderedTemplateDocument
@@ -46,7 +47,13 @@ class VisualV2VideoRenderer:
         browser_runtime: BrowserCaptureRuntime,
         fps: int = 12,
         timeout_seconds: int = 120,
+        broll_asset: BoundBrollAsset | None = None,
     ) -> VisualV2VideoRenderResult:
+        if document.template_id == VisualTemplateId.BROLL_EXPLAINER:
+            if broll_asset is None:
+                raise VisualV2VideoRenderError("broll_asset is required for BROLL_EXPLAINER")
+        elif broll_asset is not None:
+            raise VisualV2VideoRenderError("broll_asset is not allowed for non-BROLL templates")
 
         if duration_seconds <= 0:
             raise VisualV2VideoRenderError("duration_seconds must be > 0.")
@@ -63,6 +70,7 @@ class VisualV2VideoRenderer:
             raise VisualV2VideoRenderError(f"Failed to create output directory: {e}") from e
 
         frame_count = max(1, math.ceil(duration_seconds * fps))
+        is_broll = document.template_id == VisualTemplateId.BROLL_EXPLAINER
 
         with tempfile.TemporaryDirectory() as temp_dir:
             for frame_index in range(frame_count):
@@ -79,7 +87,10 @@ class VisualV2VideoRenderer:
                     raise VisualV2VideoRenderError(f"VisualDomMotionError: {e}") from e
 
                 try:
-                    frame = await browser_runtime.capture(frame_doc)
+                    frame = await browser_runtime.capture(
+                        frame_doc,
+                        transparent_background=is_broll,
+                    )
                 except BrowserCaptureError as e:
                     raise VisualV2VideoRenderError(f"BrowserCaptureError: {e}") from e
                 except Exception as e:
@@ -107,20 +118,53 @@ class VisualV2VideoRenderer:
                 except Exception as e:
                     raise VisualV2VideoRenderError(f"Failed to validate frame {frame_index}: {e}") from e
 
-            ffmpeg_cmd = [
-                "ffmpeg",
-                "-y",
-                "-framerate", str(fps),
-                "-i", os.path.join(temp_dir, "frame_%05d.png"),
-                "-c:v", "libx264",
-                "-pix_fmt", "yuv420p",
-                "-r", str(fps),
-                "-preset", "veryfast",
-                "-crf", "23",
-                "-movflags", "+faststart",
-                "-an",
-                str(output_path),
-            ]
+            if is_broll:
+                assert broll_asset is not None
+                filter_complex = (
+                    f"[0:v]setpts=PTS-STARTPTS,"
+                    f"scale=1920:1080:force_original_aspect_ratio=increase,"
+                    f"crop=1920:1080,"
+                    f"fps={fps},"
+                    f"trim=duration={duration_seconds},"
+                    f"setpts=PTS-STARTPTS[bg];"
+                    f"[1:v]format=rgba,"
+                    f"setpts=PTS-STARTPTS[overlay];"
+                    f"[bg][overlay]overlay=0:0:shortest=1[v]"
+                )
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-stream_loop", "-1",
+                    "-i", str(broll_asset.local_path),
+                    "-framerate", str(fps),
+                    "-i", os.path.join(temp_dir, "frame_%05d.png"),
+                    "-filter_complex", filter_complex,
+                    "-map", "[v]",
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(fps),
+                    "-t", str(duration_seconds),
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    "-movflags", "+faststart",
+                    "-an",
+                    str(output_path),
+                ]
+            else:
+                ffmpeg_cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-framerate", str(fps),
+                    "-i", os.path.join(temp_dir, "frame_%05d.png"),
+                    "-c:v", "libx264",
+                    "-pix_fmt", "yuv420p",
+                    "-r", str(fps),
+                    "-preset", "veryfast",
+                    "-crf", "23",
+                    "-movflags", "+faststart",
+                    "-an",
+                    str(output_path),
+                ]
 
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -140,6 +184,7 @@ class VisualV2VideoRenderer:
 
             if process.returncode != 0:
                 raise VisualV2VideoRenderError(f"FFmpeg failed with exit code {process.returncode}:\n{stderr.decode(errors='ignore')}")
+
 
         try:
             if not output_path.exists():

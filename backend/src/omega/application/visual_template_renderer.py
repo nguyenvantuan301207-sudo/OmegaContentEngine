@@ -6,11 +6,16 @@ from pydantic import BaseModel, ConfigDict
 
 from omega.application.scene_template_registry import SceneTemplateRegistry, TemplateInputKey
 from omega.application.template_payload_resolver import TemplatePayload
-from omega.application.visual_asset_binding import BoundVisualAsset
+from omega.application.visual_asset_binding import (
+    BoundBrollAsset,
+    BoundVisualAsset,
+    RenderBoundAsset,
+)
 from omega.application.visual_direction import VisualAssetKind, VisualTemplateId
 
 
 class RenderedTemplateDocument(BaseModel):
+
     model_config = ConfigDict(frozen=True)
 
     scene_index: int
@@ -33,7 +38,7 @@ class VisualTemplateRenderer:
     def render(
         self,
         payload: TemplatePayload,
-        assets: tuple[BoundVisualAsset, ...] = (),
+        assets: tuple[RenderBoundAsset, ...] = (),
     ) -> RenderedTemplateDocument:
         if payload.template_id not in (
             VisualTemplateId.HERO_TITLE,
@@ -41,10 +46,15 @@ class VisualTemplateRenderer:
             VisualTemplateId.STATISTIC_HERO,
             VisualTemplateId.CODE_EDITOR,
             VisualTemplateId.IMAGE_EXPLAINER,
+            VisualTemplateId.BROLL_EXPLAINER,
         ):
             raise VisualTemplateRenderError(f"Unsupported template_id {payload.template_id}")
 
-        if payload.template_id != VisualTemplateId.IMAGE_EXPLAINER and assets:
+        # Media templates check
+        if payload.template_id not in (
+            VisualTemplateId.IMAGE_EXPLAINER,
+            VisualTemplateId.BROLL_EXPLAINER,
+        ) and assets:
             raise VisualTemplateRenderError("Unexpected bound assets for template")
 
         definition = self.registry.get(payload.template_id)
@@ -63,6 +73,7 @@ class VisualTemplateRenderer:
 
         semantic_ids: list[str] = []
         html_content = ""
+        transparent_bg = False
 
         if payload.template_id == VisualTemplateId.HERO_TITLE:
             html_content, semantic_ids = self._render_hero_title(payload)
@@ -74,9 +85,12 @@ class VisualTemplateRenderer:
             html_content, semantic_ids = self._render_code_editor(payload)
         elif payload.template_id == VisualTemplateId.IMAGE_EXPLAINER:
             html_content, semantic_ids = self._render_image_explainer(payload, assets)
+        elif payload.template_id == VisualTemplateId.BROLL_EXPLAINER:
+            html_content, semantic_ids = self._render_broll_explainer(payload, assets)
+            transparent_bg = True
 
         # Wrap in full HTML document
-        final_html = self._wrap_in_document(html_content)
+        final_html = self._wrap_in_document(html_content, transparent_background=transparent_bg)
 
         sha256 = hashlib.sha256(final_html.encode("utf-8")).hexdigest()
         return RenderedTemplateDocument(
@@ -96,13 +110,13 @@ class VisualTemplateRenderer:
             return False
         return not (isinstance(val, (list, tuple, dict, set)) and len(val) == 0)
 
-    def _wrap_in_document(self, body_content: str) -> str:
+    def _wrap_in_document(self, body_content: str, transparent_background: bool = False) -> str:
         return f"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-{self._get_base_css()}
+{self._get_base_css(transparent_background=transparent_background)}
 </style>
 </head>
 <body>
@@ -112,7 +126,41 @@ class VisualTemplateRenderer:
 </body>
 </html>"""
 
-    def _get_base_css(self) -> str:
+    def _get_base_css(self, transparent_background: bool = False) -> str:
+        if transparent_background:
+            return """
+        :root {
+            --bg: transparent;
+            --text-primary: #F1F5F9;
+            --text-secondary: #94A3B8;
+            --accent: #3B82F6;
+            --surface: rgba(30, 41, 59, 0.7);
+            --surface-border: rgba(255, 255, 255, 0.1);
+        }
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 1920px;
+            height: 1080px;
+            background-color: transparent;
+            color: var(--text-primary);
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            overflow: hidden;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .scene-root {
+            width: 1920px;
+            height: 1080px;
+            position: relative;
+            padding: 90px 120px;
+            box-sizing: border-box;
+            background: transparent;
+            display: flex;
+        }
+        """
+
         return """
         :root {
             --bg: #0B0F19;
@@ -192,6 +240,7 @@ class VisualTemplateRenderer:
         return content, semantic_ids
 
     def _render_flow_diagram(self, payload: TemplatePayload) -> tuple[str, list[str]]:
+
         nodes = payload.inputs[TemplateInputKey.NODES]
         title = payload.inputs.get(TemplateInputKey.TITLE)
 
@@ -329,6 +378,7 @@ class VisualTemplateRenderer:
         esc_code = html.escape(raw_code)
 
         lang_html = ""
+
         if lang:
             esc_lang = html.escape(lang)
             lang_html = f'<div class="code-badge">{esc_lang}</div>'
@@ -368,7 +418,7 @@ class VisualTemplateRenderer:
     def _render_image_explainer(
         self,
         payload: TemplatePayload,
-        assets: tuple[BoundVisualAsset, ...],
+        assets: tuple[RenderBoundAsset, ...],
     ) -> tuple[str, list[str]]:
         if len(assets) == 0:
             raise VisualTemplateRenderError("Missing required IMAGE asset for IMAGE_EXPLAINER")
@@ -376,7 +426,7 @@ class VisualTemplateRenderer:
             raise VisualTemplateRenderError("Multiple IMAGE assets provided for IMAGE_EXPLAINER")
 
         bound_asset = assets[0]
-        if bound_asset.kind != VisualAssetKind.IMAGE:
+        if not isinstance(bound_asset, BoundVisualAsset) or bound_asset.kind != VisualAssetKind.IMAGE:
             raise VisualTemplateRenderError("Invalid asset kind for IMAGE_EXPLAINER")
 
         allowed_mimes = ("image/jpeg", "image/png", "image/webp")
@@ -429,6 +479,109 @@ class VisualTemplateRenderer:
                 <div id="image-frame" data-asset-kind="IMAGE" data-motion-role="image-frame" class="image-frame">
                     {img_html}
                 </div>
+            </div>
+        </div>
+        """
+        return content, semantic_ids
+
+    def _render_broll_explainer(
+        self,
+        payload: TemplatePayload,
+        assets: tuple[RenderBoundAsset, ...],
+    ) -> tuple[str, list[str]]:
+        if len(assets) == 0:
+            raise VisualTemplateRenderError("Missing required BROLL asset for BROLL_EXPLAINER")
+        if len(assets) > 1:
+            raise VisualTemplateRenderError("Multiple BROLL assets provided for BROLL_EXPLAINER")
+
+        bound_asset = assets[0]
+        if not isinstance(bound_asset, BoundBrollAsset) or bound_asset.kind != VisualAssetKind.BROLL:
+            raise VisualTemplateRenderError("Invalid BROLL asset for BROLL_EXPLAINER")
+
+        if bound_asset.mime_type != "video/mp4":
+            raise VisualTemplateRenderError("Invalid BROLL asset for BROLL_EXPLAINER")
+
+        raw_body = payload.inputs[TemplateInputKey.BODY]
+        body = html.escape(raw_body)
+        title = payload.inputs.get(TemplateInputKey.TITLE)
+        caption = payload.inputs.get(TemplateInputKey.CAPTION)
+
+        semantic_ids = ["scene-root", "broll-scrim", "broll-body"]
+
+        title_html = ""
+        if title:
+            esc_title = html.escape(title)
+            title_html = f'<div id="broll-title" data-motion-role="broll-title" class="broll-title">{esc_title}</div>'
+            semantic_ids.append("broll-title")
+
+        caption_html = ""
+        if caption:
+            esc_caption = html.escape(caption)
+            caption_html = f'<div id="broll-caption" data-motion-role="broll-caption" class="broll-caption">{esc_caption}</div>'
+            semantic_ids.append("broll-caption")
+
+        content = f"""
+        <style>
+        .broll-container {{
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: flex-end;
+            padding: 0;
+            box-sizing: border-box;
+        }}
+        .broll-scrim {{
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, rgba(11, 15, 25, 0.85) 0%, rgba(11, 15, 25, 0.4) 50%, transparent 100%);
+            pointer-events: none;
+            z-index: 1;
+        }}
+        .broll-content {{
+            position: relative;
+            z-index: 2;
+            max-width: 1100px;
+            margin-bottom: 40px;
+            margin-left: 20px;
+        }}
+        .broll-title {{
+            font-size: 36px;
+            font-weight: 700;
+            color: var(--accent);
+            margin-bottom: 24px;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+        }}
+        .broll-body {{
+            font-size: 52px;
+            font-weight: 600;
+            line-height: 1.3;
+            color: var(--text-primary);
+            margin-bottom: 24px;
+            word-wrap: break-word;
+            text-shadow: 0 4px 12px rgba(0,0,0,0.6);
+        }}
+        .broll-caption {{
+            font-size: 26px;
+            color: var(--text-secondary);
+            border-left: 4px solid var(--accent);
+            padding-left: 16px;
+            font-style: italic;
+            word-wrap: break-word;
+            text-shadow: 0 2px 8px rgba(0,0,0,0.6);
+        }}
+        </style>
+        <div class="broll-container">
+            <div id="broll-scrim" data-motion-role="broll-scrim" class="broll-scrim"></div>
+            <div class="broll-content">
+                {title_html}
+                <div id="broll-body" data-motion-role="broll-body" class="broll-body">{body}</div>
+                {caption_html}
             </div>
         </div>
         """

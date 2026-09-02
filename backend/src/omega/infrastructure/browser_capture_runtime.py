@@ -90,15 +90,25 @@ class BrowserCaptureRuntime:
             with contextlib.suppress(Exception):
                 await self._playwright_ctx_mgr.__aexit__(None, None, None)
 
-    async def capture(self, document: RenderedTemplateDocument) -> BrowserCapturedFrame:
+    async def capture(
+        self,
+        document: RenderedTemplateDocument,
+        transparent_background: bool = False,
+    ) -> BrowserCapturedFrame:
         if not self._started or not self._page:
             raise BrowserCaptureError("Browser runtime not started.")
 
         try:
             await self._page.set_content(document.html)
-            png_bytes = await self._page.screenshot(
-                type="png", full_page=False, animations="disabled"
-            )
+            screenshot_kwargs = {
+                "type": "png",
+                "full_page": False,
+                "animations": "disabled",
+            }
+            if transparent_background:
+                screenshot_kwargs["omit_background"] = True
+
+            png_bytes = await self._page.screenshot(**screenshot_kwargs)
         except Exception as e:
             raise BrowserCaptureError(f"Failed to capture document: {e}") from e
 

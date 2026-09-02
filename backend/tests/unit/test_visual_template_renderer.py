@@ -1,8 +1,10 @@
+from pathlib import Path
+
 import pytest
 
 from omega.application.scene_template_registry import TemplateInputKey
 from omega.application.template_payload_resolver import TemplatePayload
-from omega.application.visual_asset_binding import BoundVisualAsset
+from omega.application.visual_asset_binding import BoundBrollAsset, BoundVisualAsset
 from omega.application.visual_direction import VisualAssetKind, VisualTemplateId
 from omega.application.visual_template_renderer import (
     VisualTemplateRenderer,
@@ -11,6 +13,7 @@ from omega.application.visual_template_renderer import (
 
 
 @pytest.fixture
+
 def renderer():
     return VisualTemplateRenderer()
 
@@ -55,9 +58,10 @@ def test_determinism_and_mutation(renderer):
     assert payload.model_dump() == dump1
 
 def test_unsupported_template_fails(renderer):
-    payload = create_payload(VisualTemplateId.BROLL_EXPLAINER, {TemplateInputKey.BODY: "Hello"})
+    payload = create_payload(VisualTemplateId.SCREENSHOT_FOCUS, {TemplateInputKey.BODY: "Hello"})
     with pytest.raises(VisualTemplateRenderError, match="Unsupported template_id"):
         renderer.render(payload)
+
 
 def test_missing_required_input_fails(renderer):
     payload = create_payload(VisualTemplateId.HERO_TITLE, {})
@@ -371,3 +375,88 @@ def test_renderer_cannot_receive_remotely_backed_asset(renderer):
     # Proves remote URL cannot bypass to renderer
     with pytest.raises(ValueError, match=r"data_uri must begin with exact"):
         make_bound_asset(data_uri="https://attacker.com/malicious.jpg")
+
+
+def make_bound_broll(
+    path: Path = Path("/tmp/test.mp4"),
+    duration_seconds: float = 10.0,
+    width: int = 1920,
+    height: int = 1080,
+    kind: VisualAssetKind = VisualAssetKind.BROLL,
+    mime_type: str = "video/mp4",
+):
+    return BoundBrollAsset(
+        asset_id="broll_1",
+        kind=kind,
+        mime_type=mime_type,
+        content_sha256="0" * 64,
+        local_path=path,
+        duration_seconds=duration_seconds,
+        width=width,
+        height=height,
+    )
+
+
+def test_broll_explainer_render_success(renderer):
+    payload = create_payload(VisualTemplateId.BROLL_EXPLAINER, {
+        TemplateInputKey.TITLE: "Inside a Modern Data Center",
+        TemplateInputKey.BODY: "Rows of server racks concentrate compute, storage, networking.",
+        TemplateInputKey.CAPTION: "Real Pexels media rendered locally by OMEGA.",
+    })
+    broll = make_bound_broll()
+    doc = renderer.render(payload, assets=(broll,))
+
+    assert doc.template_id == VisualTemplateId.BROLL_EXPLAINER
+    assert doc.width == 1920
+    assert doc.height == 1080
+    assert set(doc.semantic_element_ids) == {
+        "scene-root",
+        "broll-scrim",
+        "broll-title",
+        "broll-body",
+        "broll-caption",
+    }
+    # Transparent background check
+    assert "background-color: transparent;" in doc.html
+    # No video tag or file/http reference
+    assert "<video" not in doc.html
+    assert "file://" not in doc.html
+    assert "http://" not in doc.html
+    assert "https://" not in doc.html
+    assert str(broll.local_path) not in doc.html
+
+
+def test_broll_explainer_missing_broll_fails(renderer):
+    payload = create_payload(VisualTemplateId.BROLL_EXPLAINER, {
+        TemplateInputKey.BODY: "Some body text",
+    })
+    with pytest.raises(
+        VisualTemplateRenderError,
+        match=r"^Missing required BROLL asset for BROLL_EXPLAINER$",
+    ):
+        renderer.render(payload, assets=())
+
+
+def test_broll_explainer_multiple_brolls_fail(renderer):
+    payload = create_payload(VisualTemplateId.BROLL_EXPLAINER, {
+        TemplateInputKey.BODY: "Some body text",
+    })
+    b1 = make_bound_broll()
+    b2 = make_bound_broll()
+    with pytest.raises(
+        VisualTemplateRenderError,
+        match=r"^Multiple BROLL assets provided for BROLL_EXPLAINER$",
+    ):
+        renderer.render(payload, assets=(b1, b2))
+
+
+def test_broll_explainer_wrong_asset_binding_fails(renderer):
+    payload = create_payload(VisualTemplateId.BROLL_EXPLAINER, {
+        TemplateInputKey.BODY: "Some body text",
+    })
+    img_asset = make_bound_asset()
+    with pytest.raises(
+        VisualTemplateRenderError,
+        match=r"^Invalid BROLL asset for BROLL_EXPLAINER$",
+    ):
+        renderer.render(payload, assets=(img_asset,))

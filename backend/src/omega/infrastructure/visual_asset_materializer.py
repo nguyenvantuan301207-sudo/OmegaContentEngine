@@ -2,12 +2,13 @@ import base64
 import hashlib
 import re
 
-from omega.application.visual_asset_binding import BoundVisualAsset
+from omega.application.visual_asset_binding import BoundBrollAsset, BoundVisualAsset
 from omega.application.visual_asset_engine import ResolvedVisualAsset
 from omega.application.visual_direction import VisualAssetKind
 
 _SHA256_REGEX = re.compile(r"^[0-9a-f]{64}$")
 _MAX_IMAGE_SIZE = 25 * 1024 * 1024  # 25 MiB ceiling matching Pexels
+_MAX_BROLL_SIZE = 150 * 1024 * 1024  # 150 MiB ceiling matching Pexels
 
 
 class VisualAssetMaterializerError(Exception):
@@ -87,4 +88,79 @@ class VisualAssetMaterializer:
             data_uri=data_uri,
             width=resolved.width,
             height=resolved.height,
+        )
+
+    @staticmethod
+    def materialize_broll(resolved: ResolvedVisualAsset) -> BoundBrollAsset:
+        # 1. Kind validation
+        if resolved.kind != VisualAssetKind.BROLL:
+            raise VisualAssetMaterializerError("Unsupported asset kind")
+
+        # 2. MIME validation
+        if resolved.mime_type != "video/mp4":
+            raise VisualAssetMaterializerError("Unsupported video MIME type")
+
+        # 3. Invariant validation
+        if resolved.duration_seconds is None or resolved.duration_seconds <= 0:
+            raise VisualAssetMaterializerError("Invalid video duration")
+        if resolved.width is None or resolved.width <= 0:
+            raise VisualAssetMaterializerError("Invalid video width")
+        if resolved.height is None or resolved.height <= 0:
+            raise VisualAssetMaterializerError("Invalid video height")
+
+        # 4. Content SHA256 string validation
+        if not resolved.content_sha256 or not _SHA256_REGEX.fullmatch(resolved.content_sha256):
+            raise VisualAssetMaterializerError("Invalid content_sha256 format")
+
+        # 5. File existence & regular file check
+        path = resolved.local_path
+        try:
+            st = path.stat()
+        except (OSError, FileNotFoundError) as e:
+            raise VisualAssetMaterializerError(f"Video file cannot be accessed: {e}") from e
+
+        try:
+            is_file = path.is_file()
+        except OSError as e:
+            raise VisualAssetMaterializerError(f"Video path is not a file: {e}") from e
+
+        if not is_file:
+            raise VisualAssetMaterializerError("Video path is not a regular file")
+
+        # 6. Size gate using stat
+        size = st.st_size
+        if size <= 0:
+            raise VisualAssetMaterializerError("Video file is empty")
+        if size > _MAX_BROLL_SIZE:
+            raise VisualAssetMaterializerError(f"Video file size {size} exceeds 150 MiB ceiling")
+
+        # 7. Streaming SHA & header check
+        sha256_hasher = hashlib.sha256()
+        header_bytes = b""
+        try:
+            with open(path, "rb") as f:
+                header_bytes = f.read(4096)
+                sha256_hasher.update(header_bytes)
+                while chunk := f.read(1024 * 1024):
+                    sha256_hasher.update(chunk)
+        except OSError as e:
+            raise VisualAssetMaterializerError(f"Failed to read video file: {e}") from e
+
+        actual_hash = sha256_hasher.hexdigest()
+        if actual_hash != resolved.content_sha256:
+            raise VisualAssetMaterializerError("Video SHA256 mismatch")
+
+        # 8. Container sanity: b"ftyp" present in the header (<= 4096 bytes)
+        if b"ftyp" not in header_bytes:
+            raise VisualAssetMaterializerError("Invalid MP4 container: ftyp box missing")
+
+        return BoundBrollAsset(
+            asset_id=resolved.asset_id,
+            kind=resolved.kind,
+            mime_type=resolved.mime_type,
+            content_sha256=resolved.content_sha256,
+            local_path=path.resolve(),
+            duration_seconds=float(resolved.duration_seconds),
+            width=int(resolved.width),
+            height=int(resolved.height),
         )
