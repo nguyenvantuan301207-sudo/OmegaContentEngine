@@ -45,6 +45,14 @@ def test_duplicate_definitions_fail():
         SceneTemplateRegistry(definitions=duplicate_defs)
 
 
+def test_all_returns_instance_definitions(registry):
+    reversed_defs = tuple(reversed(registry.all()))
+    custom = SceneTemplateRegistry(definitions=reversed_defs)
+
+    assert custom.all()[0].template_id == reversed_defs[0].template_id
+    assert custom.get(custom.all()[0].template_id) == custom.all()[0]
+
+
 def test_aspect_ratios_and_fallback(registry):
     for d in registry.all():
         assert d.supported_aspect_ratios == (TemplateAspectRatio.LANDSCAPE_16_9,)

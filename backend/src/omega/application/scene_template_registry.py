@@ -260,7 +260,8 @@ class SceneTemplateRegistry:
             duplicates = [k for k, v in Counter(ids).items() if v > 1]
             raise SceneTemplateRegistryError(f"Duplicate template definitions detected for IDs: {duplicates}")
 
-        self._definitions = {d.template_id: d for d in definitions}
+        self._ordered_definitions = tuple(definitions)
+        self._definitions = {d.template_id: d for d in self._ordered_definitions}
 
         # Verify completeness statically
         all_ids = set(VisualTemplateId)
@@ -275,7 +276,7 @@ class SceneTemplateRegistry:
         return self._definitions[template_id]
 
     def all(self) -> tuple[SceneTemplateDefinition, ...]:
-        return _DEFINITIONS
+        return self._ordered_definitions
 
     def validate_direction(self, direction: VisualDirection) -> SceneTemplateDefinition:
         if direction.template_id is None:
