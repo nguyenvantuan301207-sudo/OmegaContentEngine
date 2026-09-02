@@ -13,6 +13,9 @@ COPY . .
 # Install Python dependencies and package in editable mode
 RUN pip install --no-cache-dir -e ".[dev]"
 
+# Install playwright browsers
+RUN python -m playwright install --with-deps chromium
+
 # Ensure entrypoint is executable
 RUN chmod +x /app/entrypoint.sh
 
