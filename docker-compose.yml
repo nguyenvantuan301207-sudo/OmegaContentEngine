@@ -56,6 +56,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/publisher/accounts/youtube/callback}
+      PEXELS_API_KEY: ${PEXELS_API_KEY:-}
       SERVICE_NAME: omega-api
     depends_on:
       omega-postgres:
@@ -91,6 +92,7 @@ services:
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/publisher/accounts/youtube/callback}
+      PEXELS_API_KEY: ${PEXELS_API_KEY:-}
       SERVICE_NAME: omega-worker
     depends_on:
       omega-postgres:
