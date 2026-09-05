@@ -22,6 +22,10 @@ from omega.application.storyboard_engine import (
     StoryboardScene,
     VisualStrategy,
 )
+from omega.application.subtitle_engine import (
+    generate_karaoke_ass_content,
+    generate_karaoke_cues,
+)
 from omega.application.template_payload_resolver import TemplatePayloadResolver
 from omega.application.visual_asset_binding import BoundBrollAsset
 from omega.application.visual_asset_engine import VisualAssetEngine, VisualAssetRequest
@@ -178,7 +182,11 @@ class VisualProductionV2Service:
         *,
         fps: int = 12,
         voice_profile: dict[str, Any] | None = None,
+        karaoke_subtitles: bool = False,
     ) -> VerticalSliceRenderResult:
+        if karaoke_subtitles and not self._narration_provider:
+            raise VerticalSliceError("narration_provider MUST be configured when karaoke_subtitles is True")
+
         if fps <= 0 or fps > 60:
             raise VerticalSliceError(f"Invalid fps: {fps}. Must be > 0 and <= 60.")
 
@@ -281,6 +289,8 @@ class VisualProductionV2Service:
             if voice_profile:
                 normalized_vp = json.dumps(voice_profile, sort_keys=True)
                 fingerprint_input += f":{normalized_vp}"
+            if karaoke_subtitles:
+                fingerprint_input += ":karaoke-ass-v1"
 
         run_fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
 
@@ -355,6 +365,9 @@ class VisualProductionV2Service:
             image_scenes = 0
             broll_scenes = 0
 
+            karaoke_cues = []
+            karaoke_cursor_ms = 0
+
             indices = set()
             for scene in storyboard.scenes:
                 if scene.sequence_index in indices:
@@ -414,6 +427,19 @@ class VisualProductionV2Service:
                         audio_duration_sec = duration_ms / 1000.0
                         actual_scene_duration_seconds = audio_duration_sec
                         audio_sha = audio_asset["content_hash"]
+
+                        if karaoke_subtitles:
+                            segment = {
+                                "text": scene.narration_excerpt,
+                                "start_ms": karaoke_cursor_ms,
+                                "duration_ms": duration_ms,
+                            }
+                            karaoke_cursor_ms += duration_ms
+                            try:
+                                scene_cues = generate_karaoke_cues([segment])
+                                karaoke_cues.extend(scene_cues)
+                            except Exception as e:
+                                raise VerticalSliceError(f"generate_karaoke_cues failed: {self._sanitize_error(e)}") from e
 
                     # Meaningful query fallback for IMAGE and BROLL
                     if effective_strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
@@ -523,7 +549,18 @@ class VisualProductionV2Service:
                         )
                     )
 
-            # 7. Final Concatenation
+            # 7. ASS generation
+            ass_path = None
+            if karaoke_subtitles:
+                try:
+                    ass_content = generate_karaoke_ass_content(karaoke_cues, width=1920, height=1080)
+                    ass_path = work_dir / "karaoke.ass"
+                    with open(ass_path, "w", encoding="utf-8") as f:
+                        f.write(ass_content)
+                except Exception as e:
+                    raise VerticalSliceError(f"ASS generation/write failed: {self._sanitize_error(e)}") from e
+
+            # 8. Final Concatenation
             final_temp_mp4 = work_dir / "final_temp.mp4"
             try:
                 await self._ffmpeg_renderer.concatenate_clips(
@@ -542,10 +579,31 @@ class VisualProductionV2Service:
                 if b"ftyp" not in hdr:
                     raise VerticalSliceError("Final concatenated MP4 missing ftyp header")
 
-            final_sha = self._compute_streaming_sha(final_temp_mp4)
+            # 9. Karaoke Burn-in
+            if karaoke_subtitles:
+                final_karaoke_mp4 = work_dir / "final_karaoke.mp4"
+                try:
+                    await self._ffmpeg_renderer.burn_ass_subtitles(
+                        video_path=final_temp_mp4,
+                        ass_path=ass_path,
+                        output_path=final_karaoke_mp4,
+                    )
+                except Exception as e:
+                    raise VerticalSliceError(f"ASS burn-in failed: {self._sanitize_error(e)}") from e
 
-            # 8. Atomic Publish to Run Root
-            final_temp_mp4.replace(final_mp4_path)
+                if not final_karaoke_mp4.is_file() or final_karaoke_mp4.stat().st_size <= 0:
+                    raise VerticalSliceError("Burned MP4 missing or empty")
+
+                with open(final_karaoke_mp4, "rb") as f:
+                    hdr = f.read(4096)
+                    if b"ftyp" not in hdr:
+                        raise VerticalSliceError("Burned MP4 missing ftyp header")
+
+                final_sha = self._compute_streaming_sha(final_karaoke_mp4)
+                final_karaoke_mp4.replace(final_mp4_path)
+            else:
+                final_sha = self._compute_streaming_sha(final_temp_mp4)
+                final_temp_mp4.replace(final_mp4_path)
 
             manifest_content = {
                 "run_fingerprint": run_fingerprint,
@@ -563,6 +621,8 @@ class VisualProductionV2Service:
                 "fps": fps,
                 "content_sha256": final_sha,
                 "narration_enabled": bool(self._narration_provider),
+                "karaoke_subtitles_enabled": karaoke_subtitles,
+                "karaoke_cue_count": len(karaoke_cues) if karaoke_subtitles else 0,
                 "narration_provider": self._narration_provider.__class__.__name__ if self._narration_provider else None,
                 "narration_model": getattr(self._narration_provider, "model", None) if self._narration_provider else None,
                 "narration_voice": getattr(self._narration_provider, "default_voice", None) if self._narration_provider else None,
