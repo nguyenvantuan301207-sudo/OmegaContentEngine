@@ -1,6 +1,7 @@
 """Storyboard Engine for converting scripts into visual plans."""
 
 import enum
+import re
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -203,28 +204,43 @@ class StoryboardEngine:
 
         n_lower = narration.lower()
 
-        if any(w in n_lower for w in ["source code", "snippet", "syntax", "function", "class", "endpoint", "pydantic", "concrete programming"]):
+        # 1. CODE_DEMO
+        if re.search(r'\b(source code|code snippet|api example|command|syntax|implementation)\b', n_lower):
+            return VisualStrategy.CODE_DEMO
+        if re.search(r'\b(function|class)\b', n_lower) and not re.search(r'\b(system class|social class|working class)\b', n_lower):
             return VisualStrategy.CODE_DEMO
 
-        if any(w in n_lower for w in ["architecture", "system", "flow", "loop", "orchestrate", "infrastructure", "multiplexing", "mechanics", "async", "coroutine", "implementation"]):
+        # 2. DIAGRAM
+        if re.search(r'\b(architecture|workflow|pipeline|process|flow|relationship|components|stages)\b', n_lower):
             return VisualStrategy.DIAGRAM
 
-        if any(w in n_lower for w in ["percent", "%", "benchmark", "latency", "milliseconds", "throughput", "metrics", "rate"]):
+        # 3. STATISTIC
+        if re.search(r'\b(percentage|percent|benchmark|throughput|growth|metrics|rate|latency|milliseconds)\b', n_lower) or re.search(r'\b\d+(?:\.\d+)?(?:%|x|ms|k|m)\b', n_lower):
             return VisualStrategy.STATISTIC
 
-        if any(w in n_lower for w in ["comparison", "tradeoff", "vs", "multi-factor", "rules", "principles"]):
+        # 4. INFOGRAPHIC
+        if re.search(r'\b(comparison|tradeoff|vs|multi-factor|summary|overview)\b', n_lower):
             return VisualStrategy.INFOGRAPHIC
 
-        if any(w in n_lower for w in ["ui", "interface", "screen", "dashboard"]):
+        # 5. SCREENSHOT signal (will be safely gated)
+        if re.search(r'\b(ui|interface|screen|dashboard|tool screen)\b', n_lower):
             return VisualStrategy.SCREENSHOT
 
+        # 6. KINETIC_TEXT for short hooks
         if word_count < 15:
             return VisualStrategy.KINETIC_TEXT
 
-        # Alternate naturally depending on some hash to keep it deterministic
-        if len(n_lower) % 2 == 0:
+        # 7. BROLL for motion/real-world
+        if re.search(r'\b(world|environment|action|motion|people|nature|city|building)\b', n_lower):
             return VisualStrategy.BROLL
-        return VisualStrategy.IMAGE
+
+        # 8. Deterministic fallback to IMAGE or BROLL or TITLE_MOTION
+        if len(n_lower) % 3 == 0:
+            return VisualStrategy.BROLL
+        elif len(n_lower) % 3 == 1:
+            return VisualStrategy.IMAGE
+        else:
+            return VisualStrategy.TITLE_MOTION
 
     def _enforce_variety_rules(self, strategy: VisualStrategy, history: list[VisualStrategy]) -> VisualStrategy:
         if not history:

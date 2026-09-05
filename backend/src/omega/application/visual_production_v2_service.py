@@ -63,6 +63,8 @@ KARAOKE_SUBTITLE_VERSION = "v1"
 KARAOKE_MAX_WORDS_PER_CUE = 5
 KARAOKE_MAX_CHARS_PER_CUE = 36
 
+VISUAL_DIRECTOR_VERSION = "v2"
+
 
 class VerticalSliceSceneResult(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -320,7 +322,8 @@ class VisualProductionV2Service:
         # 3. Deterministic Run Fingerprint & Idempotency Check
         fingerprint_input = (
             f"omega-vertical-slice-v0:{mission_execution_id}:"
-            f"{content_request_id}:{script_version.id}:{fps}"
+            f"{content_request_id}:{script_version.id}:{fps}:"
+            f"visual-director-{VISUAL_DIRECTOR_VERSION}"
         )
         if self._narration_provider:
             fingerprint_input += ":narrated"
@@ -847,21 +850,16 @@ class VisualProductionV2Service:
 
     def _apply_v0_compatibility(self, scene: StoryboardScene) -> StoryboardScene:
         strat = scene.visual_strategy
+
+        # SCREENSHOT materialization is not yet implemented (blocked by VerticalSliceError in materializer).
+        # Safely fall back to IMAGE if there is a meaningful query, else TITLE_MOTION.
         if strat == VisualStrategy.SCREENSHOT:
-            raise VerticalSliceError("SCREENSHOT strategy is not supported by Vertical Slice V0")
+            raw_hint = scene.asset_query_hint or ""
+            clean_hint = raw_hint.strip().lower()
+            is_meaningful = clean_hint and clean_hint not in ("placeholder", "generic") and "abstract technology background" not in clean_hint
 
-        if strat == VisualStrategy.KINETIC_TEXT:
-            return scene.model_copy(update={"visual_strategy": VisualStrategy.TITLE_MOTION})
-
-        if strat == VisualStrategy.INFOGRAPHIC:
-            return scene.model_copy(update={"visual_strategy": VisualStrategy.IMAGE})
-
-        if strat == VisualStrategy.CTA:
-            text = scene.on_screen_text or scene.narration_excerpt[:40]
-            return scene.model_copy(update={
-                "visual_strategy": VisualStrategy.TITLE_MOTION,
-                "on_screen_text": text,
-            })
+            fallback_strat = VisualStrategy.IMAGE if is_meaningful else VisualStrategy.TITLE_MOTION
+            return scene.model_copy(update={"visual_strategy": fallback_strat})
 
         return scene
 

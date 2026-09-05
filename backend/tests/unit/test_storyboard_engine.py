@@ -43,3 +43,37 @@ def test_storyboard_engine_longform():
     # Sanity threshold for CODE_DEMO
     code_demo_count = strategies.count(VisualStrategy.CODE_DEMO)
     assert code_demo_count / len(strategies) <= 0.35, "CODE_DEMO dominates the storyboard (>35%)"
+
+
+def test_storyboard_engine_routing_v2():
+    engine = StoryboardEngine()
+
+    def check_strat(narration: str, expected: VisualStrategy, word_count: int = 20, is_first: bool = False, is_last: bool = False):
+        strat = engine._select_strategy(narration, word_count, is_first, is_last)
+        assert strat == expected, f"Expected {expected} for '{narration}', got {strat}"
+
+    # A. Code signal
+    check_strat("Here is a python code snippet showing the syntax.", VisualStrategy.CODE_DEMO)
+    check_strat("We define a function.", VisualStrategy.CODE_DEMO)
+
+    # B. Architecture signal
+    check_strat("The system architecture defines the pipeline stages.", VisualStrategy.DIAGRAM)
+
+    # C. Strong statistics
+    check_strat("We saw a 50% increase in throughput.", VisualStrategy.STATISTIC)
+    check_strat("Latency dropped to 120ms.", VisualStrategy.STATISTIC)
+
+    # D. False positive guard (code mentioned loosely)
+    check_strat("The moral code of the story is interesting.", VisualStrategy.IMAGE)
+
+    # E. KINETIC_TEXT fallback for short punchy text
+    check_strat("Short text.", VisualStrategy.KINETIC_TEXT, word_count=2)
+
+    # F. CTA for last scene
+    check_strat("Subscribe now.", VisualStrategy.CTA, is_last=True)
+
+    # G. TITLE_MOTION for first scene
+    check_strat("Welcome.", VisualStrategy.TITLE_MOTION, is_first=True)
+
+    # H. BROLL routing
+    check_strat("In the real world, this looks beautiful.", VisualStrategy.BROLL)

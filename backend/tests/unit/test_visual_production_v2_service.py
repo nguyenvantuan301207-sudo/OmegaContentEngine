@@ -361,35 +361,82 @@ async def test_v0_compatibility_conversions(tmp_path: Path):
     orch = make_mock_orchestrator(tmp_path)
     svc = VisualProductionV2Service(asset_orchestrator=orch, output_root=tmp_path)
 
-    # 1. KINETIC_TEXT -> TITLE_MOTION
-    s_kt = StoryboardScene(
-        sequence_index=1,
-        section_id="Sec",
-        purpose="P",
-        source_statement_references=[],
-        narration_excerpt="Text",
-        estimated_duration_seconds=5.0,
-        visual_strategy=VisualStrategy.KINETIC_TEXT,
-        visual_brief="Brief",
+    # SCREENSHOT with meaningful query -> IMAGE
+    scene_meaningful = StoryboardScene(
+        sequence_index=1, section_id="1", purpose="1", source_statement_references=[],
+        narration_excerpt="1", estimated_duration_seconds=1.0,
+        visual_strategy=VisualStrategy.SCREENSHOT, visual_brief="1",
+        asset_query_hint="beautiful sunset"
     )
-    eff_kt = svc._apply_v0_compatibility(s_kt)
-    assert eff_kt.visual_strategy == VisualStrategy.TITLE_MOTION
+    res_meaningful = svc._apply_v0_compatibility(scene_meaningful)
+    assert res_meaningful.visual_strategy == VisualStrategy.IMAGE
 
-    # 2. INFOGRAPHIC -> IMAGE
-    s_info = s_kt.model_copy(update={"visual_strategy": VisualStrategy.INFOGRAPHIC})
-    eff_info = svc._apply_v0_compatibility(s_info)
-    assert eff_info.visual_strategy == VisualStrategy.IMAGE
+    # SCREENSHOT with abstract/generic query -> TITLE_MOTION
+    scene_generic = StoryboardScene(
+        sequence_index=2, section_id="2", purpose="2", source_statement_references=[],
+        narration_excerpt="2", estimated_duration_seconds=1.0,
+        visual_strategy=VisualStrategy.SCREENSHOT, visual_brief="2",
+        asset_query_hint="abstract technology background"
+    )
+    res_generic = svc._apply_v0_compatibility(scene_generic)
+    assert res_generic.visual_strategy == VisualStrategy.TITLE_MOTION
 
-    # 3. CTA -> TITLE_MOTION
-    s_cta = s_kt.model_copy(update={"visual_strategy": VisualStrategy.CTA, "on_screen_text": "Subscribe now"})
-    eff_cta = svc._apply_v0_compatibility(s_cta)
-    assert eff_cta.visual_strategy == VisualStrategy.TITLE_MOTION
-    assert eff_cta.on_screen_text == "Subscribe now"
 
-    # 4. SCREENSHOT -> Fail closed
-    s_screen = s_kt.model_copy(update={"visual_strategy": VisualStrategy.SCREENSHOT})
-    with pytest.raises(VerticalSliceError, match="SCREENSHOT strategy is not supported"):
-        svc._apply_v0_compatibility(s_screen)
+@pytest.mark.asyncio
+async def test_visual_director_v2_fingerprint(tmp_path: Path, lineage_data):
+    orch = make_mock_orchestrator(tmp_path)
+    svc = VisualProductionV2Service(asset_orchestrator=orch, output_root=tmp_path)
+    session = make_mock_session(m_exec=lineage_data["mission_execution"], req=lineage_data["content_request"])
+
+    def fake_storyboard(_sdict):
+        return StoryboardPlan(
+            title="Custom Test Storyboard",
+            estimated_duration_seconds=5.0,
+            scenes=[
+                StoryboardScene(
+                    sequence_index=1,
+                    section_id="Sec1",
+                    purpose="Hook",
+                    source_statement_references=[1],
+                    narration_excerpt="Title scene hook",
+                    estimated_duration_seconds=5.0,
+                    visual_strategy=VisualStrategy.TITLE_MOTION,
+                    visual_brief="Title",
+                )
+            ],
+        )
+    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+    svc._video_renderer = MagicMock()
+
+    async def fake_render(*args, **kwargs):
+        out = kwargs.get("output_path")
+        if not out and len(args) > 3:
+            out = args[3]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(VALID_MP4_HEADER + b"\x00" * 100)
+        from omega.application.visual_direction import VisualTemplateId
+        return VisualV2VideoRenderResult(
+            output_path=out, scene_index=1, template_id=VisualTemplateId.HERO_TITLE,
+            width=1920, height=1080, fps=12,
+            duration_seconds=5.0, frame_count=60,
+            video_sha256="a"*64, source_html_sha256="b"*64, motion_profile="p"
+        )
+    svc._video_renderer.render_clip = AsyncMock(side_effect=fake_render)
+    svc._ffmpeg_renderer = MagicMock()
+    async def fake_concat(*args, **kwargs):
+        out = kwargs.get("output_path") or args[1]
+        Path(out).write_bytes(VALID_MP4_HEADER + b"\x00" * 100)
+    svc._ffmpeg_renderer.concatenate_clips = AsyncMock(side_effect=fake_concat)
+
+    mock_browser_ctx = MagicMock()
+    mock_browser_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+    mock_browser_ctx.__aexit__ = AsyncMock(return_value=None)
+    svc._browser_runtime_factory = lambda: mock_browser_ctx
+
+    res = await svc.render_mission_execution(session, lineage_data["mission_execution"].id, lineage_data["content_request"].id, fps=12)
+    expected_fp = f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2"
+    expected_hash = hashlib.sha256(expected_fp.encode("utf-8")).hexdigest()
+    assert res.run_fingerprint == expected_hash
 
 
 def test_asset_query_fallback(tmp_path: Path):
@@ -930,7 +977,8 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
     # Silent fingerprint exact compatibility check
     fps = 12
     script_version_id = req.scripts[0].id
-    expected_silent_fp = f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}"
+    from omega.application.visual_production_v2_service import VISUAL_DIRECTOR_VERSION
+    expected_silent_fp = f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}"
     expected_silent_hash = hashlib.sha256(expected_silent_fp.encode("utf-8")).hexdigest()
     assert res_silent.run_fingerprint == expected_silent_hash
 
