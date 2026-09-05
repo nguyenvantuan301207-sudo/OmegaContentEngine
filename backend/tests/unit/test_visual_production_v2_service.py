@@ -21,7 +21,9 @@ from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import VisualAssetKind
 from omega.application.visual_production_v2_service import (
     ScriptStoryboardAdapter,
+    VerticalSliceBackgroundMusicInput,
     VerticalSliceError,
+    VerticalSliceSFXInput,
     VisualProductionV2Service,
 )
 from omega.infrastructure.models import (
@@ -1249,3 +1251,127 @@ async def test_narration_karaoke_multi_scene_timing(tmp_path: Path, lineage_data
     # The first scene starts at 0:00:00.00
     assert "Dialogue: 0,0:00:00.00,0:00:03.00," in ass_content
     assert "Dialogue: 0,0:00:03.00,0:00:05.00," in ass_content
+# --- P1J-C Tests ---
+@pytest.mark.asyncio
+async def test_audio_mix_guard_no_narration(tmp_path: Path, lineage_data):
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+    session = make_mock_session(m_exec=m_exec, req=req)
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch, output_root=tmp_path,
+        narration_provider=None, narration_storage=None,
+    )
+
+    bgm = VerticalSliceBackgroundMusicInput(audio_path="test.mp3", duration_ms=5000, license_status="LICENSED")
+
+    with pytest.raises(VerticalSliceError, match="narration_provider MUST be configured when audio mix is enabled"):
+        await svc.render_mission_execution(session, m_exec.id, req.id, background_music=bgm)
+
+@pytest.mark.asyncio
+async def test_audio_mix_success(tmp_path: Path, lineage_data):
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+    session = make_mock_session(m_exec=m_exec, req=req)
+
+    mock_narration_provider = AsyncMock()
+    mock_narration_provider.__class__.__name__ = "MockProvider"
+    mock_narration_provider.model = "mock-model"
+    mock_narration_provider.default_voice = "mock-voice"
+    mock_narration_provider.synthesize_segment_audio.return_value = {
+        "storage_uri": "channels/test/1.wav", "duration_ms": 3500, "content_hash": "hash1"
+    }
+
+    mock_storage = MagicMock()
+    audio_path = tmp_path / "mock.wav"
+    audio_path.write_bytes(b"wav")
+    mock_storage.resolve_stored_uri.return_value = audio_path
+
+    mock_ffmpeg = AsyncMock()
+    mock_video_renderer = AsyncMock()
+    mock_video_renderer.render_clip.return_value = VisualV2VideoRenderResult(
+        output_path=tmp_path / "scene.mp4", scene_index=1, template_id="HERO_TITLE",
+        width=1920, height=1080, fps=12, duration_seconds=3.5, frame_count=42,
+        video_sha256="v", source_html_sha256="h", motion_profile="none"
+    )
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch, output_root=tmp_path / "renders",
+        browser_runtime_factory=MagicMock(), video_renderer=mock_video_renderer,
+        ffmpeg_renderer=mock_ffmpeg, narration_provider=mock_narration_provider,
+        narration_storage=mock_storage,
+    )
+
+    def fake_storyboard(_):
+        return StoryboardPlan(
+            title="Mix", estimated_duration_seconds=5.0,
+            scenes=[StoryboardScene(
+                sequence_index=1, section_id="1", purpose="1", source_statement_references=[],
+                narration_excerpt="Hi", estimated_duration_seconds=5.0,
+                visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="1"
+            )]
+        )
+    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+
+    async def fake_concat(*args, **kwargs):
+        Path(kwargs["output_path"]).write_bytes(VALID_MP4_HEADER + b"concat")
+    mock_ffmpeg.concatenate_clips.side_effect = fake_concat
+
+    async def fake_mux(*args, **kwargs):
+        Path(kwargs["output_path"]).write_bytes(b"mux")
+    mock_ffmpeg.mux_video_audio.side_effect = fake_mux
+
+    async def fake_mix(*args, **kwargs):
+        Path(kwargs["output_path"]).write_bytes(VALID_MP4_HEADER + b"mixed")
+    mock_ffmpeg.mix_master_audio.side_effect = fake_mix
+
+    async def fake_burn(*args, **kwargs):
+        Path(kwargs["output_path"]).write_bytes(VALID_MP4_HEADER + b"burned")
+    mock_ffmpeg.burn_ass_subtitles.side_effect = fake_burn
+
+    bgm_path = tmp_path / "bgm.mp3"
+    bgm_path.write_bytes(b"bgm")
+
+    sfx_path = tmp_path / "sfx.wav"
+    sfx_path.write_bytes(b"sfx")
+
+    bgm = VerticalSliceBackgroundMusicInput(audio_path=bgm_path, duration_ms=2000, license_status="LICENSED", gain_db=-10)
+    sfx1 = VerticalSliceSFXInput(event_id="pop", audio_path=sfx_path, start_ms=500, duration_ms=100, license_status="LICENSED", gain_db=-5)
+    sfx2 = VerticalSliceSFXInput(event_id="whoosh", audio_path=sfx_path, start_ms=1000, duration_ms=200, license_status="LICENSED", gain_db=-2)
+
+    # We pass SFX out of order to verify sorting by start_ms
+    res = await svc.render_mission_execution(
+        session, m_exec.id, req.id,
+        background_music=bgm, sfx_inputs=[sfx2, sfx1], karaoke_subtitles=True
+    )
+
+    # Verify mix_master_audio called with normalized arguments
+    mock_ffmpeg.mix_master_audio.assert_called_once()
+    mix_args = mock_ffmpeg.mix_master_audio.call_args[1]
+
+    assert mix_args["target_duration_ms"] == 3500
+    assert mix_args["background_music_path"] == bgm_path
+    assert mix_args["background_music_loop_required"] is True # 2000 < 3500
+
+    sfx_inputs = mix_args["sfx_inputs"]
+    assert len(sfx_inputs) == 2
+    assert sfx_inputs[0].start_ms == 500
+    assert sfx_inputs[1].start_ms == 1000
+
+    # Verify karaoke called on mixed file
+    burn_args = mock_ffmpeg.burn_ass_subtitles.call_args[1]
+    assert "final_mixed.mp4" in str(burn_args["video_path"])
+
+    # Output should be the burned file hash
+    burned_sha = hashlib.sha256(VALID_MP4_HEADER + b"burned").hexdigest()
+    assert res.content_sha256 == burned_sha
+
+    # Check manifest
+    manifest_path = res.output_path.parent / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text("utf-8"))
+    assert manifest_data["audio_mix_enabled"] is True
+    assert manifest_data["background_music_enabled"] is True
+    assert manifest_data["sfx_event_count"] == 2
+    assert manifest_data["audio_mix_target_duration_ms"] == 3500

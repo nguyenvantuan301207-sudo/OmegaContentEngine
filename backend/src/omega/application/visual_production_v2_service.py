@@ -3,6 +3,7 @@ import json
 import re
 import shutil
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -13,6 +14,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from omega.application import content_service
+from omega.application.audio_mix_policy import (
+    LicenseStatus,
+    build_audio_mix_plan,
+    build_background_music_plan,
+    build_sfx_event_plan,
+)
 from omega.application.ffmpeg_renderer import FFmpegRenderer
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.narration_provider import NarrationProvider
@@ -66,6 +73,26 @@ class VerticalSliceSceneResult(BaseModel):
     content_sha256: str
     audio_content_sha256: str | None = None
     audio_duration_seconds: float | None = None
+
+
+@dataclass(frozen=True)
+class VerticalSliceBackgroundMusicInput:
+    audio_path: Path | str
+    duration_ms: int
+    license_status: str
+    gain_db: float = -20.0
+    fade_in_ms: int = 1000
+    fade_out_ms: int = 1500
+
+
+@dataclass(frozen=True)
+class VerticalSliceSFXInput:
+    event_id: str
+    audio_path: Path | str
+    start_ms: int
+    duration_ms: int
+    license_status: str
+    gain_db: float
 
 
 class VerticalSliceRenderResult(BaseModel):
@@ -183,7 +210,14 @@ class VisualProductionV2Service:
         fps: int = 12,
         voice_profile: dict[str, Any] | None = None,
         karaoke_subtitles: bool = False,
+        background_music: VerticalSliceBackgroundMusicInput | None = None,
+        sfx_inputs: list[VerticalSliceSFXInput] | None = None,
     ) -> VerticalSliceRenderResult:
+        audio_mix_enabled = background_music is not None or bool(sfx_inputs)
+
+        if audio_mix_enabled and not self._narration_provider:
+            raise VerticalSliceError("narration_provider MUST be configured when audio mix is enabled")
+
         if karaoke_subtitles and not self._narration_provider:
             raise VerticalSliceError("narration_provider MUST be configured when karaoke_subtitles is True")
 
@@ -292,6 +326,49 @@ class VisualProductionV2Service:
             if karaoke_subtitles:
                 fingerprint_input += ":karaoke-ass-v1"
 
+        normalized_sfx = []
+        if audio_mix_enabled:
+            audio_mix_fp = {}
+            if background_music:
+                p = Path(background_music.audio_path).resolve()
+                if not p.is_file() or p.stat().st_size == 0:
+                    raise VerticalSliceError("Background music missing or empty")
+                bgm_sha = self._compute_streaming_sha(p)
+                audio_mix_fp["background_music"] = {
+                    "source_sha256": bgm_sha,
+                    "duration_ms": background_music.duration_ms,
+                    "license_status": str(background_music.license_status),
+                    "gain_db": background_music.gain_db,
+                    "fade_in_ms": background_music.fade_in_ms,
+                    "fade_out_ms": background_music.fade_out_ms,
+                }
+
+            if sfx_inputs:
+                raw_sfx = []
+                for sfx in sfx_inputs:
+                    p = Path(sfx.audio_path).resolve()
+                    if not p.is_file() or p.stat().st_size == 0:
+                        raise VerticalSliceError("SFX file missing or empty")
+                    s_sha = self._compute_streaming_sha(p)
+                    raw_sfx.append((sfx, s_sha))
+
+                # Sort by (start_ms, event_id, source_sha256)
+                raw_sfx.sort(key=lambda x: (x[0].start_ms, x[0].event_id, x[1]))
+                sfx_fp_list = []
+                for sfx, s_sha in raw_sfx:
+                    normalized_sfx.append((sfx, s_sha, Path(sfx.audio_path).resolve()))
+                    sfx_fp_list.append({
+                        "source_sha256": s_sha,
+                        "event_id": sfx.event_id,
+                        "start_ms": sfx.start_ms,
+                        "duration_ms": sfx.duration_ms,
+                        "license_status": str(sfx.license_status),
+                        "gain_db": sfx.gain_db,
+                    })
+                audio_mix_fp["sfx_events"] = sfx_fp_list
+
+            fingerprint_input += ":audio-mix-v1:" + json.dumps(audio_mix_fp, sort_keys=True)
+
         run_fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
 
         run_dir = self._output_root / str(mission_execution_id) / run_fingerprint
@@ -360,6 +437,7 @@ class VisualProductionV2Service:
             ordered_scene_paths: list[Path] = []
             scene_results: list[VerticalSliceSceneResult] = []
             total_duration = 0.0
+            narration_total_duration_ms = 0
 
             template_scenes = 0
             image_scenes = 0
@@ -427,6 +505,7 @@ class VisualProductionV2Service:
                         audio_duration_sec = duration_ms / 1000.0
                         actual_scene_duration_seconds = audio_duration_sec
                         audio_sha = audio_asset["content_hash"]
+                        narration_total_duration_ms += duration_ms
 
                         if karaoke_subtitles:
                             segment = {
@@ -579,12 +658,125 @@ class VisualProductionV2Service:
                 if b"ftyp" not in hdr:
                     raise VerticalSliceError("Final concatenated MP4 missing ftyp header")
 
+            # 8.5 Master Audio Mix
+            working_final_mp4 = final_temp_mp4
+            audio_mix_manifest = {
+                "audio_mix_enabled": False,
+                "background_music_enabled": False,
+                "background_music_attribution_required": False,
+                "sfx_event_count": 0,
+                "sfx_attribution_required_count": 0,
+                "audio_mix_target_duration_ms": 0,
+            }
+
+            if audio_mix_enabled:
+                audio_mix_target_duration_ms = narration_total_duration_ms
+                if audio_mix_target_duration_ms <= 0:
+                    raise VerticalSliceError("Audio mix enabled but narration total duration is <= 0")
+
+                bgm_plan = None
+                if background_music:
+                    try:
+                        bgm_plan = build_background_music_plan(
+                            video_duration_ms=audio_mix_target_duration_ms,
+                            music_duration_ms=background_music.duration_ms,
+                            license_status=LicenseStatus(background_music.license_status),
+                            gain_db=background_music.gain_db,
+                            fade_in_ms=background_music.fade_in_ms,
+                            fade_out_ms=background_music.fade_out_ms,
+                        )
+                    except Exception as e:
+                        raise VerticalSliceError(f"Background music plan failed: {self._sanitize_error(e)}") from e
+
+                sfx_plans = []
+                for sfx, _s_sha, _p in normalized_sfx:
+                    try:
+                        plan = build_sfx_event_plan(
+                            event_id=sfx.event_id,
+                            start_ms=sfx.start_ms,
+                            duration_ms=sfx.duration_ms,
+                            video_duration_ms=audio_mix_target_duration_ms,
+                            license_status=LicenseStatus(sfx.license_status),
+                            gain_db=sfx.gain_db,
+                        )
+                        sfx_plans.append(plan)
+                    except Exception as e:
+                        raise VerticalSliceError(f"SFX plan failed for {sfx.event_id}: {self._sanitize_error(e)}") from e
+
+                try:
+                    mix_plan = build_audio_mix_plan(
+                        video_duration_ms=audio_mix_target_duration_ms,
+                        background_music=bgm_plan,
+                        sfx_events=sfx_plans,
+                    )
+                except Exception as e:
+                    raise VerticalSliceError(f"Audio mix plan failed: {self._sanitize_error(e)}") from e
+
+                bgm_path = None
+                bgm_gain = 0.0
+                bgm_loop = False
+                bgm_fade_in = 0
+                bgm_fade_out = 0
+
+                if mix_plan.background_music:
+                    bgm_path = Path(background_music.audio_path).resolve()
+                    bgm_gain = mix_plan.background_music.gain_db
+                    bgm_loop = mix_plan.background_music.loop_required
+                    bgm_fade_in = mix_plan.background_music.fade_in_ms
+                    bgm_fade_out = mix_plan.background_music.fade_out_ms
+
+                sfx_mix_inputs = []
+                for i, p_event in enumerate(mix_plan.sfx_events):
+                    sfx_mix_inputs.append(
+                        FFmpegRenderer.SFXMixInput(
+                            audio_path=normalized_sfx[i][2],
+                            start_ms=p_event.start_ms,
+                            duration_ms=p_event.duration_ms,
+                            gain_db=p_event.gain_db,
+                        )
+                    )
+
+                final_mixed_mp4 = work_dir / "final_mixed.mp4"
+                try:
+                    await self._ffmpeg_renderer.mix_master_audio(
+                        video_path=final_temp_mp4,
+                        output_path=final_mixed_mp4,
+                        target_duration_ms=audio_mix_target_duration_ms,
+                        background_music_path=bgm_path,
+                        background_music_gain_db=bgm_gain,
+                        background_music_loop_required=bgm_loop,
+                        background_music_fade_in_ms=bgm_fade_in,
+                        background_music_fade_out_ms=bgm_fade_out,
+                        sfx_inputs=sfx_mix_inputs,
+                    )
+                except Exception as e:
+                    raise VerticalSliceError(f"Master audio mix failed: {self._sanitize_error(e)}") from e
+
+                if not final_mixed_mp4.is_file() or final_mixed_mp4.stat().st_size <= 0:
+                    raise VerticalSliceError("Mixed MP4 missing or empty")
+
+                with open(final_mixed_mp4, "rb") as f:
+                    hdr = f.read(4096)
+                    if b"ftyp" not in hdr:
+                        raise VerticalSliceError("Mixed MP4 missing ftyp header")
+
+                working_final_mp4 = final_mixed_mp4
+
+                audio_mix_manifest = {
+                    "audio_mix_enabled": True,
+                    "background_music_enabled": mix_plan.background_music is not None,
+                    "background_music_attribution_required": mix_plan.background_music.attribution_required if mix_plan.background_music else False,
+                    "sfx_event_count": len(mix_plan.sfx_events),
+                    "sfx_attribution_required_count": sum(1 for e in mix_plan.sfx_events if e.attribution_required),
+                    "audio_mix_target_duration_ms": audio_mix_target_duration_ms,
+                }
+
             # 9. Karaoke Burn-in
             if karaoke_subtitles:
                 final_karaoke_mp4 = work_dir / "final_karaoke.mp4"
                 try:
                     await self._ffmpeg_renderer.burn_ass_subtitles(
-                        video_path=final_temp_mp4,
+                        video_path=working_final_mp4,
                         ass_path=ass_path,
                         output_path=final_karaoke_mp4,
                     )
@@ -602,8 +794,8 @@ class VisualProductionV2Service:
                 final_sha = self._compute_streaming_sha(final_karaoke_mp4)
                 final_karaoke_mp4.replace(final_mp4_path)
             else:
-                final_sha = self._compute_streaming_sha(final_temp_mp4)
-                final_temp_mp4.replace(final_mp4_path)
+                final_sha = self._compute_streaming_sha(working_final_mp4)
+                working_final_mp4.replace(final_mp4_path)
 
             manifest_content = {
                 "run_fingerprint": run_fingerprint,
@@ -620,6 +812,7 @@ class VisualProductionV2Service:
                 "height": 1080,
                 "fps": fps,
                 "content_sha256": final_sha,
+                **audio_mix_manifest,
                 "narration_enabled": bool(self._narration_provider),
                 "karaoke_subtitles_enabled": karaoke_subtitles,
                 "karaoke_cue_count": len(karaoke_cues) if karaoke_subtitles else 0,
