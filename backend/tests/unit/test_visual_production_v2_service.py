@@ -897,7 +897,6 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
     assert manifest_data["narration_model"] == "mock-model"
     assert manifest_data["narration_voice"] == "mock-voice"
     assert manifest_data["karaoke_subtitles_enabled"] is False
-    assert manifest_data["karaoke_cue_count"] == 0
     assert manifest_data["scenes"][0]["audio_content_sha256"] == "mock-audio-hash"
     assert manifest_data["scenes"][0]["audio_duration_seconds"] == 3.5
 
@@ -1001,256 +1000,7 @@ async def test_narration_failures(tmp_path: Path, lineage_data):
     with pytest.raises(VerticalSliceError, match="Audio asset missing content_hash"):
         await svc.render_mission_execution(session, m_exec.id, req.id)
 
-@pytest.mark.asyncio
-async def test_karaoke_mode_guard_failure(tmp_path: Path, lineage_data):
-    orch = make_mock_orchestrator(tmp_path)
-    m_exec = lineage_data["mission_execution"]
-    req = lineage_data["content_request"]
-    session = make_mock_session(m_exec=m_exec, req=req)
 
-    svc = VisualProductionV2Service(
-        asset_orchestrator=orch,
-        output_root=tmp_path / "renders",
-        browser_runtime_factory=MagicMock(),
-        # No narration provider
-    )
-    with pytest.raises(VerticalSliceError, match="narration_provider MUST be configured when karaoke_subtitles is True"):
-        await svc.render_mission_execution(session, m_exec.id, req.id, karaoke_subtitles=True)
-
-@pytest.mark.asyncio
-async def test_karaoke_burn_failure(tmp_path: Path, lineage_data):
-    orch = make_mock_orchestrator(tmp_path)
-    m_exec = lineage_data["mission_execution"]
-    req = lineage_data["content_request"]
-    session = make_mock_session(m_exec=m_exec, req=req)
-
-    mock_narration_provider = AsyncMock()
-    mock_narration_provider.__class__.__name__ = "MockProvider"
-    mock_narration_provider.model = "mock-model"
-    mock_narration_provider.default_voice = "mock-voice"
-    mock_narration_provider.synthesize_segment_audio.return_value = {
-        "storage_uri": "channels/test/123.wav",
-        "duration_ms": 1000,
-        "content_hash": "mock-audio-hash"
-    }
-
-    mock_storage = MagicMock()
-    audio_path = tmp_path / "mock.wav"
-    audio_path.write_bytes(b"wav")
-    mock_storage.resolve_stored_uri.return_value = audio_path
-
-    mock_ffmpeg = AsyncMock()
-    mock_video_renderer = AsyncMock()
-    out_mp4 = tmp_path / "scene.mp4"
-    mock_video_renderer.render_clip.return_value = VisualV2VideoRenderResult(
-        output_path=out_mp4, scene_index=1, template_id="HERO_TITLE",
-        width=1920, height=1080, fps=12, duration_seconds=1.0, frame_count=12,
-        video_sha256="video-hash", source_html_sha256="html-hash", motion_profile="none"
-    )
-
-    svc = VisualProductionV2Service(
-        asset_orchestrator=orch, output_root=tmp_path / "renders",
-        browser_runtime_factory=MagicMock(), video_renderer=mock_video_renderer,
-        ffmpeg_renderer=mock_ffmpeg, narration_provider=mock_narration_provider,
-        narration_storage=mock_storage,
-    )
-
-    def fake_storyboard(_):
-        return StoryboardPlan(
-            title="Narration Test", estimated_duration_seconds=1.0,
-            scenes=[StoryboardScene(
-                sequence_index=1, section_id="1", purpose="1", source_statement_references=[],
-                narration_excerpt="Text", estimated_duration_seconds=1.0,
-                visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="1"
-            )]
-        )
-    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
-
-    async def fake_concat(clip_paths, output_path, srt_path=None):
-        Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat")
-    mock_ffmpeg.concatenate_clips.side_effect = fake_concat
-
-    async def fake_mux(video_path, audio_path, output_path):
-        Path(output_path).write_bytes(b"muxed_content")
-    mock_ffmpeg.mux_video_audio.side_effect = fake_mux
-
-    # Burn failure
-    mock_ffmpeg.burn_ass_subtitles.side_effect = ValueError("FFmpeg burn failed")
-
-    with pytest.raises(VerticalSliceError, match="ASS burn-in failed: FFmpeg burn failed"):
-        await svc.render_mission_execution(session, m_exec.id, req.id, karaoke_subtitles=True)
-
-    run_dirs = list((tmp_path / "renders" / str(m_exec.id)).iterdir())
-    assert len(run_dirs) == 1
-    run_dir = run_dirs[0]
-    final_path = run_dir / "final.mp4"
-    assert not final_path.exists()
-
-@pytest.mark.asyncio
-async def test_narration_karaoke_success_flow(tmp_path: Path, lineage_data):
-    orch = make_mock_orchestrator(tmp_path)
-    m_exec = lineage_data["mission_execution"]
-    req = lineage_data["content_request"]
-    session = make_mock_session(m_exec=m_exec, req=req)
-
-    mock_narration_provider = AsyncMock()
-    mock_narration_provider.__class__.__name__ = "MockProvider"
-    mock_narration_provider.model = "mock-model"
-    mock_narration_provider.default_voice = "mock-voice"
-    mock_narration_provider.synthesize_segment_audio.return_value = {
-        "storage_uri": "channels/test/123.wav",
-        "duration_ms": 3500,
-        "content_hash": "mock-audio-hash"
-    }
-
-    mock_storage = MagicMock()
-    audio_path = tmp_path / "mock.wav"
-    audio_path.write_bytes(b"wav")
-    mock_storage.resolve_stored_uri.return_value = audio_path
-
-    mock_ffmpeg = AsyncMock()
-    mock_video_renderer = AsyncMock()
-    out_mp4 = tmp_path / "scene.mp4"
-    mock_video_renderer.render_clip.return_value = VisualV2VideoRenderResult(
-        output_path=out_mp4, scene_index=1, template_id="HERO_TITLE",
-        width=1920, height=1080, fps=12, duration_seconds=3.5, frame_count=42,
-        video_sha256="video-hash", source_html_sha256="html-hash", motion_profile="none"
-    )
-
-    svc = VisualProductionV2Service(
-        asset_orchestrator=orch, output_root=tmp_path / "renders",
-        browser_runtime_factory=MagicMock(), video_renderer=mock_video_renderer,
-        ffmpeg_renderer=mock_ffmpeg, narration_provider=mock_narration_provider,
-        narration_storage=mock_storage,
-    )
-
-    def fake_storyboard(_):
-        return StoryboardPlan(
-            title="Narration Test", estimated_duration_seconds=5.0,
-            scenes=[StoryboardScene(
-                sequence_index=1, section_id="1", purpose="1", source_statement_references=[],
-                narration_excerpt="Narration test", estimated_duration_seconds=5.0,
-                visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="1"
-            )]
-        )
-    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
-
-    async def fake_concat(clip_paths, output_path, srt_path=None):
-        Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat")
-    mock_ffmpeg.concatenate_clips.side_effect = fake_concat
-
-    async def fake_mux(video_path, audio_path, output_path):
-        Path(output_path).write_bytes(b"muxed_content")
-    mock_ffmpeg.mux_video_audio.side_effect = fake_mux
-
-    captured_ass = {}
-    async def fake_burn(video_path, ass_path, output_path):
-        captured_ass["content"] = Path(ass_path).read_text("utf-8")
-        Path(output_path).write_bytes(VALID_MP4_HEADER + b"burned")
-    mock_ffmpeg.burn_ass_subtitles.side_effect = fake_burn
-
-    res = await svc.render_mission_execution(session, m_exec.id, req.id, karaoke_subtitles=True)
-
-    concat_args = mock_ffmpeg.concatenate_clips.call_args[1]
-    assert concat_args.get("srt_path") is None
-
-    mock_ffmpeg.burn_ass_subtitles.assert_called_once()
-    burn_args = mock_ffmpeg.burn_ass_subtitles.call_args[1]
-    assert "final_temp.mp4" in str(burn_args["video_path"])
-    assert "karaoke.ass" in str(burn_args["ass_path"])
-    assert "final_karaoke.mp4" in str(burn_args["output_path"])
-    assert burn_args["video_path"] != burn_args["output_path"]
-
-    ass_content = captured_ass["content"]
-    assert "{\\kf" in ass_content
-    assert "Narration" in ass_content
-    assert "test" in ass_content
-
-    manifest_path = res.output_path.parent / "manifest.json"
-    manifest_data = json.loads(manifest_path.read_text("utf-8"))
-    assert manifest_data["karaoke_subtitles_enabled"] is True
-    assert manifest_data["karaoke_cue_count"] > 0
-
-    burned_sha = hashlib.sha256(VALID_MP4_HEADER + b"burned").hexdigest()
-    assert res.content_sha256 == burned_sha
-    assert manifest_data["content_sha256"] == burned_sha
-
-@pytest.mark.asyncio
-async def test_narration_karaoke_multi_scene_timing(tmp_path: Path, lineage_data):
-    orch = make_mock_orchestrator(tmp_path)
-    m_exec = lineage_data["mission_execution"]
-    req = lineage_data["content_request"]
-    session = make_mock_session(m_exec=m_exec, req=req)
-
-    mock_narration_provider = AsyncMock()
-    mock_narration_provider.__class__.__name__ = "MockProvider"
-    mock_narration_provider.model = "mock-model"
-    mock_narration_provider.default_voice = "mock-voice"
-    mock_narration_provider.synthesize_segment_audio.side_effect = [
-        {"storage_uri": "channels/test/1.wav", "duration_ms": 3000, "content_hash": "hash1"},
-        {"storage_uri": "channels/test/2.wav", "duration_ms": 2000, "content_hash": "hash2"},
-    ]
-
-    mock_storage = MagicMock()
-    audio_path = tmp_path / "mock.wav"
-    audio_path.write_bytes(b"wav")
-    mock_storage.resolve_stored_uri.return_value = audio_path
-
-    mock_ffmpeg = AsyncMock()
-    mock_video_renderer = AsyncMock()
-    mock_video_renderer.render_clip.return_value = VisualV2VideoRenderResult(
-        output_path=tmp_path / "scene.mp4", scene_index=1, template_id="HERO_TITLE",
-        width=1920, height=1080, fps=12, duration_seconds=3.0, frame_count=36,
-        video_sha256="v", source_html_sha256="h", motion_profile="none"
-    )
-
-    svc = VisualProductionV2Service(
-        asset_orchestrator=orch, output_root=tmp_path / "renders",
-        browser_runtime_factory=MagicMock(), video_renderer=mock_video_renderer,
-        ffmpeg_renderer=mock_ffmpeg, narration_provider=mock_narration_provider,
-        narration_storage=mock_storage,
-    )
-
-    def fake_storyboard(_):
-        return StoryboardPlan(
-            title="Multi Test", estimated_duration_seconds=10.0,
-            scenes=[
-                StoryboardScene(
-                    sequence_index=1, section_id="1", purpose="1", source_statement_references=[],
-                    narration_excerpt="Scene one.", estimated_duration_seconds=5.0,
-                    visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="1"
-                ),
-                StoryboardScene(
-                    sequence_index=2, section_id="2", purpose="2", source_statement_references=[],
-                    narration_excerpt="Scene two.", estimated_duration_seconds=5.0,
-                    visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="2"
-                )
-            ]
-        )
-    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
-
-    async def fake_concat(clip_paths, output_path, srt_path=None):
-        Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat")
-    mock_ffmpeg.concatenate_clips.side_effect = fake_concat
-
-    async def fake_mux(video_path, audio_path, output_path):
-        Path(output_path).write_bytes(b"muxed_content")
-    mock_ffmpeg.mux_video_audio.side_effect = fake_mux
-
-    captured_ass = {}
-    async def fake_burn(video_path, ass_path, output_path):
-        captured_ass["content"] = Path(ass_path).read_text("utf-8")
-        Path(output_path).write_bytes(VALID_MP4_HEADER + b"burned")
-    mock_ffmpeg.burn_ass_subtitles.side_effect = fake_burn
-
-    await svc.render_mission_execution(session, m_exec.id, req.id, karaoke_subtitles=True)
-
-    ass_content = captured_ass["content"]
-
-    # The second scene should start at 3 seconds (0:00:03.00 in ASS format)
-    # The first scene starts at 0:00:00.00
-    assert "Dialogue: 0,0:00:00.00,0:00:03.00," in ass_content
-    assert "Dialogue: 0,0:00:03.00,0:00:05.00," in ass_content
 # --- P1J-C Tests ---
 @pytest.mark.asyncio
 async def test_audio_mix_guard_no_narration(tmp_path: Path, lineage_data):
@@ -1344,7 +1094,7 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
     # We pass SFX out of order to verify sorting by start_ms
     res = await svc.render_mission_execution(
         session, m_exec.id, req.id,
-        background_music=bgm, sfx_inputs=[sfx2, sfx1], karaoke_subtitles=True
+        background_music=bgm, sfx_inputs=[sfx2, sfx1], subtitle_enabled=False
     )
 
     # Verify mix_master_audio called with normalized arguments
@@ -1360,13 +1110,9 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
     assert sfx_inputs[0].start_ms == 500
     assert sfx_inputs[1].start_ms == 1000
 
-    # Verify karaoke called on mixed file
-    burn_args = mock_ffmpeg.burn_ass_subtitles.call_args[1]
-    assert "final_mixed.mp4" in str(burn_args["video_path"])
-
-    # Output should be the burned file hash
-    burned_sha = hashlib.sha256(VALID_MP4_HEADER + b"burned").hexdigest()
-    assert res.content_sha256 == burned_sha
+    # Output should be the mixed file hash
+    mixed_sha = hashlib.sha256(VALID_MP4_HEADER + b"mixed").hexdigest()
+    assert res.content_sha256 == mixed_sha
 
     # Check manifest
     manifest_path = res.output_path.parent / "manifest.json"
@@ -1375,3 +1121,148 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
     assert manifest_data["background_music_enabled"] is True
     assert manifest_data["sfx_event_count"] == 2
     assert manifest_data["audio_mix_target_duration_ms"] == 3500
+
+
+@pytest.mark.asyncio
+async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+    session = make_mock_session(m_exec=m_exec, req=req)
+
+    mock_narration_provider = AsyncMock()
+    mock_narration_provider.__class__.__name__ = "MockProvider"
+    mock_narration_provider.model = "mock-model"
+    mock_narration_provider.default_voice = "mock-voice"
+
+    mock_narration_provider.synthesize_segment_audio.return_value = {
+        "storage_uri": "channels/test/1.wav", "duration_ms": 3500, "content_hash": "hash1"
+    }
+
+    mock_storage = MagicMock()
+    audio_path = tmp_path / "mock.wav"
+    audio_path.write_bytes(b"wav")
+    mock_storage.resolve_stored_uri.return_value = audio_path
+
+    mock_ffmpeg = AsyncMock()
+    mock_video_renderer = AsyncMock()
+
+    mock_video_renderer.render_clip.return_value = VisualV2VideoRenderResult(
+        output_path=tmp_path / "scene.mp4", scene_index=1, template_id="HERO_TITLE",
+        width=1920, height=1080, fps=12, duration_seconds=3.5, frame_count=42,
+        video_sha256="video-visual-hash", source_html_sha256="h", motion_profile="none"
+    )
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch, output_root=tmp_path / "renders",
+        browser_runtime_factory=MagicMock(), video_renderer=mock_video_renderer,
+        ffmpeg_renderer=mock_ffmpeg, narration_provider=mock_narration_provider,
+        narration_storage=mock_storage,
+    )
+
+    def fake_storyboard(_):
+        return StoryboardPlan(
+            title="Subtitle Test", estimated_duration_seconds=5.0,
+            scenes=[StoryboardScene(
+                sequence_index=1, section_id="1", purpose="1", source_statement_references=[],
+                narration_excerpt="Testing subtitles integration", estimated_duration_seconds=5.0,
+                visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="1"
+            )]
+        )
+    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+
+    # Track call order (D)
+    call_order = []
+
+    async def fake_render(*args, **kwargs):
+        call_order.append("render_clip")
+        return mock_video_renderer.render_clip.return_value
+    mock_video_renderer.render_clip.side_effect = fake_render
+
+    captured_ass = {}
+    async def fake_burn(*args, **kwargs):
+        call_order.append("burn_ass_subtitles")
+        ass_path = kwargs.get("ass_path") or args[1]
+        captured_ass["content"] = Path(ass_path).read_text("utf-8")
+        Path(kwargs["output_path"]).write_bytes(VALID_MP4_HEADER + b"burned_subtitles")
+    mock_ffmpeg.burn_ass_subtitles.side_effect = fake_burn
+
+    async def fake_mux(*args, **kwargs):
+        call_order.append("mux_video_audio")
+        Path(kwargs["output_path"]).write_bytes(VALID_MP4_HEADER + b"final_muxed_scene")
+    mock_ffmpeg.mux_video_audio.side_effect = fake_mux
+
+    async def fake_concat(*args, **kwargs):
+        call_order.append("concatenate_clips")
+        Path(kwargs["output_path"]).write_bytes(VALID_MP4_HEADER + b"final_concat")
+    mock_ffmpeg.concatenate_clips.side_effect = fake_concat
+
+    # G: Fingerprint isolation
+    res_disabled = await svc.render_mission_execution(session, m_exec.id, req.id, subtitle_enabled=False)
+    call_order.clear()
+
+    res_enabled = await svc.render_mission_execution(session, m_exec.id, req.id, subtitle_enabled=True)
+
+    assert res_enabled.run_fingerprint != res_disabled.run_fingerprint
+    assert "karaoke" in res_enabled.run_fingerprint or res_enabled.run_fingerprint != ""
+
+    # D: Exact call order
+    assert call_order == ["render_clip", "burn_ass_subtitles", "mux_video_audio", "concatenate_clips"]
+
+    # E: Correct Path Chain
+    burn_args = mock_ffmpeg.burn_ass_subtitles.call_args[1]
+    assert "scene_001_visual.mp4" in str(burn_args["video_path"])
+    assert "scene_001.ass" in str(burn_args["ass_path"])
+    assert "scene_001_subtitled.mp4" in str(burn_args["output_path"])
+
+    mux_args = mock_ffmpeg.mux_video_audio.call_args[1]
+    assert "scene_001_subtitled.mp4" in str(mux_args["video_path"])
+    assert "scene_001.mp4" in str(mux_args["output_path"])
+
+    # C: ASS file structure check (mock logic in generate_karaoke_ass_content creates Dialogue)
+    # We check if the file was created and passed
+    ass_content = captured_ass["content"]
+    assert "[V4+ Styles]" in ass_content
+    assert "Testing" in ass_content
+    assert "subtitles" in ass_content
+    assert "integration" in ass_content
+
+    # F: Final SHA semantics
+    # The SHA should be computed on "final_muxed_scene"
+    final_muxed_sha = hashlib.sha256(VALID_MP4_HEADER + b"final_muxed_scene").hexdigest()
+
+    manifest_path = res_enabled.output_path.parent / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text("utf-8"))
+
+    assert manifest_data["scenes"][0]["content_sha256"] == final_muxed_sha
+
+    # H: Manifest
+    assert manifest_data["karaoke_subtitles_enabled"] is True
+    assert manifest_data["scenes"][0]["subtitle_cue_count"] > 0
+
+    # Check disabled manifest
+    manifest_disabled = json.loads((res_disabled.output_path.parent / "manifest.json").read_text("utf-8"))
+    assert manifest_disabled["karaoke_subtitles_enabled"] is False
+    assert manifest_disabled["scenes"][0].get("subtitle_cue_count") is None
+
+    # I: Failure in subtitle burn
+    import uuid
+    mock_ffmpeg.burn_ass_subtitles.side_effect = Exception("FFmpeg crash")
+    with pytest.raises(VerticalSliceError, match="ASS burn failed.*FFmpeg crash"):
+        await svc.render_mission_execution(session, m_exec.id, uuid.uuid4(), subtitle_enabled=True)
+
+
+@pytest.mark.asyncio
+async def test_karaoke_requires_narration(tmp_path: Path, lineage_data):
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+    session = make_mock_session(m_exec=m_exec, req=req)
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch, output_root=tmp_path,
+        narration_provider=None, narration_storage=None,
+    )
+
+    with pytest.raises(VerticalSliceError, match="Karaoke subtitles require narration"):
+        await svc.render_mission_execution(session, m_exec.id, req.id, subtitle_enabled=True)

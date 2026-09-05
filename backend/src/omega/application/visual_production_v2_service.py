@@ -59,6 +59,11 @@ class VerticalSliceError(Exception):
     pass
 
 
+KARAOKE_SUBTITLE_VERSION = "v1"
+KARAOKE_MAX_WORDS_PER_CUE = 5
+KARAOKE_MAX_CHARS_PER_CUE = 36
+
+
 class VerticalSliceSceneResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -73,6 +78,7 @@ class VerticalSliceSceneResult(BaseModel):
     content_sha256: str
     audio_content_sha256: str | None = None
     audio_duration_seconds: float | None = None
+    subtitle_cue_count: int | None = None
 
 
 @dataclass(frozen=True)
@@ -209,17 +215,16 @@ class VisualProductionV2Service:
         *,
         fps: int = 12,
         voice_profile: dict[str, Any] | None = None,
-        karaoke_subtitles: bool = False,
         background_music: VerticalSliceBackgroundMusicInput | None = None,
         sfx_inputs: list[VerticalSliceSFXInput] | None = None,
+        audio_mix_enabled: bool = False,
+        subtitle_enabled: bool = False,
     ) -> VerticalSliceRenderResult:
         audio_mix_enabled = background_music is not None or bool(sfx_inputs)
 
         if audio_mix_enabled and not self._narration_provider:
             raise VerticalSliceError("narration_provider MUST be configured when audio mix is enabled")
 
-        if karaoke_subtitles and not self._narration_provider:
-            raise VerticalSliceError("narration_provider MUST be configured when karaoke_subtitles is True")
 
         if fps <= 0 or fps > 60:
             raise VerticalSliceError(f"Invalid fps: {fps}. Must be > 0 and <= 60.")
@@ -309,6 +314,9 @@ class VisualProductionV2Service:
         if not script_version:
             raise VerticalSliceError(f"No ScriptVersion available for request '{content_request_id}'")
 
+        if subtitle_enabled and not self._narration_provider:
+            raise VerticalSliceError("Karaoke subtitles require narration")
+
         # 3. Deterministic Run Fingerprint & Idempotency Check
         fingerprint_input = (
             f"omega-vertical-slice-v0:{mission_execution_id}:"
@@ -323,8 +331,9 @@ class VisualProductionV2Service:
             if voice_profile:
                 normalized_vp = json.dumps(voice_profile, sort_keys=True)
                 fingerprint_input += f":{normalized_vp}"
-            if karaoke_subtitles:
-                fingerprint_input += ":karaoke-ass-v1"
+            if subtitle_enabled:
+                subtitle_marker = f"karaoke:{KARAOKE_SUBTITLE_VERSION}:words={KARAOKE_MAX_WORDS_PER_CUE}:chars={KARAOKE_MAX_CHARS_PER_CUE}"
+                fingerprint_input += f":{subtitle_marker}"
 
         normalized_sfx = []
         if audio_mix_enabled:
@@ -443,8 +452,6 @@ class VisualProductionV2Service:
             image_scenes = 0
             broll_scenes = 0
 
-            karaoke_cues = []
-            karaoke_cursor_ms = 0
 
             indices = set()
             for scene in storyboard.scenes:
@@ -507,18 +514,28 @@ class VisualProductionV2Service:
                         audio_sha = audio_asset["content_hash"]
                         narration_total_duration_ms += duration_ms
 
-                        if karaoke_subtitles:
+                        scene_subtitle_cues = 0
+                        if subtitle_enabled:
                             segment = {
                                 "text": scene.narration_excerpt,
-                                "start_ms": karaoke_cursor_ms,
+                                "start_ms": 0,
                                 "duration_ms": duration_ms,
                             }
-                            karaoke_cursor_ms += duration_ms
                             try:
-                                scene_cues = generate_karaoke_cues([segment])
-                                karaoke_cues.extend(scene_cues)
+                                scene_cues = generate_karaoke_cues(
+                                    [segment],
+                                    max_words_per_cue=KARAOKE_MAX_WORDS_PER_CUE,
+                                    max_chars_per_cue=KARAOKE_MAX_CHARS_PER_CUE,
+                                )
+                                scene_subtitle_cues = len(scene_cues)
+                                ass_content = generate_karaoke_ass_content(scene_cues, width=1920, height=1080)
+                                ass_path = work_dir / f"scene_{scene.sequence_index:03d}.ass"
+                                with open(ass_path, "w", encoding="utf-8") as f:
+                                    f.write(ass_content)
+                                if not ass_path.exists() or ass_path.stat().st_size <= 0:
+                                    raise VerticalSliceError(f"ASS file missing or empty for scene {scene.sequence_index}")
                             except Exception as e:
-                                raise VerticalSliceError(f"generate_karaoke_cues failed: {self._sanitize_error(e)}") from e
+                                raise VerticalSliceError(f"Karaoke generation failed: {self._sanitize_error(e)}") from e
 
                     # Meaningful query fallback for IMAGE and BROLL
                     if effective_strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
@@ -595,9 +612,24 @@ class VisualProductionV2Service:
                     final_scene_sha = render_res.video_sha256
 
                     if self._narration_provider:
+                        mux_video_input = scene_visual_out_path
+                        if subtitle_enabled:
+                            scene_subtitled_visual_path = work_dir / f"scene_{scene.sequence_index:03d}_subtitled.mp4"
+                            try:
+                                await self._ffmpeg_renderer.burn_ass_subtitles(
+                                    video_path=scene_visual_out_path,
+                                    ass_path=ass_path,
+                                    output_path=scene_subtitled_visual_path,
+                                )
+                            except Exception as e:
+                                raise VerticalSliceError(f"ASS burn failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
+                            if not scene_subtitled_visual_path.exists() or scene_subtitled_visual_path.stat().st_size <= 0:
+                                raise VerticalSliceError(f"Subtitle burned output missing or empty for scene {scene.sequence_index}")
+                            mux_video_input = scene_subtitled_visual_path
+
                         try:
                             await self._ffmpeg_renderer.mux_video_audio(
-                                video_path=scene_visual_out_path,
+                                video_path=mux_video_input,
                                 audio_path=audio_path,
                                 output_path=scene_out_path,
                             )
@@ -625,19 +657,9 @@ class VisualProductionV2Service:
                             content_sha256=final_scene_sha,
                             audio_content_sha256=audio_sha,
                             audio_duration_seconds=audio_duration_sec,
+                            subtitle_cue_count=scene_subtitle_cues if subtitle_enabled else None,
                         )
                     )
-
-            # 7. ASS generation
-            ass_path = None
-            if karaoke_subtitles:
-                try:
-                    ass_content = generate_karaoke_ass_content(karaoke_cues, width=1920, height=1080)
-                    ass_path = work_dir / "karaoke.ass"
-                    with open(ass_path, "w", encoding="utf-8") as f:
-                        f.write(ass_content)
-                except Exception as e:
-                    raise VerticalSliceError(f"ASS generation/write failed: {self._sanitize_error(e)}") from e
 
             # 8. Final Concatenation
             final_temp_mp4 = work_dir / "final_temp.mp4"
@@ -771,31 +793,8 @@ class VisualProductionV2Service:
                     "audio_mix_target_duration_ms": audio_mix_target_duration_ms,
                 }
 
-            # 9. Karaoke Burn-in
-            if karaoke_subtitles:
-                final_karaoke_mp4 = work_dir / "final_karaoke.mp4"
-                try:
-                    await self._ffmpeg_renderer.burn_ass_subtitles(
-                        video_path=working_final_mp4,
-                        ass_path=ass_path,
-                        output_path=final_karaoke_mp4,
-                    )
-                except Exception as e:
-                    raise VerticalSliceError(f"ASS burn-in failed: {self._sanitize_error(e)}") from e
-
-                if not final_karaoke_mp4.is_file() or final_karaoke_mp4.stat().st_size <= 0:
-                    raise VerticalSliceError("Burned MP4 missing or empty")
-
-                with open(final_karaoke_mp4, "rb") as f:
-                    hdr = f.read(4096)
-                    if b"ftyp" not in hdr:
-                        raise VerticalSliceError("Burned MP4 missing ftyp header")
-
-                final_sha = self._compute_streaming_sha(final_karaoke_mp4)
-                final_karaoke_mp4.replace(final_mp4_path)
-            else:
-                final_sha = self._compute_streaming_sha(working_final_mp4)
-                working_final_mp4.replace(final_mp4_path)
+            final_sha = self._compute_streaming_sha(working_final_mp4)
+            working_final_mp4.replace(final_mp4_path)
 
             manifest_content = {
                 "run_fingerprint": run_fingerprint,
@@ -814,8 +813,7 @@ class VisualProductionV2Service:
                 "content_sha256": final_sha,
                 **audio_mix_manifest,
                 "narration_enabled": bool(self._narration_provider),
-                "karaoke_subtitles_enabled": karaoke_subtitles,
-                "karaoke_cue_count": len(karaoke_cues) if karaoke_subtitles else 0,
+                "karaoke_subtitles_enabled": subtitle_enabled,
                 "narration_provider": self._narration_provider.__class__.__name__ if self._narration_provider else None,
                 "narration_model": getattr(self._narration_provider, "model", None) if self._narration_provider else None,
                 "narration_voice": getattr(self._narration_provider, "default_voice", None) if self._narration_provider else None,
