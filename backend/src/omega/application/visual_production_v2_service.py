@@ -898,6 +898,311 @@ class VisualProductionV2Service:
             run_fingerprint=run_fingerprint,
         )
 
+
+    async def regenerate_scene(
+        self,
+        session: AsyncSession,
+        mission_execution_id: UUID,
+        content_request_id: UUID,
+        base_run_fingerprint: str,
+        scene_index: int,
+        visual_strategy_override: VisualStrategy | None = None,
+        asset_query_override: str | None = None,
+    ):
+        if not re.match(r"^[0-9a-f]{64}$", base_run_fingerprint):
+            raise VerticalSliceError("Invalid run_fingerprint format")
+
+        base_dir = self._output_root / str(mission_execution_id) / base_run_fingerprint
+        manifest_path = base_dir / "manifest.json"
+
+        if not manifest_path.exists():
+            raise VerticalSliceError("Base manifest not found")
+
+        final_mp4 = base_dir / "final.mp4"
+        if not final_mp4.is_file() or final_mp4.stat().st_size <= 0:
+            raise VerticalSliceError("Base preview requires valid final.mp4")
+
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        if manifest.get("run_fingerprint") != base_run_fingerprint:
+            raise VerticalSliceError("Base manifest run_fingerprint mismatch")
+
+        if manifest.get("scene_artifacts_version") != "v1":
+            raise VerticalSliceError("Scene preview unavailable for legacy run")
+
+        if manifest.get("narration_enabled") or manifest.get("karaoke_subtitles_enabled") or manifest.get("audio_mix_enabled"):
+            raise VerticalSliceError("V1 regeneration unsupported for audio/subtitle enabled base runs")
+
+        base_scenes = manifest.get("scenes", [])
+        scene_info = next((s for s in base_scenes if s.get("sequence_index") == scene_index), None)
+        if not scene_info:
+            raise VerticalSliceError(f"Scene {scene_index} not found in manifest")
+
+        for s_info in base_scenes:
+            s_idx = s_info["sequence_index"]
+            s_mp4 = base_dir / "scenes" / f"scene_{s_idx:03d}.mp4"
+            if not s_mp4.is_file() or s_mp4.stat().st_size <= 0:
+                raise VerticalSliceError(f"Base scene {s_idx} missing or empty")
+            with open(s_mp4, "rb") as f:
+                if b"ftyp" not in f.read(4096):
+                    raise VerticalSliceError(f"Base scene {s_idx} missing ftyp header")
+            if self._compute_streaming_sha(s_mp4) != s_info.get("content_sha256"):
+                raise VerticalSliceError(f"Base scene {s_idx} SHA256 mismatch")
+
+        if visual_strategy_override == VisualStrategy.SCREENSHOT:
+            raise VerticalSliceError("SCREENSHOT materialization is not yet implemented")
+
+        norm_strat = visual_strategy_override.value if visual_strategy_override else ""
+        norm_query = asset_query_override.strip() if asset_query_override else ""
+
+        fingerprint_input = f"scene-regenerate-v1:{base_run_fingerprint}:{scene_index}:{norm_strat}:{norm_query}"
+        rev_fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
+
+        rev_dir = self._output_root / str(mission_execution_id) / rev_fingerprint
+        if rev_dir.exists():
+            rev_manifest_path = rev_dir / "manifest.json"
+            rev_final_mp4 = rev_dir / "final.mp4"
+            if not rev_manifest_path.exists() or not rev_final_mp4.is_file() or rev_final_mp4.stat().st_size <= 0:
+                raise VerticalSliceError("Existing revision directory is partial or corrupt")
+            with open(rev_manifest_path, encoding="utf-8") as f:
+                rev_manifest = json.load(f)
+            if rev_manifest.get("run_fingerprint") != rev_fingerprint:
+                raise VerticalSliceError("Existing revision manifest fingerprint mismatch")
+            if rev_manifest.get("base_run_fingerprint") != base_run_fingerprint:
+                raise VerticalSliceError("Existing revision base fingerprint mismatch")
+            if rev_manifest.get("regenerated_scene_indices") != [scene_index]:
+                raise VerticalSliceError("Existing revision indices mismatch")
+            with open(rev_final_mp4, "rb") as f:
+                if b"ftyp" not in f.read(4096):
+                    raise VerticalSliceError("Existing revision final.mp4 missing ftyp header")
+            if self._compute_streaming_sha(rev_final_mp4) != rev_manifest.get("content_sha256"):
+                raise VerticalSliceError("Existing revision final.mp4 SHA mismatch")
+
+            for s_info in rev_manifest.get("scenes", []):
+                s_idx = s_info["sequence_index"]
+                s_mp4 = rev_dir / "scenes" / f"scene_{s_idx:03d}.mp4"
+                if not s_mp4.is_file() or s_mp4.stat().st_size <= 0:
+                    raise VerticalSliceError(f"Existing revision scene {s_idx} missing or empty")
+                with open(s_mp4, "rb") as f:
+                    if b"ftyp" not in f.read(4096):
+                        raise VerticalSliceError(f"Existing revision scene {s_idx} missing ftyp header")
+                if self._compute_streaming_sha(s_mp4) != s_info.get("content_sha256"):
+                    raise VerticalSliceError(f"Existing revision scene {s_idx} SHA mismatch")
+
+            return VerticalSliceRenderResult(
+                mission_id=UUID(rev_manifest["mission_id"]),
+                mission_execution_id=mission_execution_id,
+                content_request_id=content_request_id,
+                script_version_id=UUID(rev_manifest["script_version_id"]),
+                scene_count=rev_manifest["scene_count"],
+                template_scene_count=rev_manifest.get("template_scene_count", 0),
+                image_scene_count=rev_manifest.get("image_scene_count", 0),
+                broll_scene_count=rev_manifest.get("broll_scene_count", 0),
+                duration_seconds=rev_manifest["duration_seconds"],
+                width=rev_manifest["width"],
+                height=rev_manifest["height"],
+                fps=rev_manifest["fps"],
+                output_path=rev_final_mp4,
+                content_sha256=rev_manifest["content_sha256"],
+                run_fingerprint=rev_fingerprint,
+            )
+
+        work_dir = self._output_root / "work" / rev_fingerprint
+        if work_dir.exists():
+            shutil.rmtree(work_dir)
+
+        work_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            script_version_id = UUID(manifest["script_version_id"])
+            script_version = await session.get(ScriptVersion, script_version_id)
+            if not script_version:
+                raise VerticalSliceError("Script version not found")
+
+            sdict = ScriptStoryboardAdapter.to_script_dict(script_version)
+            plan = self._storyboard_engine.generate_storyboard(sdict)
+
+            target_scene = next((s for s in plan.scenes if s.sequence_index == scene_index), None)
+            if not target_scene:
+                raise VerticalSliceError("Scene not found in storyboard")
+
+            original_strategy = target_scene.visual_strategy
+
+            if visual_strategy_override:
+                target_scene.visual_strategy = visual_strategy_override
+            if asset_query_override is not None:
+                target_scene.asset_query_hint = asset_query_override
+
+            target_scene = self._apply_v0_compatibility(target_scene)
+            effective_strategy = target_scene.visual_strategy
+
+            if effective_strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
+                self._ensure_meaningful_query(target_scene)
+
+            fps = manifest["fps"]
+            actual_duration = scene_info["duration_seconds"]
+            broll_asset = None
+            asset_kind_str = None
+            asset_provider_str = None
+            asset_id_str = None
+            asset_query_str = None
+
+            direction = self._visual_director.resolve(target_scene)
+            payload = self._template_resolver.resolve(target_scene, direction)
+
+            assets = ()
+            if direction.asset_requirements:
+                req_spec = direction.asset_requirements[0]
+                asset_kind_str = req_spec.kind.value
+                asset_request = self._visual_asset_engine.build_request(
+                    scene_index=target_scene.sequence_index,
+                    requirement=req_spec,
+                )
+                if asset_request is None:
+                    raise VerticalSliceError("Could not build required visual asset request")
+
+                asset_query_str = asset_request.query
+
+                try:
+                    resolved_asset = await self._orchestrator.resolve(asset_request)
+                except Exception as e:
+                    raise VerticalSliceError(f"Asset orchestrator failed: {self._sanitize_error(e)}") from e
+
+                asset_provider_str = resolved_asset.provider
+                asset_id_str = resolved_asset.asset_id
+
+                if req_spec.kind == VisualAssetKind.IMAGE:
+                    bound_img = VisualAssetMaterializer.materialize(resolved_asset)
+                    assets = (bound_img,)
+                elif req_spec.kind == VisualAssetKind.BROLL:
+                    bound_broll = VisualAssetMaterializer.materialize_broll(resolved_asset)
+                    assets = (bound_broll,)
+                    broll_asset = bound_broll
+                else:
+                    raise VerticalSliceError(f"Unsupported asset requirement kind: {req_spec.kind}")
+
+            try:
+                document = self._template_renderer.render(payload, assets=assets)
+            except Exception as e:
+                raise VerticalSliceError(f"Template renderer failed: {self._sanitize_error(e)}") from e
+
+            async with self._browser_runtime_factory() as browser_ctx:
+                render_res = await self._video_renderer.render_clip(
+                    document=document,
+                    motion_profile=direction.motion_profile,
+                    duration_seconds=actual_duration,
+                    output_path=work_dir / f"scene_{scene_index:03d}.mp4",
+                    browser_runtime=browser_ctx,
+                    fps=fps,
+                    broll_asset=broll_asset,
+                )
+
+            if not render_res.output_path.exists() or render_res.output_path.stat().st_size <= 0:
+                raise VerticalSliceError("Rendered output is missing or empty")
+            with open(render_res.output_path, "rb") as f:
+                if b"ftyp" not in f.read(4096):
+                    raise VerticalSliceError("Rendered output missing ftyp header")
+
+            new_sha = self._compute_streaming_sha(render_res.output_path)
+            if new_sha != render_res.video_sha256:
+                raise VerticalSliceError("Rendered output SHA mismatch")
+
+            ordered_scene_paths = []
+            new_scene_results = []
+
+            for s_info in base_scenes:
+                s_idx = s_info["sequence_index"]
+                work_path = work_dir / f"scene_{s_idx:03d}.mp4"
+                if s_idx == scene_index:
+                    ordered_scene_paths.append(render_res.output_path)
+                    new_scene_info = dict(s_info)
+                    new_scene_info["original_strategy"] = original_strategy.value
+                    new_scene_info["effective_strategy"] = effective_strategy.value
+                    new_scene_info["template_id"] = render_res.template_id
+                    new_scene_info["asset_kind"] = asset_kind_str
+                    new_scene_info["asset_provider"] = asset_provider_str
+                    new_scene_info["asset_id"] = asset_id_str
+                    new_scene_info["asset_query"] = asset_query_str
+                    new_scene_info["duration_seconds"] = render_res.duration_seconds
+                    new_scene_info["content_sha256"] = new_sha
+
+                    if "visual_strategy" in new_scene_info:
+                        del new_scene_info["visual_strategy"]
+                    if "asset_query_hint" in new_scene_info:
+                        del new_scene_info["asset_query_hint"]
+
+                    new_scene_results.append(new_scene_info)
+                else:
+                    base_s_mp4 = base_dir / "scenes" / f"scene_{s_idx:03d}.mp4"
+                    shutil.copy2(base_s_mp4, work_path)
+                    if self._compute_streaming_sha(work_path) != s_info["content_sha256"]:
+                        raise VerticalSliceError("Copied scene SHA mismatch")
+                    ordered_scene_paths.append(work_path)
+                    new_scene_results.append(s_info)
+
+            final_temp_mp4 = work_dir / "final_temp.mp4"
+            await self._ffmpeg_renderer.concatenate_clips(
+                clip_paths=ordered_scene_paths,
+                output_path=final_temp_mp4,
+                srt_path=None,
+            )
+
+            if not final_temp_mp4.is_file() or final_temp_mp4.stat().st_size <= 0:
+                raise VerticalSliceError("Final concatenated MP4 is missing or empty")
+            with open(final_temp_mp4, "rb") as f:
+                if b"ftyp" not in f.read(4096):
+                    raise VerticalSliceError("Final concatenated MP4 missing ftyp header")
+
+            final_sha = self._compute_streaming_sha(final_temp_mp4)
+
+            rev_dir.mkdir(parents=True, exist_ok=True)
+            final_mp4_path = rev_dir / "final.mp4"
+            final_temp_mp4.replace(final_mp4_path)
+
+            scenes_dir = rev_dir / "scenes"
+            scenes_dir.mkdir(parents=True, exist_ok=True)
+            for s_idx, spath in zip([s["sequence_index"] for s in new_scene_results], ordered_scene_paths, strict=True):
+                spath.replace(scenes_dir / f"scene_{s_idx:03d}.mp4")
+
+            image_scenes = sum(1 for s in new_scene_results if s.get("asset_kind") == "IMAGE")
+            broll_scenes = sum(1 for s in new_scene_results if s.get("asset_kind") == "BROLL")
+            template_scenes = len(new_scene_results) - image_scenes - broll_scenes
+
+            rev_manifest = dict(manifest)
+            rev_manifest["run_fingerprint"] = rev_fingerprint
+            rev_manifest["base_run_fingerprint"] = base_run_fingerprint
+            rev_manifest["regenerated_scene_indices"] = [scene_index]
+            rev_manifest["scenes"] = new_scene_results
+            rev_manifest["content_sha256"] = final_sha
+            rev_manifest["image_scene_count"] = image_scenes
+            rev_manifest["broll_scene_count"] = broll_scenes
+            rev_manifest["template_scene_count"] = template_scenes
+
+            with open(rev_dir / "manifest.json", "w", encoding="utf-8") as f:
+                json.dump(rev_manifest, f, indent=2)
+
+            return VerticalSliceRenderResult(
+                mission_id=UUID(manifest["mission_id"]),
+                mission_execution_id=mission_execution_id,
+                content_request_id=content_request_id,
+                script_version_id=script_version_id,
+                scene_count=len(ordered_scene_paths),
+                template_scene_count=template_scenes,
+                image_scene_count=image_scenes,
+                broll_scene_count=broll_scenes,
+                duration_seconds=manifest["duration_seconds"],
+                width=manifest["width"],
+                height=manifest["height"],
+                fps=fps,
+                output_path=final_mp4_path,
+                content_sha256=final_sha,
+                run_fingerprint=rev_fingerprint,
+            )
+
+        finally:
+            if work_dir.exists():
+                shutil.rmtree(work_dir, ignore_errors=True)
+
     def _apply_v0_compatibility(self, scene: StoryboardScene) -> StoryboardScene:
         strat = scene.visual_strategy
 

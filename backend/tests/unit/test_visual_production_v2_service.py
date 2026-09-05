@@ -1426,3 +1426,201 @@ async def test_idempotency_v1_edge_cases(tmp_path: Path, lineage_data):
     with pytest.raises(VerticalSliceError, match="Preview requires valid final.mp4"):
         svc.resolve_scene_preview(m_exec.id, res.run_fingerprint, 1)
 
+
+
+
+@pytest.mark.asyncio
+async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+    session = make_mock_session(m_exec=m_exec, req=req)
+    script = lineage_data["script"]
+
+    async def fake_get(model, obj_id):
+        if model is ScriptVersion and obj_id == script.id:
+            return script
+        return None
+
+    session.get = AsyncMock(side_effect=fake_get)
+
+
+    # Inject mock browser factory
+    mock_browser_ctx = MagicMock()
+    mock_browser = MagicMock()
+    mock_browser_ctx.__aenter__ = AsyncMock(return_value=mock_browser)
+    mock_browser_ctx.__aexit__ = AsyncMock(return_value=None)
+    def fake_browser_factory():
+        return mock_browser_ctx
+
+    mock_video_renderer = MagicMock()
+
+    render_calls = []
+    async def fake_render_clip(document, motion_profile, duration_seconds, output_path, browser_runtime, fps, broll_asset=None):
+        render_calls.append(document.scene_index)
+        content = f"render_content_seq_{document.scene_index}_{len(render_calls)}".encode()
+        output_path.write_bytes(VALID_MP4_HEADER + content)
+        import hashlib
+        sha = hashlib.sha256(VALID_MP4_HEADER + content).hexdigest()
+        return VisualV2VideoRenderResult(
+            output_path=output_path, scene_index=document.scene_index, template_id=document.template_id,
+            width=1920, height=1080, fps=fps, duration_seconds=duration_seconds, frame_count=int(duration_seconds * fps),
+            video_sha256=sha, source_html_sha256="b"*64, motion_profile=motion_profile,
+        )
+    mock_video_renderer.render_clip = AsyncMock(side_effect=fake_render_clip)
+
+    mock_ffmpeg_renderer = MagicMock()
+    concat_calls = []
+    async def fake_concat(clip_paths, output_path, srt_path=None):
+        concat_calls.append(len(clip_paths))
+        Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat_" + str(len(clip_paths)).encode('utf-8'))
+    mock_ffmpeg_renderer.concatenate_clips = AsyncMock(side_effect=fake_concat)
+
+    def fake_storyboard(_sdict):
+        return StoryboardPlan(
+            title="Test", estimated_duration_seconds=10.0,
+            scenes=[
+                StoryboardScene(
+                    sequence_index=1, section_id="Sec1", purpose="Hook", source_statement_references=[1],
+                    narration_excerpt="Title", estimated_duration_seconds=5.0, visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="Title"
+                ),
+                StoryboardScene(
+                    sequence_index=2, section_id="Sec2", purpose="Body", source_statement_references=[2],
+                    narration_excerpt="Body", estimated_duration_seconds=5.0, visual_strategy=VisualStrategy.IMAGE, visual_brief="Body", asset_query_hint="test image"
+                )
+            ],
+        )
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch, output_root=tmp_path, browser_runtime_factory=fake_browser_factory,
+        video_renderer=mock_video_renderer, ffmpeg_renderer=mock_ffmpeg_renderer,
+    )
+    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+
+    # 1. Generate Base Run
+    render_calls.clear()
+    concat_calls.clear()
+    res_base = await svc.render_mission_execution(session, m_exec.id, req.id)
+    base_fingerprint = res_base.run_fingerprint
+
+    assert render_calls == [1, 2]
+    base_manifest_path = tmp_path / str(m_exec.id) / base_fingerprint / "manifest.json"
+    with open(base_manifest_path) as f:
+        import json
+        base_manifest = json.load(f)
+
+    scene1_base_sha = base_manifest["scenes"][0]["content_sha256"]
+    scene2_base_sha = base_manifest["scenes"][1]["content_sha256"]
+
+    # 2. Regenerate Scene 2 with IMAGE and new query
+    render_calls.clear()
+    concat_calls.clear()
+    res_rev1 = await svc.regenerate_scene(
+        session, m_exec.id, req.id, base_fingerprint, scene_index=2,
+        visual_strategy_override=VisualStrategy.IMAGE,
+        asset_query_override="regenerated query test"
+    )
+
+    # Verify ONLY selected scene rendered
+    assert render_calls == [2]
+    # Verify concatenation ran with exactly 2 clips
+    assert concat_calls == [2]
+
+    rev1_fingerprint = res_rev1.run_fingerprint
+    assert rev1_fingerprint != base_fingerprint
+
+    rev1_manifest_path = tmp_path / str(m_exec.id) / rev1_fingerprint / "manifest.json"
+    with open(rev1_manifest_path) as f:
+        rev1_manifest = json.load(f)
+
+    assert rev1_manifest["regenerated_scene_indices"] == [2]
+
+    regen_scene = rev1_manifest["scenes"][1]
+    assert "original_strategy" in regen_scene
+    assert "effective_strategy" in regen_scene
+    assert "asset_query" in regen_scene
+    assert "visual_strategy" not in regen_scene
+    assert "asset_query_hint" not in regen_scene
+
+    assert rev1_manifest["image_scene_count"] == 1
+    assert rev1_manifest["broll_scene_count"] == 0
+    assert rev1_manifest["template_scene_count"] == 1
+
+    # Verify scene count/order unchanged
+    assert len(rev1_manifest["scenes"]) == 2
+    assert rev1_manifest["scenes"][0]["sequence_index"] == 1
+    assert rev1_manifest["scenes"][1]["sequence_index"] == 2
+
+    # Verify untouched scene SHAs unchanged
+    scene1_rev1_sha = rev1_manifest["scenes"][0]["content_sha256"]
+    assert scene1_rev1_sha == scene1_base_sha
+
+    # Verify selected SHA changes
+    scene2_rev1_sha = rev1_manifest["scenes"][1]["content_sha256"]
+    assert scene2_rev1_sha != scene2_base_sha
+
+    # Base run untouched check:
+    with open(base_manifest_path) as f:
+        base_manifest_recheck = json.load(f)
+    assert base_manifest_recheck["scenes"][1]["content_sha256"] == scene2_base_sha
+
+    # 3. Same overrides => same revision fingerprint
+    render_calls.clear()
+    concat_calls.clear()
+    res_rev1_dup = await svc.regenerate_scene(
+        session, m_exec.id, req.id, base_fingerprint, scene_index=2,
+        visual_strategy_override=VisualStrategy.IMAGE,
+        asset_query_override="regenerated query test"
+    )
+    assert res_rev1_dup.run_fingerprint == rev1_fingerprint
+    assert render_calls == []
+    assert concat_calls == []
+
+    # 4. Different overrides => different fingerprint
+    res_rev2 = await svc.regenerate_scene(
+        session, m_exec.id, req.id, base_fingerprint, scene_index=2,
+        visual_strategy_override=VisualStrategy.BROLL,
+        asset_query_override="regenerated query test"
+    )
+    assert res_rev2.run_fingerprint != rev1_fingerprint
+    assert res_rev2.run_fingerprint != base_fingerprint
+
+    # 5. SCREENSHOT remains gated
+    with pytest.raises(VerticalSliceError, match="SCREENSHOT materialization is not yet implemented"):
+        await svc.regenerate_scene(
+            session, m_exec.id, req.id, base_fingerprint, scene_index=2,
+            visual_strategy_override=VisualStrategy.SCREENSHOT,
+            asset_query_override="test"
+        )
+
+    # 6. Audio/subtitle enabled base fails closed
+    with open(base_manifest_path, "w") as f:
+        base_manifest_hack = dict(base_manifest_recheck)
+        base_manifest_hack["narration_enabled"] = True
+        json.dump(base_manifest_hack, f)
+
+    with pytest.raises(VerticalSliceError, match="V1 regeneration unsupported for audio/subtitle enabled base runs"):
+        await svc.regenerate_scene(
+            session, m_exec.id, req.id, base_fingerprint, scene_index=2,
+        )
+
+    with open(base_manifest_path, "w") as f:
+        base_manifest_hack["narration_enabled"] = False
+        base_manifest_hack["karaoke_subtitles_enabled"] = True
+        json.dump(base_manifest_hack, f)
+
+    with pytest.raises(VerticalSliceError, match="V1 regeneration unsupported for audio/subtitle enabled base runs"):
+        await svc.regenerate_scene(
+            session, m_exec.id, req.id, base_fingerprint, scene_index=2,
+        )
+
+    with open(base_manifest_path, "w") as f:
+        base_manifest_hack["karaoke_subtitles_enabled"] = False
+        base_manifest_hack["audio_mix_enabled"] = True
+        json.dump(base_manifest_hack, f)
+
+    with pytest.raises(VerticalSliceError, match="V1 regeneration unsupported for audio/subtitle enabled base runs"):
+        await svc.regenerate_scene(
+            session, m_exec.id, req.id, base_fingerprint, scene_index=2,
+        )
+
