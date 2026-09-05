@@ -72,7 +72,7 @@ class PexelsAssetProvider:
         return data
 
     def _select_image_variant(self, src: dict[str, Any]) -> str | None:
-        return src.get("original") or src.get("landscape") or src.get("large2x") or src.get("large") or src.get("medium")
+        return src.get("large2x") or src.get("landscape") or src.get("large") or src.get("medium") or src.get("original")
 
     def _select_video_variant(self, files: list[dict[str, Any]]) -> dict[str, Any] | None:
         valid_files = []
@@ -249,8 +249,7 @@ class PexelsAssetProvider:
 
         client = await self._get_client()
         buffer = bytearray()
-
-
+        actual_mime_type = candidate.mime_type
 
         current_url = candidate.source_url
         redirect_count = 0
@@ -299,9 +298,10 @@ class PexelsAssetProvider:
                     else:
                         if content_type != "video/mp4":
                             raise PexelsAssetProviderError(f"Invalid video Content-Type: {content_type}")
+                        if content_type != candidate.mime_type:
+                            raise PexelsAssetProviderError(f"Response MIME {content_type} does not match candidate MIME {candidate.mime_type}")
 
-                    if content_type != candidate.mime_type:
-                        raise PexelsAssetProviderError(f"Response MIME {content_type} does not match candidate MIME {candidate.mime_type}")
+                    actual_mime_type = content_type
 
                     async for chunk in response.aiter_bytes():
                         buffer.extend(chunk)
@@ -324,7 +324,7 @@ class PexelsAssetProvider:
             content=content,
             kind=candidate.kind,
             provider="pexels",
-            mime_type=candidate.mime_type,
+            mime_type=actual_mime_type,
             query=search_query,
             source_url=candidate.source_url,
             source_page_url=candidate.source_page_url,

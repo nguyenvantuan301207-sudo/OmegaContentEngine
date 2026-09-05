@@ -196,3 +196,47 @@ class FFmpegRenderer:
             raise FFmpegExecutionError(
                 f"FFmpeg concatenation failed (code {proc.returncode}): {err_msg}"
             )
+
+    async def mux_video_audio(
+        self,
+        video_path: Path | str,
+        audio_path: Path | str,
+        output_path: Path | str,
+        timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
+    ) -> None:
+        """Mux a video stream and an audio stream into an MP4 file."""
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", str(video_path),
+            "-i", str(audio_path),
+            "-map", "0:v:0",
+            "-map", "1:a:0",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-shortest",
+            str(out_p),
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except TimeoutError as exc:
+            proc.kill()
+            raise FFmpegExecutionError(
+                f"FFmpeg mux timed out after {timeout_seconds}s."
+            ) from exc
+
+        if proc.returncode != 0:
+            err_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
+            raise FFmpegExecutionError(
+                f"FFmpeg mux failed (code {proc.returncode}): {err_msg}"
+            )

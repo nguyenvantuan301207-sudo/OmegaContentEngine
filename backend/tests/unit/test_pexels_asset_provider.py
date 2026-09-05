@@ -463,21 +463,57 @@ async def test_mime_validation(dummy_cache: VisualAssetCache):
     with pytest.raises(PexelsAssetProviderError, match="Unsupported video candidate MIME: image/jpeg"):
         await provider.fetch(c_vid_jpg)
 
-    # Response mismatch
-    def mock_handler_mismatch(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/png"})
+    # Response mismatch - PNG success
+    def mock_handler_png(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/png", "Content-Length": "4"})
 
-    transport = httpx.MockTransport(mock_handler_mismatch)
-    async with httpx.AsyncClient(transport=transport) as client:
+    transport_png = httpx.MockTransport(mock_handler_png)
+    async with httpx.AsyncClient(transport=transport_png) as client:
         provider2 = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
-        c_mismatch = VisualAssetCandidate(
+        c_jpeg = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://test/file.jpg", source_page_url=None, mime_type="image/jpeg",
             width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
-        with pytest.raises(PexelsAssetProviderError, match="Response MIME image/png does not match candidate MIME image/jpeg"):
-            await provider2.fetch(c_mismatch)
+        asset_png = await provider2.fetch(c_jpeg)
+        assert asset_png.mime_type == "image/png"
+
+    # Response mismatch - WEBP success
+    def mock_handler_webp(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/webp", "Content-Length": "4"})
+
+    transport_webp = httpx.MockTransport(mock_handler_webp)
+    async with httpx.AsyncClient(transport=transport_webp) as client:
+        provider3 = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        asset_webp = await provider3.fetch(c_jpeg)
+        assert asset_webp.mime_type == "image/webp"
+
+    # Response mismatch - Unsupported failure
+    def mock_handler_unsupported(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"data", headers={"Content-Type": "application/octet-stream", "Content-Length": "4"})
+
+    transport_unsupported = httpx.MockTransport(mock_handler_unsupported)
+    async with httpx.AsyncClient(transport=transport_unsupported) as client:
+        provider4 = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        with pytest.raises(PexelsAssetProviderError, match="Invalid image Content-Type: application/octet-stream"):
+            await provider4.fetch(c_jpeg)
+
+    # Response mismatch - Video failure
+    def mock_handler_vid_mismatch(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"data", headers={"Content-Type": "video/webm", "Content-Length": "4"})
+
+    transport_vid_mismatch = httpx.MockTransport(mock_handler_vid_mismatch)
+    async with httpx.AsyncClient(transport=transport_vid_mismatch) as client:
+        provider5 = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
+        c_vid = VisualAssetCandidate(
+            provider_id="1", kind=VisualAssetKind.VIDEO, provider="pexels",
+            source_url="https://test/file.mp4", source_page_url=None, mime_type="video/mp4",
+            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            attribution_text=None, metadata={"search_query": "q"}
+        )
+        with pytest.raises(PexelsAssetProviderError, match="Invalid video Content-Type: video/webm"):
+            await provider5.fetch(c_vid)
 
 @pytest.mark.asyncio
 async def test_search_query_validation(dummy_cache: VisualAssetCache):
@@ -492,3 +528,35 @@ async def test_search_query_validation(dummy_cache: VisualAssetCache):
         )
         with pytest.raises(PexelsAssetProviderError, match="search_query"):
             await provider.fetch(c)
+
+
+def test_select_image_variant(dummy_cache: VisualAssetCache):
+    provider = PexelsAssetProvider("test-api-key", dummy_cache)
+
+    # A: large2x preferred
+    src_a = {
+        "original": "https://.../original.jpg",
+        "large2x": "https://.../large2x.jpg",
+        "landscape": "https://.../landscape.jpg",
+        "large": "https://.../large.jpg",
+        "medium": "https://.../medium.jpg"
+    }
+    assert provider._select_image_variant(src_a) == "https://.../large2x.jpg"
+
+    # B: landscape preferred if large2x absent
+    src_b = {
+        "original": "https://.../original.jpg",
+        "landscape": "https://.../landscape.jpg",
+        "large": "https://.../large.jpg",
+        "medium": "https://.../medium.jpg"
+    }
+    assert provider._select_image_variant(src_b) == "https://.../landscape.jpg"
+
+    # C: original fallback
+    src_c = {
+        "original": "https://.../original.jpg",
+    }
+    assert provider._select_image_variant(src_c) == "https://.../original.jpg"
+
+    # D: malformed/empty
+    assert provider._select_image_variant({}) is None

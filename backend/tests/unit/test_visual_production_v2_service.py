@@ -783,3 +783,208 @@ async def test_work_cleanup_on_failure(tmp_path: Path, lineage_data):
     run_dir = run_dirs[0]
     work_dir = run_dir / "work"
     assert not work_dir.exists()
+
+
+@pytest.mark.asyncio
+async def test_narration_success_flow(tmp_path: Path, lineage_data):
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+    session = make_mock_session(m_exec=m_exec, req=req)
+
+    mock_narration_provider = AsyncMock()
+    mock_narration_provider.__class__.__name__ = "MockProvider"
+    mock_narration_provider.model = "mock-model"
+    mock_narration_provider.default_voice = "mock-voice"
+    mock_narration_provider.synthesize_segment_audio.return_value = {
+        "storage_uri": "channels/test/123.wav",
+        "duration_ms": 3500,
+        "content_hash": "mock-audio-hash"
+    }
+
+    mock_storage = MagicMock()
+    audio_path = tmp_path / "mock.wav"
+    audio_path.write_bytes(b"wav")
+    mock_storage.resolve_stored_uri.return_value = audio_path
+
+    mock_ffmpeg = AsyncMock()
+    mock_video_renderer = AsyncMock()
+
+    out_mp4 = tmp_path / "scene.mp4"
+    mock_video_renderer.render_clip.return_value = VisualV2VideoRenderResult(
+        output_path=out_mp4,
+        scene_index=1,
+        template_id="HERO_TITLE",
+        width=1920, height=1080, fps=12,
+        duration_seconds=3.5, frame_count=42,
+        video_sha256="video-hash",
+        source_html_sha256="html-hash",
+        motion_profile="none"
+    )
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch,
+        output_root=tmp_path / "renders",
+        browser_runtime_factory=MagicMock(),
+        video_renderer=mock_video_renderer,
+        ffmpeg_renderer=mock_ffmpeg,
+        narration_provider=mock_narration_provider,
+        narration_storage=mock_storage,
+    )
+
+    def fake_storyboard(_):
+        return StoryboardPlan(
+            title="Narration Test",
+            estimated_duration_seconds=5.0,
+            scenes=[
+                StoryboardScene(
+                    sequence_index=1, section_id="1", purpose="1", source_statement_references=[],
+                    narration_excerpt="Narration test", estimated_duration_seconds=5.0,
+                    visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="1"
+                )
+            ]
+        )
+    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+
+    async def fake_concat(clip_paths, output_path, srt_path=None):
+        Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat")
+    mock_ffmpeg.concatenate_clips.side_effect = fake_concat
+
+    async def fake_mux(video_path, audio_path, output_path):
+        Path(output_path).write_bytes(b"muxed_content")
+    mock_ffmpeg.mux_video_audio.side_effect = fake_mux
+
+    voice_profile = {"pitch": "+5%"}
+    res = await svc.render_mission_execution(session, m_exec.id, req.id, voice_profile=voice_profile)
+
+    # A, B, C: Called once per scene with EXACT text and voice_profile
+    mock_narration_provider.synthesize_segment_audio.assert_called_once_with(
+        channel_id=m_exec.mission.channel_id,
+        request_id=req.id,
+        segment={"text": "Narration test"},
+        voice_profile=voice_profile,
+    )
+
+    # D: duration_ms controls visual render duration (3.5s)
+    render_args = mock_video_renderer.render_clip.call_args[1]
+    assert render_args["duration_seconds"] == 3.5
+    assert res.duration_seconds == 3.5
+
+    # E: mux_video_audio is invoked once for each narrated scene
+    mock_ffmpeg.mux_video_audio.assert_called_once()
+    mux_args = mock_ffmpeg.mux_video_audio.call_args[1]
+    assert "scene_001_visual.mp4" in str(mux_args["video_path"])
+    assert mux_args["audio_path"] == audio_path
+    assert "scene_001.mp4" in str(mux_args["output_path"])
+
+    # F: Final concatenate receives ONLY muxed paths
+    concat_args = mock_ffmpeg.concatenate_clips.call_args[1]
+    assert len(concat_args["clip_paths"]) == 1
+    assert concat_args["clip_paths"][0].name == "scene_001.mp4"
+
+    # M: Manifest records
+    manifest_path = res.output_path.parent / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text("utf-8"))
+    assert manifest_data["narration_enabled"] is True
+    assert manifest_data["narration_provider"] == "MockProvider"
+    assert manifest_data["narration_model"] == "mock-model"
+    assert manifest_data["narration_voice"] == "mock-voice"
+    assert manifest_data["scenes"][0]["audio_content_sha256"] == "mock-audio-hash"
+    assert manifest_data["scenes"][0]["audio_duration_seconds"] == 3.5
+
+    # A: Narrated scene content_sha256 is the muxed scene artifact, not the visual-only render SHA
+    assert manifest_data["scenes"][0]["content_sha256"] != "video-hash"
+
+    # Test Fingerprinting isolation (J, K, L)
+    fp_narrated = res.run_fingerprint
+
+    mock_ffmpeg.concatenate_clips.reset_mock()
+    res2 = await svc.render_mission_execution(session, m_exec.id, req.id, voice_profile={"pitch": "-5%"})
+    assert res2.run_fingerprint != fp_narrated
+
+    svc_silent = VisualProductionV2Service(
+        asset_orchestrator=orch,
+        output_root=tmp_path / "renders",
+        browser_runtime_factory=MagicMock(),
+        video_renderer=mock_video_renderer,
+        ffmpeg_renderer=mock_ffmpeg,
+    )
+    svc_silent._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+    res_silent = await svc_silent.render_mission_execution(session, m_exec.id, req.id)
+    assert res_silent.run_fingerprint != fp_narrated
+    assert res_silent.duration_seconds == 5.0  # Silent uses estimated duration
+
+    manifest_path_silent = res_silent.output_path.parent / "manifest.json"
+    manifest_data_silent = json.loads(manifest_path_silent.read_text("utf-8"))
+    # B: Silent mode uses original render_res.video_sha256
+    assert manifest_data_silent["scenes"][0]["content_sha256"] == "video-hash"
+
+    # Silent fingerprint exact compatibility check
+    fps = 12
+    script_version_id = req.scripts[0].id
+    expected_silent_fp = f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}"
+    expected_silent_hash = hashlib.sha256(expected_silent_fp.encode("utf-8")).hexdigest()
+    assert res_silent.run_fingerprint == expected_silent_hash
+
+
+@pytest.mark.asyncio
+async def test_narration_failures(tmp_path: Path, lineage_data):
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+    session = make_mock_session(m_exec=m_exec, req=req)
+
+    from omega.application.narration_provider import NarrationProviderError
+
+    mock_provider = AsyncMock()
+    mock_storage = MagicMock()
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch, output_root=tmp_path / "renders",
+        browser_runtime_factory=MagicMock(), narration_provider=mock_provider,
+        narration_storage=mock_storage,
+    )
+
+    def fake_storyboard(_):
+        return StoryboardPlan(
+            title="Narration Test", estimated_duration_seconds=5.0,
+            scenes=[StoryboardScene(
+                sequence_index=1, section_id="1", purpose="1", source_statement_references=[],
+                narration_excerpt="Text", estimated_duration_seconds=5.0,
+                visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="1"
+            )]
+        )
+    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+
+    # G: NarrationProviderError fails closed
+    mock_provider.synthesize_segment_audio.side_effect = NarrationProviderError("Provider error")
+    with pytest.raises(VerticalSliceError, match="Narration provider failed: .*Provider error"):
+        await svc.render_mission_execution(session, m_exec.id, req.id)
+
+    # H: Missing narration audio file fails closed
+    mock_provider.synthesize_segment_audio.side_effect = None
+    mock_provider.synthesize_segment_audio.return_value = {"storage_uri": "a.wav", "duration_ms": 1000, "content_hash": "hash"}
+
+    mock_path = tmp_path / "missing.wav"
+    mock_storage.resolve_stored_uri.return_value = mock_path  # Doesn't exist
+
+    with pytest.raises(VerticalSliceError, match="Audio file missing or empty"):
+        await svc.render_mission_execution(session, m_exec.id, req.id)
+
+    # I: duration_ms <= 0 fails closed
+    mock_path.write_bytes(b"data")
+    mock_provider.synthesize_segment_audio.return_value = {
+        "storage_uri": "a.wav",
+        "duration_ms": 0,
+        "content_hash": "hash",
+    }
+    with pytest.raises(VerticalSliceError, match="Audio duration missing or zero"):
+        await svc.render_mission_execution(session, m_exec.id, req.id)
+
+    # J: Empty string content_hash fails closed
+    mock_provider.synthesize_segment_audio.return_value = {
+        "storage_uri": "a.wav",
+        "duration_ms": 1000,
+        "content_hash": "",
+    }
+    with pytest.raises(VerticalSliceError, match="Audio asset missing content_hash"):
+        await svc.render_mission_execution(session, m_exec.id, req.id)

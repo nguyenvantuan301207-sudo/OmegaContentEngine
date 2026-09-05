@@ -199,7 +199,15 @@ class GeminiTTSNarrationProvider:
         if target_path.exists() and target_path.stat().st_size > 0:
             content_hash = compute_sha256(target_path)
             rel_uri = self.storage.to_relative_uri(channel_id, request_id, target_path)
-            duration_ms = int(target_path.stat().st_size / (24000 * 2) * 1000)
+
+            try:
+                with wave.open(str(target_path), "rb") as wav_file:
+                    frames = wav_file.getnframes()
+                    frame_rate = wav_file.getframerate()
+                    duration_ms = int(frames / frame_rate * 1000)
+            except wave.Error as e:
+                raise NarrationProviderError("Cached WAV file is malformed or not a valid WAV") from e
+
             return {
                 "id": uuid.uuid4(),
                 "channel_id": channel_id,

@@ -187,12 +187,46 @@ async def test_cache_hit_avoids_second_request(storage):
     req = uuid.uuid4()
 
     # First call
-    await provider.synthesize_segment_audio(chan, req, {"text": "Idempotent text"})
+    res1 = await provider.synthesize_segment_audio(chan, req, {"text": "Idempotent text"})
     assert call_count == 1
 
     # Second call with same text and voice
-    await provider.synthesize_segment_audio(chan, req, {"text": "Idempotent text"})
+    res2 = await provider.synthesize_segment_audio(chan, req, {"text": "Idempotent text"})
     assert call_count == 1  # Should hit cache
+    assert res1["duration_ms"] == 500
+    assert res2["duration_ms"] == 500
+
+@pytest.mark.asyncio
+async def test_cache_hit_duration_uses_frames_not_size(storage):
+    # 1000 frames @ 24000Hz = ~41.66ms -> 41ms duration.
+    # 1000 frames * 2 bytes = 2000 bytes PCM data.
+    # WAV header is 44 bytes. Total file size = 2044 bytes.
+    # Old logic: int(2044 / 48000 * 1000) = 42ms.
+    # New logic: int(1000 / 24000 * 1000) = 41ms.
+    pcm_data = generate_valid_pcm(1000)
+    b64_data = base64.b64encode(pcm_data).decode("ascii")
+    json_resp = {"candidates": [{"content": {"parts": [{"inlineData": {"data": b64_data}}]}}]}
+
+    client = create_mock_client(200, json_resp)
+    provider = GeminiTTSNarrationProvider(storage, api_key="test", client=client)
+
+    chan = uuid.uuid4()
+    req = uuid.uuid4()
+
+    # First call generates WAV
+    res1 = await provider.synthesize_segment_audio(chan, req, {"text": "Duration test text"})
+    assert res1["duration_ms"] == 41
+
+    # Next call reads from cache
+    res2 = await provider.synthesize_segment_audio(chan, req, {"text": "Duration test text"})
+    assert res2["duration_ms"] == 41
+
+    # Prove it fails closed if WAV is malformed
+    wav_path = storage.root / str(chan) / str(req) / Path(res1["storage_uri"]).name
+    wav_path.write_bytes(b"garbage" * 10)  # corrupt the WAV
+
+    with pytest.raises(NarrationProviderError, match="Cached WAV file is malformed or not a valid WAV"):
+        await provider.synthesize_segment_audio(chan, req, {"text": "Duration test text"})
 
 
 def test_factory_selects_gemini(storage, monkeypatch):

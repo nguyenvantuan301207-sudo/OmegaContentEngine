@@ -14,6 +14,8 @@ from sqlalchemy.orm import selectinload
 
 from omega.application import content_service
 from omega.application.ffmpeg_renderer import FFmpegRenderer
+from omega.application.media_storage import LocalMediaStorageProvider
+from omega.application.narration_provider import NarrationProvider
 from omega.application.storyboard_engine import (
     StoryboardEngine,
     StoryboardPlan,
@@ -58,6 +60,8 @@ class VerticalSliceSceneResult(BaseModel):
     asset_id: str | None
     duration_seconds: float
     content_sha256: str
+    audio_content_sha256: str | None = None
+    audio_duration_seconds: float | None = None
 
 
 class VerticalSliceRenderResult(BaseModel):
@@ -148,6 +152,8 @@ class VisualProductionV2Service:
         browser_runtime_factory: Callable[[], Any] | None = None,
         video_renderer: VisualV2VideoRenderer | None = None,
         ffmpeg_renderer: FFmpegRenderer | None = None,
+        narration_provider: NarrationProvider | None = None,
+        narration_storage: LocalMediaStorageProvider | None = None,
     ):
         self._orchestrator = asset_orchestrator
         self._output_root = output_root
@@ -159,6 +165,10 @@ class VisualProductionV2Service:
         self._visual_director = VisualDirector()
         self._visual_asset_engine = VisualAssetEngine()
         self._storyboard_engine = StoryboardEngine()
+        self._narration_provider = narration_provider
+        self._narration_storage = narration_storage
+        if self._narration_provider and not self._narration_storage:
+            raise ValueError("narration_storage is required when narration_provider is supplied")
 
     async def render_mission_execution(
         self,
@@ -167,6 +177,7 @@ class VisualProductionV2Service:
         content_request_id: UUID,
         *,
         fps: int = 12,
+        voice_profile: dict[str, Any] | None = None,
     ) -> VerticalSliceRenderResult:
         if fps <= 0 or fps > 60:
             raise VerticalSliceError(f"Invalid fps: {fps}. Must be > 0 and <= 60.")
@@ -261,6 +272,16 @@ class VisualProductionV2Service:
             f"omega-vertical-slice-v0:{mission_execution_id}:"
             f"{content_request_id}:{script_version.id}:{fps}"
         )
+        if self._narration_provider:
+            fingerprint_input += ":narrated"
+            provider_cls = self._narration_provider.__class__.__name__
+            model = getattr(self._narration_provider, "model", None)
+            voice = getattr(self._narration_provider, "default_voice", None)
+            fingerprint_input += f":{provider_cls}:{model}:{voice}"
+            if voice_profile:
+                normalized_vp = json.dumps(voice_profile, sort_keys=True)
+                fingerprint_input += f":{normalized_vp}"
+
         run_fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
 
         run_dir = self._output_root / str(mission_execution_id) / run_fingerprint
@@ -353,6 +374,47 @@ class VisualProductionV2Service:
                     effective_scene = self._apply_v0_compatibility(scene)
                     effective_strategy = effective_scene.visual_strategy
 
+                    audio_sha: str | None = None
+                    audio_duration_sec: float | None = None
+                    actual_scene_duration_seconds = effective_scene.estimated_duration_seconds
+                    audio_path: Path | None = None
+
+                    if self._narration_provider:
+                        if not scene.narration_excerpt:
+                            raise VerticalSliceError(f"Empty narration text for scene {scene.sequence_index}")
+
+                        try:
+                            audio_asset = await self._narration_provider.synthesize_segment_audio(
+                                channel_id=mission.channel_id,
+                                request_id=content_request_id,
+                                segment={"text": scene.narration_excerpt},
+                                voice_profile=voice_profile,
+                            )
+                        except Exception as e:
+                            raise VerticalSliceError(f"Narration provider failed: {self._sanitize_error(e)}") from e
+
+                        rel_uri = audio_asset.get("storage_uri")
+                        if not rel_uri:
+                            raise VerticalSliceError("Audio asset missing storage_uri")
+
+                        audio_path = self._narration_storage.resolve_stored_uri(
+                            mission.channel_id, content_request_id, rel_uri
+                        )
+
+                        if not audio_path.exists() or audio_path.stat().st_size <= 0:
+                            raise VerticalSliceError("Audio file missing or empty")
+
+                        duration_ms = audio_asset.get("duration_ms")
+                        if not duration_ms or duration_ms <= 0:
+                            raise VerticalSliceError("Audio duration missing or zero")
+
+                        if not audio_asset.get("content_hash"):
+                            raise VerticalSliceError("Audio asset missing content_hash")
+
+                        audio_duration_sec = duration_ms / 1000.0
+                        actual_scene_duration_seconds = audio_duration_sec
+                        audio_sha = audio_asset["content_hash"]
+
                     # Meaningful query fallback for IMAGE and BROLL
                     if effective_strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
                         self._ensure_meaningful_query(effective_scene)
@@ -410,12 +472,14 @@ class VisualProductionV2Service:
                         raise VerticalSliceError(f"Template renderer failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
 
                     scene_out_path = work_dir / f"scene_{scene.sequence_index:03d}.mp4"
+                    scene_visual_out_path = work_dir / f"scene_{scene.sequence_index:03d}_visual.mp4" if self._narration_provider else scene_out_path
+
                     try:
                         render_res = await self._video_renderer.render_clip(
                             document=document,
                             motion_profile=direction.motion_profile,
-                            duration_seconds=effective_scene.estimated_duration_seconds,
-                            output_path=scene_out_path,
+                            duration_seconds=actual_scene_duration_seconds,
+                            output_path=scene_visual_out_path,
                             browser_runtime=browser,
                             fps=fps,
                             broll_asset=broll_asset,
@@ -423,8 +487,25 @@ class VisualProductionV2Service:
                     except Exception as e:
                         raise VerticalSliceError(f"Scene video render failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
 
+                    final_scene_sha = render_res.video_sha256
+
+                    if self._narration_provider:
+                        try:
+                            await self._ffmpeg_renderer.mux_video_audio(
+                                video_path=scene_visual_out_path,
+                                audio_path=audio_path,
+                                output_path=scene_out_path,
+                            )
+                        except Exception as e:
+                            raise VerticalSliceError(f"Mux failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
+
+                        if not scene_out_path.exists() or scene_out_path.stat().st_size <= 0:
+                            raise VerticalSliceError(f"Mux output missing or empty for scene {scene.sequence_index}")
+
+                        final_scene_sha = self._compute_streaming_sha(scene_out_path)
+
                     ordered_scene_paths.append(scene_out_path)
-                    total_duration += effective_scene.estimated_duration_seconds
+                    total_duration += actual_scene_duration_seconds
 
                     scene_results.append(
                         VerticalSliceSceneResult(
@@ -435,8 +516,10 @@ class VisualProductionV2Service:
                             asset_kind=asset_kind_str,
                             asset_provider=asset_provider_str,
                             asset_id=asset_id_str,
-                            duration_seconds=effective_scene.estimated_duration_seconds,
-                            content_sha256=render_res.video_sha256,
+                            duration_seconds=actual_scene_duration_seconds,
+                            content_sha256=final_scene_sha,
+                            audio_content_sha256=audio_sha,
+                            audio_duration_seconds=audio_duration_sec,
                         )
                     )
 
@@ -479,6 +562,10 @@ class VisualProductionV2Service:
                 "height": 1080,
                 "fps": fps,
                 "content_sha256": final_sha,
+                "narration_enabled": bool(self._narration_provider),
+                "narration_provider": self._narration_provider.__class__.__name__ if self._narration_provider else None,
+                "narration_model": getattr(self._narration_provider, "model", None) if self._narration_provider else None,
+                "narration_voice": getattr(self._narration_provider, "default_voice", None) if self._narration_provider else None,
                 "scenes": [s.model_dump() for s in scene_results],
             }
 
