@@ -424,6 +424,22 @@ class VisualProductionV2Service:
                     if b"ftyp" not in hdr:
                         raise VerticalSliceError("Existing final.mp4 missing ftyp header")
 
+                if manifest_data.get("scene_artifacts_version") == "v1":
+                    scenes_dir = run_dir / "scenes"
+                    for scene_data in manifest_data.get("scenes", []):
+                        seq_idx = scene_data.get("sequence_index")
+                        if seq_idx is None or seq_idx <= 0:
+                            raise VerticalSliceError("Invalid sequence index in manifest")
+                        scene_mp4 = scenes_dir / f"scene_{seq_idx:03d}.mp4"
+                        if not scene_mp4.is_file() or scene_mp4.stat().st_size <= 0:
+                            raise VerticalSliceError("Persisted scene missing or empty")
+                        with open(scene_mp4, "rb") as f:
+                            s_hdr = f.read(4096)
+                            if b"ftyp" not in s_hdr:
+                                raise VerticalSliceError("Persisted scene missing ftyp header")
+                        if self._compute_streaming_sha(scene_mp4) != scene_data.get("content_sha256"):
+                            raise VerticalSliceError("Persisted scene SHA256 mismatch")
+
                 return VerticalSliceRenderResult(
                     mission_id=mission.id,
                     mission_execution_id=mission_execution_id,
@@ -817,8 +833,24 @@ class VisualProductionV2Service:
             final_sha = self._compute_streaming_sha(working_final_mp4)
             working_final_mp4.replace(final_mp4_path)
 
+            scenes_dir = run_dir / "scenes"
+            scenes_dir.mkdir(parents=True, exist_ok=True)
+            for scene_res, scene_path in zip(scene_results, ordered_scene_paths, strict=True):
+                if not scene_path.is_file() or scene_path.stat().st_size <= 0:
+                    raise VerticalSliceError(f"Scene {scene_res.sequence_index} artifact missing or empty")
+                with open(scene_path, "rb") as f:
+                    if b"ftyp" not in f.read(4096):
+                        raise VerticalSliceError(f"Scene {scene_res.sequence_index} artifact missing ftyp header")
+                c_sha = self._compute_streaming_sha(scene_path)
+                if c_sha != scene_res.content_sha256:
+                    print(f'MISMATCH: c_sha={c_sha} vs content_sha={scene_res.content_sha256} path={scene_path}')
+                    raise VerticalSliceError(f"Scene {scene_res.sequence_index} artifact SHA mismatch")
+                final_scene_path = scenes_dir / f"scene_{scene_res.sequence_index:03d}.mp4"
+                scene_path.replace(final_scene_path)
+
             manifest_content = {
                 "run_fingerprint": run_fingerprint,
+                "scene_artifacts_version": "v1",
                 "mission_id": str(mission.id),
                 "mission_execution_id": str(mission_execution_id),
                 "content_request_id": str(content_request_id),
@@ -939,3 +971,47 @@ class VisualProductionV2Service:
             while chunk := f.read(1024 * 1024):
                 hasher.update(chunk)
         return hasher.hexdigest()
+
+    def resolve_scene_preview(self, mission_execution_id: UUID, run_fingerprint: str, scene_index: int) -> Path:
+        import re
+        if not re.match(r"^[0-9a-f]{64}$", run_fingerprint):
+            raise VerticalSliceError("Invalid run_fingerprint format")
+
+        if scene_index <= 0:
+            raise VerticalSliceError("Invalid scene index")
+
+        run_dir = self._output_root / str(mission_execution_id) / run_fingerprint
+        manifest_path = run_dir / "manifest.json"
+
+        if not manifest_path.exists():
+            raise VerticalSliceError("Manifest not found")
+
+        final_mp4 = run_dir / "final.mp4"
+        if not final_mp4.is_file() or final_mp4.stat().st_size <= 0:
+            raise VerticalSliceError("Preview requires valid final.mp4")
+
+        with open(manifest_path, encoding="utf-8") as f:
+            manifest = json.load(f)
+
+        if manifest.get("run_fingerprint") != run_fingerprint:
+            raise VerticalSliceError("Manifest run_fingerprint mismatch")
+
+        if manifest.get("scene_artifacts_version") != "v1":
+            raise VerticalSliceError("Scene preview unavailable for legacy run")
+
+        scene_info = next((s for s in manifest.get("scenes", []) if s.get("sequence_index") == scene_index), None)
+        if not scene_info:
+            raise VerticalSliceError(f"Scene {scene_index} not found in manifest")
+
+        scene_mp4 = run_dir / "scenes" / f"scene_{scene_index:03d}.mp4"
+        if not scene_mp4.is_file() or scene_mp4.stat().st_size <= 0:
+            raise VerticalSliceError("Persisted scene missing or empty")
+
+        with open(scene_mp4, "rb") as f:
+            if b"ftyp" not in f.read(4096):
+                raise VerticalSliceError("Persisted scene missing ftyp header")
+
+        if self._compute_streaming_sha(scene_mp4) != scene_info.get("content_sha256"):
+            raise VerticalSliceError("Persisted scene SHA256 mismatch")
+
+        return scene_mp4
