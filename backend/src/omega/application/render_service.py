@@ -38,11 +38,16 @@ logger = get_logger(service="omega-render-service")
 class ProductionRenderService:
     """Orchestrates non-transactional media rendering, ffprobe inspection, and atomic DB finalization."""
 
-    def __init__(self, storage: LocalMediaStorageProvider | None = None) -> None:
+    def __init__(
+        self,
+        storage: LocalMediaStorageProvider | None = None,
+        visual_production_service=None,
+    ) -> None:
         self.storage = storage or LocalMediaStorageProvider()
         self.renderer = FFmpegRenderer()
         self.probe = MediaProbe()
         self.qa_engine = ProductionQAEngine()
+        self.visual_production_service = visual_production_service
 
     async def execute_render_job(
         self,
@@ -215,81 +220,97 @@ class ProductionRenderService:
         final_artifact_path: Path | None = None
 
         try:
-            # 1. Render individual scene clips in staging
-            scene_clips: list[Path] = []
-            for scene in scenes_data:
-                # Find image asset
-                req_id = scene.asset_requirements[0].id if scene.asset_requirements else None
-                img_asset = assets_by_req_id.get(req_id)
-                img_path = (
-                    self.storage.resolve_stored_uri(channel_id, request_id, img_asset.storage_uri)
-                    if img_asset
-                    else None
+            # Check if we should use V2
+            use_v2 = self._should_use_v2(req)
+
+            if use_v2:
+                # V2 Route
+                await self._render_v2_staging(
+                    session=session,
+                    req=req,
+                    fps=fps,
+                    target_width=width,
+                    target_height=height,
+                    container_format=plan.container if hasattr(plan, "container") else req.container_format,
+                    video_codec=video_codec,
+                    staging_output_path=staging_output_path,
                 )
-
-                # Find audio asset
-                narr_seg = narration_by_scene_id.get(scene.id)
-                audio_asset = (
-                    next((a for a in req.assets if a.id == narr_seg.audio_asset_id), None)
-                    if narr_seg
-                    else None
-                )
-                audio_path = (
-                    self.storage.resolve_stored_uri(channel_id, request_id, audio_asset.storage_uri)
-                    if audio_asset
-                    else None
-                )
-
-                clip_path = staging_dir / f"scene_{scene.scene_order}.mp4"
-                dur_sec = (
-                    scene.estimated_duration_ms / 1000.0 if scene.estimated_duration_ms > 0 else 3.0
-                )
-                motion_effect = "SLOW_ZOOM_IN" if str(scene.scene_type) in ("TITLE", "TITLE_MOTION", "DIAGRAM", "INFOGRAPHIC", "STATISTIC", "CTA") else "NONE"
-
-                if img_path and audio_path and img_path.exists() and audio_path.exists():
-                    await self.renderer.render_scene_clip(
-                        image_path=img_path,
-                        audio_path=audio_path,
-                        output_path=clip_path,
-                        width=width,
-                        height=height,
-                        fps=fps,
-                        video_codec=video_codec,
-                        audio_codec=audio_codec,
-                        duration_sec=dur_sec,
-                        motion_effect=motion_effect,
-                    )
-                else:
-                    # Synthetic placeholder fallback clip
-                    await self._render_synthetic_clip(clip_path, width, height, fps, dur_sec)
-
-                scene_clips.append(clip_path)
-
-            # Find subtitle asset if generated
-            sub_asset = next(
-                (
-                    a
-                    for a in req.assets
-                    if a.asset_type in ("SUBTITLE", AssetType.SUBTITLE.value)
-                    or (a.mime_type and "subrip" in a.mime_type)
-                ),
-                None,
-            )
-            srt_path = (
-                self.storage.resolve_stored_uri(channel_id, request_id, sub_asset.storage_uri)
-                if sub_asset and sub_asset.storage_uri
-                else None
-            )
-
-            # 2. Concatenate scene clips into final staging video
-            if len(scene_clips) == 1 and (not srt_path or not srt_path.exists()):
-                if staging_output_path.exists():
-                    staging_output_path.unlink()
-                scene_clips[0].rename(staging_output_path)
             else:
-                await self.renderer.concatenate_clips(
-                    scene_clips, staging_output_path, srt_path=srt_path
+                # Legacy Route
+                scene_clips: list[Path] = []
+                for scene in scenes_data:
+                    # Find image asset
+                    req_id = scene.asset_requirements[0].id if scene.asset_requirements else None
+                    img_asset = assets_by_req_id.get(req_id)
+                    img_path = (
+                        self.storage.resolve_stored_uri(channel_id, request_id, img_asset.storage_uri)
+                        if img_asset
+                        else None
+                    )
+
+                    # Find audio asset
+                    narr_seg = narration_by_scene_id.get(scene.id)
+                    audio_asset = (
+                        next((a for a in req.assets if a.id == narr_seg.audio_asset_id), None)
+                        if narr_seg
+                        else None
+                    )
+                    audio_path = (
+                        self.storage.resolve_stored_uri(channel_id, request_id, audio_asset.storage_uri)
+                        if audio_asset
+                        else None
+                    )
+
+                    clip_path = staging_dir / f"scene_{scene.scene_order}.mp4"
+                    dur_sec = (
+                        scene.estimated_duration_ms / 1000.0 if scene.estimated_duration_ms > 0 else 3.0
+                    )
+                    motion_effect = "SLOW_ZOOM_IN" if str(scene.scene_type) in ("TITLE", "TITLE_MOTION", "DIAGRAM", "INFOGRAPHIC", "STATISTIC", "CTA") else "NONE"
+
+                    if img_path and audio_path and img_path.exists() and audio_path.exists():
+                        await self.renderer.render_scene_clip(
+                            image_path=img_path,
+                            audio_path=audio_path,
+                            output_path=clip_path,
+                            width=width,
+                            height=height,
+                            fps=fps,
+                            video_codec=video_codec,
+                            audio_codec=audio_codec,
+                            duration_sec=dur_sec,
+                            motion_effect=motion_effect,
+                        )
+                    else:
+                        # Synthetic placeholder fallback clip
+                        await self._render_synthetic_clip(clip_path, width, height, fps, dur_sec)
+
+                    scene_clips.append(clip_path)
+
+                # Find subtitle asset if generated
+                sub_asset = next(
+                    (
+                        a
+                        for a in req.assets
+                        if a.asset_type in ("SUBTITLE", AssetType.SUBTITLE.value)
+                        or (a.mime_type and "subrip" in a.mime_type)
+                    ),
+                    None,
                 )
+                srt_path = (
+                    self.storage.resolve_stored_uri(channel_id, request_id, sub_asset.storage_uri)
+                    if sub_asset and sub_asset.storage_uri
+                    else None
+                )
+
+                # 2. Concatenate scene clips into final staging video
+                if len(scene_clips) == 1 and (not srt_path or not srt_path.exists()):
+                    if staging_output_path.exists():
+                        staging_output_path.unlink()
+                    scene_clips[0].rename(staging_output_path)
+                else:
+                    await self.renderer.concatenate_clips(
+                        scene_clips, staging_output_path, srt_path=srt_path
+                    )
 
             # 3. Media probe validation via ffprobe
             probe_summary = await self.probe.probe_file(staging_output_path)
@@ -446,6 +467,84 @@ class ProductionRenderService:
         finally:
             # Clean staging directory
             self.storage.cleanup_directory(staging_dir)
+
+    def _should_use_v2(self, req: ProductionRequest) -> bool:
+        mode = getattr(req, "mode", None)
+        # Handle both string and Enum representations
+        is_mission = mode == "MISSION_EXECUTION" or (hasattr(mode, "value") and mode.value == "MISSION_EXECUTION")
+        return is_mission and self.visual_production_service is not None
+
+    async def _render_v2_staging(
+        self,
+        session: AsyncSession,
+        req: ProductionRequest,
+        fps: int,
+        target_width: int,
+        target_height: int,
+        container_format: str,
+        video_codec: str,
+        staging_output_path: Path,
+    ) -> None:
+        import shutil
+
+        # Lineage check
+        if not req.mission_execution_id or not req.content_request_id:
+            raise ValueError("Mission execution lineage missing for V2 render")
+
+        # Target contract check
+        if target_width != 1920 or target_height != 1080:
+            raise ValueError(f"V2 unsupported resolution: {target_width}x{target_height}")
+        if container_format.lower() != "mp4":
+            raise ValueError(f"V2 unsupported container: {container_format}")
+        if video_codec.lower() not in ("h264", "libx264"):
+            raise ValueError(f"V2 unsupported codec: {video_codec}")
+
+        # V2 execution
+        result = await self.visual_production_service.render_mission_execution(
+            session,
+            req.mission_execution_id,
+            req.content_request_id,
+            fps=fps,
+            voice_profile=req.voice_profile,
+            subtitle_enabled=True,
+        )
+
+        # Validate V2 Result Lineage
+        if result.mission_execution_id != req.mission_execution_id:
+            raise ValueError("V2 result mission_execution_id mismatch")
+        if result.content_request_id != req.content_request_id:
+            raise ValueError("V2 result content_request_id mismatch")
+
+        # Validate Dimensions/FPS
+        if result.width != target_width or result.height != target_height:
+            raise ValueError("V2 result dimension mismatch")
+        if result.fps != fps:
+            raise ValueError("V2 result fps mismatch")
+
+        # Validate Output Artifact
+        out_path = Path(result.output_path)
+        if not out_path.exists() or not out_path.is_file():
+            raise ValueError("V2 output artifact missing")
+        if out_path.stat().st_size == 0:
+            raise ValueError("V2 output artifact empty")
+
+        with open(out_path, "rb") as f:
+            header = f.read(4096)
+            if b"ftyp" not in header:
+                raise ValueError("V2 output missing ftyp box")
+
+        # Verify Source SHA
+        source_sha = compute_sha256(out_path)
+        if source_sha != result.content_sha256:
+            raise ValueError("V2 output SHA mismatch")
+
+        # byte-preserving copy
+        shutil.copy2(out_path, staging_output_path)
+
+        # Verify Copied SHA
+        copied_sha = compute_sha256(staging_output_path)
+        if copied_sha != source_sha:
+            raise ValueError("V2 copied SHA mismatch")
 
     async def _render_synthetic_clip(
         self,
