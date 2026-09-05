@@ -16,7 +16,7 @@ services:
     volumes:
       - omega-postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omega}"]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omega}" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -29,7 +29,7 @@ services:
     ports:
       - "6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: [ "CMD", "redis-cli", "ping" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -57,6 +57,10 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/publisher/accounts/youtube/callback}
       PEXELS_API_KEY: ${PEXELS_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      TTS_PROVIDER: ${TTS_PROVIDER:-gemini}
+      GEMINI_TTS_MODEL: ${GEMINI_TTS_MODEL:-gemini-3.1-flash-tts-preview}
+      GEMINI_TTS_VOICE: ${GEMINI_TTS_VOICE:-Kore}
       SERVICE_NAME: omega-api
     depends_on:
       omega-postgres:
@@ -67,7 +71,7 @@ services:
       - ./backend:/app
       - omega-media-data:/app/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -93,6 +97,10 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/publisher/accounts/youtube/callback}
       PEXELS_API_KEY: ${PEXELS_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      TTS_PROVIDER: ${TTS_PROVIDER:-gemini}
+      GEMINI_TTS_MODEL: ${GEMINI_TTS_MODEL:-gemini-3.1-flash-tts-preview}
+      GEMINI_TTS_VOICE: ${GEMINI_TTS_VOICE:-Kore}
       SERVICE_NAME: omega-worker
     depends_on:
       omega-postgres:
