@@ -76,6 +76,54 @@ def image_doc():
     )
 
 
+@pytest.fixture
+def kinetic_doc():
+    return RenderedTemplateDocument(
+        scene_index=1,
+        template_id=VisualTemplateId.KINETIC_TEXT,
+        width=1920,
+        height=1080,
+        html="""<!doctype html><html><head></head><body>
+        <span data-motion-role="kinetic-word" data-motion-index="0">Hello</span>
+        <span data-motion-role="kinetic-word" data-motion-index="1">world</span>
+        </body></html>""",
+        semantic_element_ids=(),
+        content_sha256="fake",
+    )
+
+@pytest.fixture
+def infographic_doc():
+    return RenderedTemplateDocument(
+        scene_index=1,
+        template_id=VisualTemplateId.INFOGRAPHIC,
+        width=1920,
+        height=1080,
+        html="""<!doctype html><html><head></head><body>
+        <div id="infographic-title">Title</div>
+        <div data-motion-role="infographic-item" data-motion-index="0">Item 1</div>
+        <div data-motion-role="infographic-item" data-motion-index="1">Item 2</div>
+        </body></html>""",
+        semantic_element_ids=(),
+        content_sha256="fake",
+    )
+
+@pytest.fixture
+def cta_doc():
+    return RenderedTemplateDocument(
+        scene_index=1,
+        template_id=VisualTemplateId.CTA,
+        width=1920,
+        height=1080,
+        html="""<!doctype html><html><head></head><body>
+        <div data-motion-role="cta-accent"></div>
+        <div data-motion-role="cta-title">Title</div>
+        <div data-motion-role="cta-text">Click</div>
+        </body></html>""",
+        semantic_element_ids=(),
+        content_sha256="fake",
+    )
+
+
 def test_visual_dom_motion_general(hero_doc):
     runtime = VisualDomMotionRuntime()
     new_doc = runtime.render_frame(hero_doc, "title_reveal", 0.5, 5.0)
@@ -252,6 +300,51 @@ def test_broll_overlay_profile_motion():
     f2 = runtime.render_frame(doc, "broll_overlay", 2.5, 5.0)
     assert f1.content_sha256 != f2.content_sha256
 
-    # Determinism
     f2_again = runtime.render_frame(doc, "broll_overlay", 2.5, 5.0)
     assert f2.content_sha256 == f2_again.content_sha256
+
+def test_kinetic_motion(kinetic_doc):
+    runtime = VisualDomMotionRuntime()
+    doc = runtime.render_frame(kinetic_doc, "kinetic_phrase", 0.5, 1.0)
+    assert 'data-motion-role="kinetic-word"' in doc.html
+    assert 'data-motion-index="0"' in doc.html
+
+    doc_end = runtime.render_frame(kinetic_doc, "kinetic_phrase", 1.0, 1.0)
+    assert doc_end.html.count("opacity: 1") >= 2
+    assert "translate3d(0, 0" in doc_end.html
+
+def test_infographic_motion(infographic_doc):
+    runtime = VisualDomMotionRuntime()
+    doc_end = runtime.render_frame(infographic_doc, "infographic_reveal", 1.0, 1.0)
+    assert doc_end.html.count("opacity: 1") >= 3
+    assert "translate3d(0, 0" in doc_end.html
+
+def test_cta_motion(cta_doc):
+    runtime = VisualDomMotionRuntime()
+    doc_end = runtime.render_frame(cta_doc, "cta_reveal", 1.0, 1.0)
+    assert doc_end.html.count("opacity: 1") >= 3
+    assert "translate3d(0, 0" in doc_end.html
+    assert "scaleX(1" in doc_end.html
+
+def test_contract_kinetic():
+    from omega.application.scene_template_registry import TemplateInputKey
+    from omega.application.template_payload_resolver import TemplatePayload
+    from omega.application.visual_template_renderer import VisualTemplateRenderer
+
+    renderer = VisualTemplateRenderer()
+    payload = TemplatePayload(
+        scene_index=1,
+        template_id=VisualTemplateId.KINETIC_TEXT,
+        inputs={TemplateInputKey.BODY: "Hello contract"},
+        asset_requirements=(),
+        motion_profile="kinetic_phrase",
+        metadata={}
+    )
+    doc = renderer.render(payload)
+
+    runtime = VisualDomMotionRuntime()
+    doc_end = runtime.render_frame(doc, "kinetic_phrase", 1.0, 1.0)
+
+    # Must correctly hook into renderer's selectors
+    assert 'data-motion-role="kinetic-word"' in doc_end.html
+    assert "opacity: 1" in doc_end.html

@@ -94,6 +94,12 @@ class VisualDomMotionRuntime:
             style = self._profile_image_explainer(time_seconds, duration_seconds)
         elif motion_profile == "broll_overlay":
             style = self._profile_broll_overlay(time_seconds, duration_seconds)
+        elif motion_profile == "kinetic_phrase":
+            style = self._profile_kinetic_phrase(time_seconds, duration_seconds, document)
+        elif motion_profile == "infographic_reveal":
+            style = self._profile_infographic_reveal(time_seconds, duration_seconds, document)
+        elif motion_profile == "cta_reveal":
+            style = self._profile_cta_reveal(time_seconds, duration_seconds)
         else:
             raise VisualDomMotionError(f"Unknown motion profile: {motion_profile}")
 
@@ -325,6 +331,100 @@ class VisualDomMotionRuntime:
         #broll-caption {{
             opacity: {self._fmt_float(p_caption)};
             transform: translate3d(0, {self._fmt_float(trans_caption)}px, 0);
+        }}
+        """)
+
+        return "".join(style)
+
+    def _profile_kinetic_phrase(self, t: float, d: float, document: RenderedTemplateDocument) -> str:
+        words = document.html.count('data-motion-role="kinetic-word"')
+        style = []
+
+        if words == 0:
+            return "".join(style)
+
+        seq_start = 0.0
+        seq_dur = max(d, 0.01)
+        step_dur = seq_dur / words
+
+        for i in range(words):
+            word_start = seq_start + i * step_dur
+            word_end = word_start + step_dur
+            p_word = self._ease_out(self._progress(t, word_start, word_end, d))
+
+            word_scale = 0.95 + 0.05 * p_word
+            word_trans = 10.0 * (1.0 - p_word)
+
+            style.append(f"""
+            [data-motion-role="kinetic-word"][data-motion-index="{i}"] {{
+                opacity: {self._fmt_float(p_word)};
+                transform: scale({self._fmt_float(word_scale)}) translate3d(0, {self._fmt_float(word_trans)}px, 0);
+            }}
+            """)
+
+        return "".join(style)
+
+    def _profile_infographic_reveal(self, t: float, d: float, document: RenderedTemplateDocument) -> str:
+        items = document.html.count('data-motion-role="infographic-item"')
+        style = []
+
+        p_title = self._ease_out(self._progress(t, 0.0, 0.5, d))
+        style.append(f"""
+        #infographic-title {{
+            opacity: {self._fmt_float(p_title)};
+            transform: translate3d(0, {self._fmt_float(20.0 * (1.0 - p_title))}px, 0);
+        }}
+        """)
+
+        if items == 0:
+            return "".join(style)
+
+        seq_start = min(0.3, d)
+        seq_dur = max(d - seq_start, 0.01)
+        step_dur = seq_dur / items
+
+        for i in range(items):
+            item_start = seq_start + i * step_dur
+            item_end = item_start + step_dur
+            p_item = self._ease_out(self._progress(t, item_start, item_end, d))
+
+            item_scale = 0.9 + 0.1 * p_item
+            item_trans = 20.0 * (1.0 - p_item)
+
+            style.append(f"""
+            [data-motion-role="infographic-item"][data-motion-index="{i}"] {{
+                opacity: {self._fmt_float(p_item)};
+                transform: scale({self._fmt_float(item_scale)}) translate3d(0, {self._fmt_float(item_trans)}px, 0);
+            }}
+            """)
+
+        return "".join(style)
+
+    def _profile_cta_reveal(self, t: float, d: float) -> str:
+        p_accent = self._ease_out(self._progress(t, 0.0, 0.5, d))
+        p_title = self._ease_out(self._progress(t, 0.2, 0.7, d))
+        p_text = self._ease_out(self._progress(t, 0.4, 0.9, d))
+
+        style = []
+        style.append(f"""
+        [data-motion-role="cta-accent"] {{
+            opacity: {self._fmt_float(p_accent)};
+            transform: scaleX({self._fmt_float(p_accent)});
+        }}
+        """)
+
+        style.append(f"""
+        [data-motion-role="cta-title"] {{
+            opacity: {self._fmt_float(p_title)};
+            transform: translate3d(0, {self._fmt_float(15.0 * (1.0 - p_title))}px, 0);
+        }}
+        """)
+
+        text_scale = 0.9 + 0.1 * p_text
+        style.append(f"""
+        [data-motion-role="cta-text"] {{
+            opacity: {self._fmt_float(p_text)};
+            transform: scale({self._fmt_float(text_scale)}) translate3d(0, {self._fmt_float(20.0 * (1.0 - p_text))}px, 0);
         }}
         """)
 

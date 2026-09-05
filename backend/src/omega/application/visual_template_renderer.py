@@ -47,6 +47,9 @@ class VisualTemplateRenderer:
             VisualTemplateId.CODE_EDITOR,
             VisualTemplateId.IMAGE_EXPLAINER,
             VisualTemplateId.BROLL_EXPLAINER,
+            VisualTemplateId.KINETIC_TEXT,
+            VisualTemplateId.INFOGRAPHIC,
+            VisualTemplateId.CTA,
         ):
             raise VisualTemplateRenderError(f"Unsupported template_id {payload.template_id}")
 
@@ -88,6 +91,12 @@ class VisualTemplateRenderer:
         elif payload.template_id == VisualTemplateId.BROLL_EXPLAINER:
             html_content, semantic_ids = self._render_broll_explainer(payload, assets)
             transparent_bg = True
+        elif payload.template_id == VisualTemplateId.KINETIC_TEXT:
+            html_content, semantic_ids = self._render_kinetic_text(payload)
+        elif payload.template_id == VisualTemplateId.INFOGRAPHIC:
+            html_content, semantic_ids = self._render_infographic(payload)
+        elif payload.template_id == VisualTemplateId.CTA:
+            html_content, semantic_ids = self._render_cta(payload)
 
         # Wrap in full HTML document
         final_html = self._wrap_in_document(html_content, transparent_background=transparent_bg)
@@ -583,6 +592,95 @@ class VisualTemplateRenderer:
                 <div id="broll-body" data-motion-role="broll-body" class="broll-body">{body}</div>
                 {caption_html}
             </div>
+        </div>
+        """
+        return content, semantic_ids
+
+    def _render_kinetic_text(self, payload: TemplatePayload) -> tuple[str, list[str]]:
+        raw_body = payload.inputs[TemplateInputKey.BODY]
+
+        semantic_ids = ["scene-root", "kinetic-body"]
+
+        words = raw_body.split()
+        words_html = ""
+        for i, word in enumerate(words):
+            esc_word = html.escape(word)
+            word_id = f"kinetic-word-{i}"
+            words_html += f'<span id="{word_id}" data-motion-role="kinetic-word" data-motion-index="{i}" class="kinetic-word">{esc_word}</span> '
+            semantic_ids.append(word_id)
+
+        content = f"""
+        <style>
+        .kinetic-container {{ display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 0 100px; box-sizing: border-box; }}
+        .kinetic-body {{ font-size: 80px; font-weight: 800; line-height: 1.3; text-align: center; color: var(--text-primary); max-width: 1600px; word-wrap: break-word; }}
+        .kinetic-word {{ display: inline-block; opacity: 1; }}
+        </style>
+        <div class="kinetic-container">
+            <div id="kinetic-body" class="kinetic-body">
+                {words_html.strip()}
+            </div>
+        </div>
+        """
+        return content, semantic_ids
+
+    def _render_infographic(self, payload: TemplatePayload) -> tuple[str, list[str]]:
+        items = payload.inputs[TemplateInputKey.ITEMS]
+        title = payload.inputs.get(TemplateInputKey.TITLE)
+
+        semantic_ids = ["scene-root"]
+
+        title_html = ""
+        if title:
+            esc_title = html.escape(title)
+            title_html = f'<div id="infographic-title" data-motion-role="infographic-title" class="infographic-title">{esc_title}</div>'
+            semantic_ids.append("infographic-title")
+
+        items_html = ""
+        for i, item in enumerate(items):
+            esc_item = html.escape(item)
+            item_id = f"infographic-item-{i}"
+            items_html += f'<div id="{item_id}" data-motion-role="infographic-item" data-motion-index="{i}" class="infographic-item">{esc_item}</div>\n'
+            semantic_ids.append(item_id)
+
+        content = f"""
+        <style>
+        .infographic-container {{ display: flex; flex-direction: column; height: 100%; width: 100%; padding: 60px 80px; box-sizing: border-box; }}
+        .infographic-title {{ font-size: 48px; font-weight: 700; color: var(--accent); margin-bottom: 60px; text-align: center; word-wrap: break-word; }}
+        .infographic-grid {{ display: flex; flex-direction: row; flex-wrap: wrap; justify-content: center; gap: 40px; align-items: stretch; }}
+        .infographic-item {{ background: var(--surface); border: 1px solid var(--surface-border); border-radius: 16px; padding: 40px; font-size: 32px; color: var(--text-primary); max-width: 500px; flex: 1; min-width: 300px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); word-wrap: break-word; }}
+        </style>
+        <div class="infographic-container">
+            {title_html}
+            <div class="infographic-grid">
+                {items_html}
+            </div>
+        </div>
+        """
+        return content, semantic_ids
+
+    def _render_cta(self, payload: TemplatePayload) -> tuple[str, list[str]]:
+        cta_text = html.escape(payload.inputs[TemplateInputKey.CTA_TEXT])
+        title = payload.inputs.get(TemplateInputKey.TITLE)
+
+        semantic_ids = ["scene-root", "cta-text", "cta-accent"]
+
+        title_html = ""
+        if title:
+            esc_title = html.escape(title)
+            title_html = f'<div id="cta-title" data-motion-role="cta-title" class="cta-title">{esc_title}</div>'
+            semantic_ids.append("cta-title")
+
+        content = f"""
+        <style>
+        .cta-container {{ display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 0 100px; box-sizing: border-box; }}
+        .cta-accent {{ width: 120px; height: 8px; background-color: var(--accent); border-radius: 4px; margin-bottom: 40px; }}
+        .cta-title {{ font-size: 64px; font-weight: 700; color: var(--text-primary); margin-bottom: 40px; text-align: center; word-wrap: break-word; }}
+        .cta-text {{ font-size: 48px; font-weight: 600; color: var(--bg); background-color: var(--accent); padding: 24px 64px; border-radius: 40px; text-align: center; display: inline-block; box-shadow: 0 20px 40px rgba(59, 130, 246, 0.4); word-wrap: break-word; }}
+        </style>
+        <div class="cta-container">
+            <div id="cta-accent" data-motion-role="cta-accent" class="cta-accent"></div>
+            {title_html}
+            <div id="cta-text" data-motion-role="cta-text" class="cta-text">{cta_text}</div>
         </div>
         """
         return content, semantic_ids

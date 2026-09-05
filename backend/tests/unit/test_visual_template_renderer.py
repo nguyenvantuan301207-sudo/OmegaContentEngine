@@ -460,3 +460,69 @@ def test_broll_explainer_wrong_asset_binding_fails(renderer):
         match=r"^Invalid BROLL asset for BROLL_EXPLAINER$",
     ):
         renderer.render(payload, assets=(img_asset,))
+
+def test_kinetic_text(renderer):
+    payload = create_payload(VisualTemplateId.KINETIC_TEXT, {
+        TemplateInputKey.BODY: "Hello <script> world"
+    })
+    doc = renderer.render(payload)
+
+    assert "&lt;script&gt;" in doc.html
+    assert "Hello" in doc.html
+    assert "world" in doc.html
+    assert 'data-motion-role="kinetic-word"' in doc.html
+    assert 'data-motion-index="0"' in doc.html
+    assert 'data-motion-index="1"' in doc.html
+    assert "scene-root" in doc.semantic_element_ids
+    assert "kinetic-body" in doc.semantic_element_ids
+    assert "kinetic-word-0" in doc.semantic_element_ids
+    assert "<script" not in doc.html.lower()
+
+def test_infographic(renderer):
+    payload = create_payload(VisualTemplateId.INFOGRAPHIC, {
+        TemplateInputKey.TITLE: "Info <Title>",
+        TemplateInputKey.ITEMS: ["Item 1", "Item <2>"]
+    })
+    doc = renderer.render(payload)
+
+    assert "Info &lt;Title&gt;" in doc.html
+    assert "Item 1" in doc.html
+    assert "Item &lt;2&gt;" in doc.html
+    assert 'data-motion-role="infographic-title"' in doc.html
+    assert 'data-motion-role="infographic-item"' in doc.html
+    assert doc.html.count('data-motion-role="infographic-item"') == 2
+    assert 'data-motion-index="0"' in doc.html
+    assert 'data-motion-index="1"' in doc.html
+    assert "scene-root" in doc.semantic_element_ids
+    assert "infographic-title" in doc.semantic_element_ids
+    assert "infographic-item-0" in doc.semantic_element_ids
+    assert "infographic-item-1" in doc.semantic_element_ids
+
+def test_cta(renderer):
+    payload = create_payload(VisualTemplateId.CTA, {
+        TemplateInputKey.TITLE: "CTA <Title>",
+        TemplateInputKey.CTA_TEXT: "Click <Here>"
+    })
+    doc = renderer.render(payload)
+
+    assert "CTA &lt;Title&gt;" in doc.html
+    assert "Click &lt;Here&gt;" in doc.html
+    assert 'data-motion-role="cta-title"' in doc.html
+    assert 'data-motion-role="cta-text"' in doc.html
+    assert 'data-motion-role="cta-accent"' in doc.html
+    assert "scene-root" in doc.semantic_element_ids
+    assert "cta-title" in doc.semantic_element_ids
+    assert "cta-text" in doc.semantic_element_ids
+    assert "cta-accent" in doc.semantic_element_ids
+    assert "href=" not in doc.html
+    assert "<a " not in doc.html
+
+def test_new_template_determinism(renderer):
+    payload = create_payload(VisualTemplateId.KINETIC_TEXT, {
+        TemplateInputKey.BODY: "Determinism test body"
+    })
+    doc1 = renderer.render(payload)
+    doc2 = renderer.render(payload)
+
+    assert doc1.content_sha256 == doc2.content_sha256
+    assert doc1.html == doc2.html
