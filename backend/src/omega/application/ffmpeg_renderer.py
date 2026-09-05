@@ -240,3 +240,72 @@ class FFmpegRenderer:
             raise FFmpegExecutionError(
                 f"FFmpeg mux failed (code {proc.returncode}): {err_msg}"
             )
+
+    async def burn_ass_subtitles(
+        self,
+        video_path: Path | str,
+        ass_path: Path | str,
+        output_path: Path | str,
+        timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
+    ) -> None:
+        """Burn an ASS subtitle file into a video, preserving audio."""
+        v_p = Path(video_path).resolve()
+        a_p = Path(ass_path).resolve()
+        out_p = Path(output_path).resolve()
+
+        if not v_p.is_file() or v_p.stat().st_size == 0:
+            raise ValueError(f"Input video missing or empty: {v_p}")
+
+        if not a_p.is_file() or a_p.stat().st_size == 0:
+            raise ValueError(f"ASS subtitle missing or empty: {a_p}")
+
+        if a_p.suffix.lower() != ".ass":
+            raise ValueError(f"ASS subtitle must have .ass suffix: {a_p}")
+
+        if v_p == out_p:
+            raise ValueError("Input and output video paths cannot be the same")
+
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+
+        ass_filter_path = a_p.as_posix()
+        clean_ass = escape_ffmpeg_filter_string(
+            ass_filter_path,
+            max_chars=max(len(ass_filter_path), 1),
+        )
+        vf_arg = f"ass='{clean_ass}'"
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i", str(v_p),
+            "-vf", vf_arg,
+            "-map", "0:v:0",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            str(out_p),
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            raise FFmpegExecutionError(
+                f"FFmpeg ASS burn-in timed out after {timeout_seconds}s."
+            ) from exc
+
+        if proc.returncode != 0:
+            err_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
+            raise FFmpegExecutionError(
+                f"FFmpeg ASS burn-in failed (code {proc.returncode}): {err_msg}"
+            )
+
+        if not out_p.is_file() or out_p.stat().st_size == 0:
+            raise FFmpegExecutionError(f"FFmpeg succeeded but output is missing or empty: {out_p}")
