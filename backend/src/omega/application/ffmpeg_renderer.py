@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import math
+from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_RENDER_TIMEOUT_SECONDS = 180
@@ -33,6 +35,14 @@ def escape_ffmpeg_filter_string(text: str, max_chars: int = 200) -> str:
 
 class FFmpegRenderer:
     """Executes FFmpeg operations purely via subprocess argument arrays with timeout guards."""
+
+    @dataclass(frozen=True)
+    class SFXMixInput:
+        """Helper for passing SFX parameters to master mix."""
+        audio_path: Path | str
+        start_ms: int
+        duration_ms: int
+        gain_db: float
 
     async def render_scene_clip(
         self,
@@ -309,3 +319,129 @@ class FFmpegRenderer:
 
         if not out_p.is_file() or out_p.stat().st_size == 0:
             raise FFmpegExecutionError(f"FFmpeg succeeded but output is missing or empty: {out_p}")
+
+    async def mix_master_audio(
+        self,
+        video_path: Path | str,
+        output_path: Path | str,
+        target_duration_ms: int,
+        background_music_path: Path | str | None = None,
+        background_music_gain_db: float = -20.0,
+        background_music_loop_required: bool = False,
+        background_music_fade_in_ms: int = 0,
+        background_music_fade_out_ms: int = 0,
+        sfx_inputs: list[SFXMixInput] | None = None,
+        timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
+    ) -> None:
+        """Mix foreground narration with optional background music and SFX."""
+        v_p = Path(video_path).resolve()
+        out_p = Path(output_path).resolve()
+
+        if not v_p.is_file() or v_p.stat().st_size == 0:
+            raise ValueError(f"Input video missing or empty: {v_p}")
+        if v_p == out_p:
+            raise ValueError("Input and output video paths cannot be the same")
+        if target_duration_ms <= 0:
+            raise ValueError("target_duration_ms must be > 0")
+
+        sfx_list = sfx_inputs or []
+        has_music = background_music_path is not None
+        if not has_music and not sfx_list:
+            raise ValueError("No music or SFX provided for mixing")
+
+        inputs = ["-y", "-i", str(v_p)]
+        filter_complex = []
+        amix_inputs = ["[0:a:0]"]
+        input_idx = 1
+
+        if has_music:
+            m_p = Path(background_music_path).resolve()
+            if not m_p.is_file() or m_p.stat().st_size == 0:
+                raise ValueError(f"Background music missing or empty: {m_p}")
+            if not math.isfinite(background_music_gain_db):
+                raise ValueError("music gain must be finite")
+            if background_music_fade_in_ms < 0 or background_music_fade_out_ms < 0:
+                raise ValueError("music fades must be >= 0")
+
+            if background_music_loop_required:
+                inputs.extend(["-stream_loop", "-1", "-i", str(m_p)])
+            else:
+                inputs.extend(["-i", str(m_p)])
+
+            m_filters = [f"volume={background_music_gain_db}dB"]
+            target_sec = target_duration_ms / 1000.0
+            m_filters.append(f"atrim=0:{target_sec}")
+            if background_music_fade_in_ms > 0:
+                fin_sec = background_music_fade_in_ms / 1000.0
+                m_filters.append(f"afade=t=in:st=0:d={fin_sec}")
+            if background_music_fade_out_ms > 0:
+                fout_sec = background_music_fade_out_ms / 1000.0
+                st_sec = target_sec - fout_sec
+                m_filters.append(f"afade=t=out:st={st_sec}:d={fout_sec}")
+
+            filter_complex.append(f"[{input_idx}:a:0]{','.join(m_filters)}[bgm]")
+            amix_inputs.append("[bgm]")
+            input_idx += 1
+
+        for sfx in sfx_list:
+            s_p = Path(sfx.audio_path).resolve()
+            if not s_p.is_file() or s_p.stat().st_size == 0:
+                raise ValueError(f"SFX file missing or empty: {s_p}")
+            if sfx.start_ms < 0 or sfx.duration_ms <= 0:
+                raise ValueError("SFX start/duration invalid")
+            if sfx.start_ms + sfx.duration_ms > target_duration_ms:
+                raise ValueError("SFX exceeds target duration")
+            if not math.isfinite(sfx.gain_db):
+                raise ValueError("SFX gain must be finite")
+
+            inputs.extend(["-i", str(s_p)])
+
+            dur_sec = sfx.duration_ms / 1000.0
+            delay_ms = sfx.start_ms
+            s_filters = [
+                f"atrim=0:{dur_sec}",
+                f"volume={sfx.gain_db}dB",
+                f"adelay={delay_ms}|{delay_ms}",
+            ]
+            filter_complex.append(f"[{input_idx}:a:0]{','.join(s_filters)}[sfx{input_idx}]")
+            amix_inputs.append(f"[sfx{input_idx}]")
+            input_idx += 1
+
+        num_inputs = len(amix_inputs)
+        amix_str = "".join(amix_inputs) + f"amix=inputs={num_inputs}:duration=first:dropout_transition=0[aout]"
+        filter_complex.append(amix_str)
+
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+
+        target_sec = target_duration_ms / 1000.0
+        cmd = [
+            "ffmpeg",
+            *inputs,
+            "-filter_complex", ";".join(filter_complex),
+            "-map", "0:v:0",
+            "-map", "[aout]",
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-t", f"{target_sec:.3f}",
+            str(out_p),
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            raise FFmpegExecutionError(f"FFmpeg master mix timed out after {timeout_seconds}s.") from exc
+
+        if proc.returncode != 0:
+            err_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
+            raise FFmpegExecutionError(f"FFmpeg master mix failed (code {proc.returncode}): {err_msg}")
+
+        if not out_p.is_file() or out_p.stat().st_size == 0:
+            raise FFmpegExecutionError(f"FFmpeg master mix succeeded but output is missing or empty: {out_p}")

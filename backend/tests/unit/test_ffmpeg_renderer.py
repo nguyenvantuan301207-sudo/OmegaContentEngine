@@ -269,3 +269,432 @@ async def test_burn_ass_subtitles_long_ass_path(tmp_path):
     expected_path = escape_ffmpeg_filter_string(in_ass.as_posix(), max_chars=max(len(in_ass.as_posix()), 1))
     assert vf_arg == f"ass='{expected_path}'"
     assert len(vf_arg) > 200
+
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_success(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    async def create_sub_mock(*args, **kwargs):
+        out_vid.write_bytes(b"dummy_out")
+        return mock_proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=create_sub_mock) as mock_exec:
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+            background_music_gain_db=-20.0,
+        )
+
+        mock_exec.assert_called_once()
+        cmd = mock_exec.call_args[0]
+
+        assert cmd[0] == "ffmpeg"
+        assert "-y" in cmd
+        assert str(in_vid) in cmd
+        assert str(in_bgm) in cmd
+        assert "-c:v" in cmd
+        assert cmd[cmd.index("-c:v") + 1] == "copy"
+        assert "-c:a" in cmd
+        assert cmd[cmd.index("-c:a") + 1] == "aac"
+        assert "-b:a" in cmd
+        assert cmd[cmd.index("-b:a") + 1] == "192k"
+
+        idx_fc = cmd.index("-filter_complex")
+        fc_arg = cmd[idx_fc + 1]
+        assert "amix=" in fc_arg
+        assert "volume=-20.0dB" in fc_arg
+        assert "atrim=0:5.0" in fc_arg
+
+        assert "-map" in cmd
+        assert "0:v:0" in cmd
+        assert "[aout]" in cmd
+        assert cmd[-1].endswith("out.mp4")
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_music_looping(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    async def create_sub_mock(*args, **kwargs):
+        out_vid.write_bytes(b"dummy_out")
+        return mock_proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=create_sub_mock) as mock_exec:
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+            background_music_loop_required=True,
+        )
+
+        cmd = mock_exec.call_args[0]
+        idx_bgm = cmd.index(str(in_bgm))
+        assert cmd[idx_bgm - 1] == "-i"
+        assert cmd[idx_bgm - 2] == "-1"
+        assert cmd[idx_bgm - 3] == "-stream_loop"
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_music_fades(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    async def create_sub_mock(*args, **kwargs):
+        out_vid.write_bytes(b"dummy_out")
+        return mock_proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=create_sub_mock) as mock_exec:
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+            background_music_fade_in_ms=1000,
+            background_music_fade_out_ms=1500,
+        )
+
+        cmd = mock_exec.call_args[0]
+        idx_fc = cmd.index("-filter_complex")
+        fc_arg = cmd[idx_fc + 1]
+
+        assert "afade=t=in:st=0:d=1.0" in fc_arg
+        # target = 5.0, fade_out = 1.5, st = 5.0 - 1.5 = 3.5
+        assert "afade=t=out:st=3.5:d=1.5" in fc_arg
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_sfx(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_sfx = tmp_path / "sfx.wav"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_sfx.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    async def create_sub_mock(*args, **kwargs):
+        out_vid.write_bytes(b"dummy_out")
+        return mock_proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=create_sub_mock) as mock_exec:
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            sfx_inputs=[
+                FFmpegRenderer.SFXMixInput(audio_path=in_sfx, start_ms=1000, duration_ms=500, gain_db=-5.0)
+            ],
+        )
+
+        cmd = mock_exec.call_args[0]
+        assert str(in_sfx) in cmd
+        idx_fc = cmd.index("-filter_complex")
+        fc_arg = cmd[idx_fc + 1]
+
+        assert "atrim=0:0.5" in fc_arg
+        assert "volume=-5.0dB" in fc_arg
+        assert "adelay=1000|1000" in fc_arg
+        assert "amix=inputs=2" in fc_arg
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_overlapping_sfx(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_sfx1 = tmp_path / "sfx1.wav"
+    in_sfx2 = tmp_path / "sfx2.wav"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_sfx1.write_bytes(b"dummy")
+    in_sfx2.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    async def create_sub_mock(*args, **kwargs):
+        out_vid.write_bytes(b"dummy_out")
+        return mock_proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=create_sub_mock) as mock_exec:
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            sfx_inputs=[
+                FFmpegRenderer.SFXMixInput(audio_path=in_sfx1, start_ms=1000, duration_ms=500, gain_db=-5.0),
+                FFmpegRenderer.SFXMixInput(audio_path=in_sfx2, start_ms=1000, duration_ms=1000, gain_db=0.0)
+            ],
+        )
+
+        cmd = mock_exec.call_args[0]
+        idx_fc = cmd.index("-filter_complex")
+        fc_arg = cmd[idx_fc + 1]
+        assert "amix=inputs=3" in fc_arg
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_music_and_sfx(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    in_sfx1 = tmp_path / "sfx1.wav"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+    in_sfx1.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    async def create_sub_mock(*args, **kwargs):
+        out_vid.write_bytes(b"dummy_out")
+        return mock_proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=create_sub_mock) as mock_exec:
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+            sfx_inputs=[
+                FFmpegRenderer.SFXMixInput(audio_path=in_sfx1, start_ms=1000, duration_ms=500, gain_db=-5.0)
+            ],
+        )
+
+        cmd = mock_exec.call_args[0]
+        idx_fc = cmd.index("-filter_complex")
+        fc_arg = cmd[idx_fc + 1]
+        assert "amix=inputs=3" in fc_arg
+        assert "[bgm]" in fc_arg
+        assert "[sfx2]" in fc_arg
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_no_mix_input(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+
+    with pytest.raises(ValueError, match="No music or SFX provided"):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+        )
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_missing_input(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "missing.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_bgm.write_bytes(b"dummy")
+
+    with pytest.raises(ValueError, match="Input video missing or empty"):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+        )
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_missing_music(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "missing.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+
+    with pytest.raises(ValueError, match="Background music missing or empty"):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+        )
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_invalid_target_duration(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+
+    with pytest.raises(ValueError, match="target_duration_ms must be > 0"):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=0,
+            background_music_path=in_bgm,
+        )
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_invalid_sfx(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_sfx = tmp_path / "sfx.wav"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_sfx.write_bytes(b"dummy")
+
+    with pytest.raises(ValueError, match="SFX exceeds target duration"):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            sfx_inputs=[
+                FFmpegRenderer.SFXMixInput(audio_path=in_sfx, start_ms=4000, duration_ms=2000, gain_db=-5.0)
+            ],
+        )
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_same_path(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+
+    with pytest.raises(ValueError, match="Input and output video paths cannot be the same"):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=in_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+        )
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_timeout(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.side_effect = TimeoutError()
+    mock_proc.kill = MagicMock()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        pytest.raises(FFmpegExecutionError, match="FFmpeg master mix timed out"),
+    ):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+        )
+
+    mock_proc.kill.assert_called_once()
+    mock_proc.wait.assert_awaited_once()
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_nonzero_exit(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"Error detail")
+    mock_proc.returncode = 1
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        pytest.raises(FFmpegExecutionError, match="FFmpeg master mix failed \\(code 1\\): Error detail"),
+    ):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+        )
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_missing_output(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        pytest.raises(FFmpegExecutionError, match="FFmpeg master mix succeeded but output is missing or empty"),
+    ):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+        )
+
+@pytest.mark.asyncio
+async def test_mix_master_audio_zero_byte_output(tmp_path):
+    renderer = FFmpegRenderer()
+    in_vid = tmp_path / "input.mp4"
+    in_bgm = tmp_path / "bgm.mp3"
+    out_vid = tmp_path / "out.mp4"
+    in_vid.write_bytes(b"dummy")
+    in_bgm.write_bytes(b"dummy")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    async def create_sub_mock(*args, **kwargs):
+        out_vid.write_bytes(b"")
+        return mock_proc
+
+    with (
+        patch("asyncio.create_subprocess_exec", side_effect=create_sub_mock),
+        pytest.raises(FFmpegExecutionError, match="FFmpeg master mix succeeded but output is missing or empty"),
+    ):
+        await renderer.mix_master_audio(
+            video_path=in_vid,
+            output_path=out_vid,
+            target_duration_ms=5000,
+            background_music_path=in_bgm,
+        )
