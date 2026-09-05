@@ -76,6 +76,7 @@ class VerticalSliceSceneResult(BaseModel):
     asset_kind: str | None
     asset_provider: str | None
     asset_id: str | None
+    asset_query: str | None = None
     duration_seconds: float
     content_sha256: str
     audio_content_sha256: str | None = None
@@ -126,10 +127,24 @@ class VerticalSliceRenderResult(BaseModel):
     run_fingerprint: str
 
 
-def _clean_query_words(text: str, max_words: int = 6) -> str:
-    cleaned = _NON_ALPHANUM_REGEX.sub(" ", text)
+_STOPWORDS = frozenset({
+    "a", "an", "the", "and", "or", "but", "we", "you", "they", "this", "that",
+    "is", "are", "was", "were", "be", "been", "being",
+    "it", "of", "in", "on", "for", "to", "with", "as", "by", "at", "from"
+})
+
+def _clean_query_words(text: str, max_words: int = 8) -> list[str]:
+    cleaned = _NON_ALPHANUM_REGEX.sub(" ", text).lower()
     words = [w for w in _WHITESPACE_REGEX.split(cleaned.strip()) if w]
-    return " ".join(words[:max_words])
+    meaningful = []
+    seen = set()
+    for w in words:
+        if w not in _STOPWORDS and w not in seen:
+            meaningful.append(w)
+            seen.add(w)
+            if len(meaningful) >= max_words:
+                break
+    return meaningful
 
 
 class ScriptStoryboardAdapter:
@@ -323,7 +338,7 @@ class VisualProductionV2Service:
         fingerprint_input = (
             f"omega-vertical-slice-v0:{mission_execution_id}:"
             f"{content_request_id}:{script_version.id}:{fps}:"
-            f"visual-director-{VISUAL_DIRECTOR_VERSION}"
+            f"visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2"
         )
         if self._narration_provider:
             fingerprint_input += ":narrated"
@@ -552,6 +567,7 @@ class VisualProductionV2Service:
                     asset_kind_str: str | None = None
                     asset_provider_str: str | None = None
                     asset_id_str: str | None = None
+                    asset_query_str: str | None = None
 
                     if direction.asset_requirements:
                         req_spec = direction.asset_requirements[0]
@@ -562,6 +578,7 @@ class VisualProductionV2Service:
                         )
                         if asset_request is None:
                             raise VerticalSliceError("Could not build required visual asset request")
+                        asset_query_str = asset_request.query
 
                         try:
                             resolved_asset = await self._orchestrator.resolve(asset_request)
@@ -656,6 +673,7 @@ class VisualProductionV2Service:
                             asset_kind=asset_kind_str,
                             asset_provider=asset_provider_str,
                             asset_id=asset_id_str,
+                            asset_query=asset_query_str,
                             duration_seconds=actual_scene_duration_seconds,
                             content_sha256=final_scene_sha,
                             audio_content_sha256=audio_sha,
@@ -873,10 +891,35 @@ class VisualProductionV2Service:
             or "abstract technology background" in clean
         )
 
+        if not is_meaningless:
+            tokens = _clean_query_words(raw_hint, max_words=8)
+            derived = " ".join(tokens)
+            if not derived:
+                is_meaningless = True
+            else:
+                scene.asset_query_hint = derived
+
         if is_meaningless:
-            heading_words = _clean_query_words(scene.section_id, max_words=3)
-            narration_words = _clean_query_words(scene.narration_excerpt, max_words=4)
-            derived = f"{heading_words} {narration_words}".strip()
+            heading_tokens = _clean_query_words(scene.section_id, max_words=3)
+            narration_tokens = _clean_query_words(scene.narration_excerpt, max_words=6)
+
+            combined = []
+            seen = set()
+            for w in heading_tokens + narration_tokens:
+                if w not in seen:
+                    combined.append(w)
+                    seen.add(w)
+
+            if len(combined) > 8:
+                combined = combined[:8]
+
+            derived = " ".join(combined).strip()
+
+            if scene.visual_strategy == VisualStrategy.IMAGE and not derived:
+                derived = "concept illustration"
+            elif scene.visual_strategy == VisualStrategy.BROLL and not derived:
+                derived = "stock footage"
+
             if not derived:
                 raise VerticalSliceError("Could not derive meaningful asset query")
             scene.asset_query_hint = derived

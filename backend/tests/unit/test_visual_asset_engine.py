@@ -138,7 +138,7 @@ def test_deterministic_selection():
 
     selected1 = engine.select_candidate(req, [c1, c2, c3])
     assert selected1 is not None
-    assert selected1.provider_id == "A"
+    assert selected1.provider_id == "B"
 
     selected2 = engine.select_candidate(req, [c3, c2, c1])
     assert selected2 is not None
@@ -212,6 +212,50 @@ def test_candidate_tie_breaking():
     c1 = c("ID1", "ProvB")
     c2 = c("ID1", "ProvA")
 
-    # Should deterministically pick c2 based on provider name tiebreak
-    assert engine.select_candidate(req, [c1, c2]) == c2
+    # Tie break should now be original provider order! Since both have identical resolution/duration.
+    # So it should be c1 then c2 based on list order.
+    assert engine.select_candidate(req, [c1, c2]) == c1
     assert engine.select_candidate(req, [c2, c1]) == c2
+
+
+def test_image_dimension_scoring():
+    engine = VisualAssetEngine()
+    req = VisualAssetRequest(scene_index=1, kind=VisualAssetKind.IMAGE, query="test", purpose="test", required=True)
+    def c(w, h, p_id):
+        return VisualAssetCandidate(provider_id=p_id, kind=VisualAssetKind.IMAGE, provider="test", source_url="http://test", source_page_url=None, mime_type="image/jpeg", width=w, height=h, duration_seconds=None, license_name=None, license_url=None, attribution_text=None, metadata={})
+
+    c_large = c(1920, 1080, "large")
+    c_small = c(800, 600, "small")
+    c_none = c(None, None, "none")
+
+    # Large beats small, valid beats invalid
+    assert engine.select_candidate(req, [c_small, c_large, c_none]).provider_id == "large"
+    assert engine.select_candidate(req, [c_none, c_small]).provider_id == "small"
+
+def test_broll_duration_scoring():
+    engine = VisualAssetEngine()
+    req = VisualAssetRequest(scene_index=1, kind=VisualAssetKind.BROLL, query="test", purpose="test", required=True)
+    def c(w, h, d, p_id):
+        return VisualAssetCandidate(provider_id=p_id, kind=VisualAssetKind.BROLL, provider="test", source_url="http://test", source_page_url=None, mime_type="video/mp4", width=w, height=h, duration_seconds=d, license_name=None, license_url=None, attribution_text=None, metadata={})
+
+    c_valid = c(1920, 1080, 5.0, "valid")
+    c_no_dur = c(1920, 1080, None, "nodur")
+    c_small = c(800, 600, 5.0, "small")
+
+    # Valid duration beats missing duration
+    assert engine.select_candidate(req, [c_no_dur, c_valid]).provider_id == "valid"
+    # Larger dimensions beat smaller dimensions when duration is valid
+    assert engine.select_candidate(req, [c_small, c_valid]).provider_id == "valid"
+
+def test_original_provider_order_is_tiebreaker():
+    engine = VisualAssetEngine()
+    req = VisualAssetRequest(scene_index=1, kind=VisualAssetKind.IMAGE, query="test", purpose="test", required=True)
+    def c(p_id):
+        return VisualAssetCandidate(provider_id=p_id, kind=VisualAssetKind.IMAGE, provider="test", source_url="http://test", source_page_url=None, mime_type="image/jpeg", width=1920, height=1080, duration_seconds=None, license_name=None, license_url=None, attribution_text=None, metadata={})
+
+    c1 = c("Z")
+    c2 = c("A")
+
+    # Since dimensions are identical, original array order dictates
+    assert engine.select_candidate(req, [c1, c2]).provider_id == "Z"
+    assert engine.select_candidate(req, [c2, c1]).provider_id == "A"

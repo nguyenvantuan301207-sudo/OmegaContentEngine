@@ -434,7 +434,7 @@ async def test_visual_director_v2_fingerprint(tmp_path: Path, lineage_data):
     svc._browser_runtime_factory = lambda: mock_browser_ctx
 
     res = await svc.render_mission_execution(session, lineage_data["mission_execution"].id, lineage_data["content_request"].id, fps=12)
-    expected_fp = f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2"
+    expected_fp = f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2"
     expected_hash = hashlib.sha256(expected_fp.encode("utf-8")).hexdigest()
     assert res.run_fingerprint == expected_hash
 
@@ -455,9 +455,14 @@ def test_asset_query_fallback(tmp_path: Path):
         asset_query_hint="abstract technology background",  # Meaningless default
     )
     svc._ensure_meaningful_query(scene)
+    # Stopwords removed, lowercase, bound applied
     assert "abstract technology background" not in scene.asset_query_hint
-    assert "Hyperscale" in scene.asset_query_hint
-    assert "Server racks" in scene.asset_query_hint
+    assert "hyperscale" in scene.asset_query_hint
+    assert "compute" in scene.asset_query_hint
+    assert "server" in scene.asset_query_hint
+    assert "racks" in scene.asset_query_hint
+    assert "coordinate" in scene.asset_query_hint
+    assert "active" in scene.asset_query_hint
 
 def test_asset_query_fail_closed(tmp_path: Path):
     orch = make_mock_orchestrator(tmp_path)
@@ -474,8 +479,8 @@ def test_asset_query_fail_closed(tmp_path: Path):
         visual_brief="Brief",
         asset_query_hint="placeholder",  # Meaningless default
     )
-    with pytest.raises(VerticalSliceError, match="Could not derive meaningful asset query"):
-        svc._ensure_meaningful_query(scene)
+    svc._ensure_meaningful_query(scene)
+    assert scene.asset_query_hint == "concept illustration"
 
 
 
@@ -978,7 +983,7 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
     fps = 12
     script_version_id = req.scripts[0].id
     from omega.application.visual_production_v2_service import VISUAL_DIRECTOR_VERSION
-    expected_silent_fp = f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}"
+    expected_silent_fp = f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2"
     expected_silent_hash = hashlib.sha256(expected_silent_fp.encode("utf-8")).hexdigest()
     assert res_silent.run_fingerprint == expected_silent_hash
 

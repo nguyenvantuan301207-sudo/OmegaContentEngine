@@ -129,7 +129,7 @@ class VisualAssetEngine:
 
     def select_candidate(self, request: VisualAssetRequest, candidates: list[VisualAssetCandidate]) -> VisualAssetCandidate | None:
         valid_candidates = []
-        for c in candidates:
+        for i, c in enumerate(candidates):
             if c.kind != request.kind:
                 continue
             if not c.provider_id or not c.provider_id.strip():
@@ -138,15 +138,39 @@ class VisualAssetEngine:
                 continue
             if not c.source_url and not c.source_page_url:
                 continue
-            valid_candidates.append(c)
+            valid_candidates.append((i, c))
 
         if not valid_candidates:
             return None
 
-        valid_candidates.sort(key=lambda c: (
-            c.provider_id,
-            c.provider,
-            c.source_page_url or "",
-            c.source_url or "",
-        ))
-        return valid_candidates[0]
+        def _score(item: tuple[int, VisualAssetCandidate]) -> tuple:
+            i, c = item
+            valid_dims = bool(c.width and c.height and c.width > 0 and c.height > 0)
+            # Use strict type cast to calm the typechecker down if it thinks it might be None
+            area = (int(c.width) * int(c.height)) if valid_dims and c.width is not None and c.height is not None else 0
+
+            if request.kind == VisualAssetKind.IMAGE:
+                return (
+                    not valid_dims,
+                    -area,
+                    i,
+                    c.provider_id,
+                    c.provider,
+                    c.source_page_url or "",
+                    c.source_url or "",
+                )
+            else:
+                valid_duration = bool(c.duration_seconds and c.duration_seconds > 0)
+                return (
+                    not valid_duration,
+                    not valid_dims,
+                    -area,
+                    i,
+                    c.provider_id,
+                    c.provider,
+                    c.source_page_url or "",
+                    c.source_url or "",
+                )
+
+        valid_candidates.sort(key=_score)
+        return valid_candidates[0][1]

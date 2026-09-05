@@ -191,7 +191,7 @@ class StoryboardEngine:
             visual_brief=brief,
             on_screen_text=on_screen_text,
             motion_hint=motion_hint,
-            asset_query_hint="abstract technology background",
+            asset_query_hint=None,
             importance="HIGH" if citations else "NORMAL",
             citations=citations
         )
