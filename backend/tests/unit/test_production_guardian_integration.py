@@ -360,6 +360,8 @@ async def test_post_render_payload_uses_request_target():
             "abc123",
             Path("test.mp4"),
             ProductionQAStatus.PASSED,
+            narration_quality="NEURAL_PRODUCTION",
+            narration_source_refs=("Gemini TTS (voice: Kore)",),
         )
 
     assert status == ProductionQAStatus.PASSED
@@ -374,6 +376,9 @@ async def test_post_render_payload_uses_request_target():
     assert payload.diagnostic_context["media_probe_summary"] == {
         "width": 1920
     }
+    assert payload.diagnostic_context["narration_quality"] == "NEURAL_PRODUCTION"
+    assert payload.diagnostic_context["narration_source_refs"] == ["Gemini TTS (voice: Kore)"]
+
 
 
 @pytest.mark.asyncio

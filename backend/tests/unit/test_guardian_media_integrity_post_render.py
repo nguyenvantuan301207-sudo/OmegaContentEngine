@@ -260,3 +260,270 @@ async def test_diagnostic_takes_precedence_over_artifact(mock_session, mock_adap
     assert kwargs["media_probe_summary"] == {"has_audio": True}
     assert kwargs["expected_hash"] == "diag-hash"
     assert kwargs["artifact_file_path"] == "diag-path"
+
+
+@pytest.mark.asyncio
+async def test_db_fallback_audio_asset_update(mock_session, mock_adapter):
+    # 1. Prepared AUDIO DB asset
+    detector = MediaIntegrityDetector()
+
+    req_id = str(uuid.uuid4())
+    context = GuardianEvaluationContext(
+        mission_id=uuid.uuid4(),
+        checkpoint=GuardianCheckpoint.POST_RENDER,
+        trigger_type=CheckTriggerType.POST_RENDER,
+        production_request_id=req_id,
+        diagnostic_context={
+            "narration_quality": "NEURAL_PRODUCTION",
+            "narration_source_refs": ["Gemini TTS (voice: Kore)"]
+        }
+    )
+
+    prod_req = ProductionRequest(
+        id=uuid.UUID(req_id),
+        script_version_id=uuid.uuid4(),
+        channel_dna_revision_id=uuid.uuid4(),
+        target_width=1920,
+        target_height=1080,
+        video_codec="h264"
+    )
+    prod_req.scenes = []
+    prod_req.narration_segments = []
+    prod_req.subtitle_cues = []
+    prod_req.artifacts = []
+
+    visual_asset = ProductionAsset(
+        id=uuid.uuid4(),
+        asset_type="IMAGE",
+        provider_type="PEXELS",
+        mime_type="image/jpeg",
+        storage_uri="s3://b/img.jpg",
+        license_status="CLEARED",
+        source_ref="pexels-123",
+        asset_requirement_id=uuid.uuid4()
+    )
+    audio_asset = ProductionAsset(
+        id=uuid.uuid4(),
+        asset_type="AUDIO",
+        provider_type="LOCAL",
+        mime_type="audio/mp3",
+        storage_uri="s3://b/aud.mp3",
+        license_status="CLEARED",
+        source_ref="Local TTS",
+        asset_requirement_id=uuid.uuid4()
+    )
+    prod_req.assets = [visual_asset, audio_asset]
+
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = prod_req
+    mock_session.execute.return_value = mock_res
+
+    await detector.evaluate(context, lambda: mock_session)
+
+    kwargs = mock_adapter.evaluate.call_args[1]
+    assets_data = kwargs["assets_data"]
+
+    # 1. Assert ProductionQAAdapter receives AUDIO:
+    audio_data = next(a for a in assets_data if a["asset_type"] == "AUDIO")
+    assert audio_data["narration_quality"] == "NEURAL_PRODUCTION"
+    assert audio_data["source_ref"] == "Gemini TTS (voice: Kore)"
+    assert audio_data["narration_source_refs"] == ["Gemini TTS (voice: Kore)"]
+    assert "Local TTS" not in audio_data["source_ref"]
+
+    # 2. Non-AUDIO DB asset remains semantically unchanged.
+    img_data = next(a for a in assets_data if a["asset_type"] == "IMAGE")
+    assert img_data["source_ref"] == "pexels-123"
+
+
+@pytest.mark.asyncio
+async def test_db_fallback_neural_empty_refs(mock_session, mock_adapter):
+    # 3. Runtime NEURAL + empty refs
+    detector = MediaIntegrityDetector()
+
+    req_id = str(uuid.uuid4())
+    context = GuardianEvaluationContext(
+        mission_id=uuid.uuid4(),
+        checkpoint=GuardianCheckpoint.POST_RENDER,
+        trigger_type=CheckTriggerType.POST_RENDER,
+        production_request_id=req_id,
+        diagnostic_context={
+            "narration_quality": "NEURAL_PRODUCTION",
+            "narration_source_refs": []
+        }
+    )
+
+    prod_req = ProductionRequest(
+        id=uuid.UUID(req_id),
+        script_version_id=uuid.uuid4(),
+        channel_dna_revision_id=uuid.uuid4(),
+        target_width=1920,
+        target_height=1080,
+        video_codec="h264"
+    )
+    prod_req.scenes = []
+    prod_req.narration_segments = []
+    prod_req.subtitle_cues = []
+    prod_req.artifacts = []
+
+    audio_asset = ProductionAsset(
+        id=uuid.uuid4(),
+        asset_type="AUDIO",
+        source_ref="Local TTS",
+    )
+    prod_req.assets = [audio_asset]
+
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = prod_req
+    mock_session.execute.return_value = mock_res
+
+    await detector.evaluate(context, lambda: mock_session)
+
+    kwargs = mock_adapter.evaluate.call_args[1]
+    assets_data = kwargs["assets_data"]
+
+    audio_data = next(a for a in assets_data if a["asset_type"] == "AUDIO")
+    assert audio_data["source_ref"] is None
+    assert audio_data["narration_quality"] == "NEURAL_PRODUCTION"
+
+
+@pytest.mark.asyncio
+async def test_db_fallback_no_diagnostic(mock_session, mock_adapter):
+    # 4. NO runtime diagnostic provenance
+    detector = MediaIntegrityDetector()
+
+    req_id = str(uuid.uuid4())
+    context = GuardianEvaluationContext(
+        mission_id=uuid.uuid4(),
+        checkpoint=GuardianCheckpoint.POST_RENDER,
+        trigger_type=CheckTriggerType.POST_RENDER,
+        production_request_id=req_id,
+        diagnostic_context={}
+    )
+
+    prod_req = ProductionRequest(
+        id=uuid.UUID(req_id),
+        script_version_id=uuid.uuid4(),
+        channel_dna_revision_id=uuid.uuid4(),
+        target_width=1920,
+        target_height=1080,
+        video_codec="h264"
+    )
+    prod_req.scenes = []
+    prod_req.narration_segments = []
+    prod_req.subtitle_cues = []
+    prod_req.artifacts = []
+
+    audio_asset = ProductionAsset(
+        id=uuid.uuid4(),
+        asset_type="AUDIO",
+        source_ref="Local TTS",
+    )
+    prod_req.assets = [audio_asset]
+
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = prod_req
+    mock_session.execute.return_value = mock_res
+
+    await detector.evaluate(context, lambda: mock_session)
+
+    kwargs = mock_adapter.evaluate.call_args[1]
+    assets_data = kwargs["assets_data"]
+
+    audio_data = next(a for a in assets_data if a["asset_type"] == "AUDIO")
+    assert audio_data["source_ref"] == "Local TTS"
+
+
+@pytest.mark.asyncio
+async def test_db_fallback_provenance_no_audio(mock_session, mock_adapter):
+    # 5. Runtime provenance but NO DB AUDIO
+    detector = MediaIntegrityDetector()
+
+    req_id = str(uuid.uuid4())
+    context = GuardianEvaluationContext(
+        mission_id=uuid.uuid4(),
+        checkpoint=GuardianCheckpoint.POST_RENDER,
+        trigger_type=CheckTriggerType.POST_RENDER,
+        production_request_id=req_id,
+        diagnostic_context={
+            "narration_quality": "NEURAL_PRODUCTION",
+            "narration_source_refs": ["Gemini TTS (voice: Kore)"]
+        }
+    )
+
+    prod_req = ProductionRequest(
+        id=uuid.UUID(req_id),
+        script_version_id=uuid.uuid4(),
+        channel_dna_revision_id=uuid.uuid4(),
+        target_width=1920,
+        target_height=1080,
+        video_codec="h264"
+    )
+    prod_req.scenes = []
+    prod_req.narration_segments = []
+    prod_req.subtitle_cues = []
+    prod_req.artifacts = []
+    prod_req.assets = []
+
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = prod_req
+    mock_session.execute.return_value = mock_res
+
+    await detector.evaluate(context, lambda: mock_session)
+
+    kwargs = mock_adapter.evaluate.call_args[1]
+    assets_data = kwargs["assets_data"]
+
+    audio_data = next(a for a in assets_data if a["asset_type"] == "AUDIO")
+    assert audio_data["id"] == "runtime-narration"
+    assert audio_data["asset_type"] == "AUDIO"
+    assert audio_data["narration_quality"] == "NEURAL_PRODUCTION"
+
+
+@pytest.mark.asyncio
+async def test_db_fallback_normalization(mock_session, mock_adapter):
+    # 6. Normalization
+    detector = MediaIntegrityDetector()
+
+    req_id = str(uuid.uuid4())
+    context = GuardianEvaluationContext(
+        mission_id=uuid.uuid4(),
+        checkpoint=GuardianCheckpoint.POST_RENDER,
+        trigger_type=CheckTriggerType.POST_RENDER,
+        production_request_id=req_id,
+        diagnostic_context={
+            "narration_source_refs": ["Gemini TTS", "Gemini TTS", 123, "", None]
+        }
+    )
+
+    prod_req = ProductionRequest(
+        id=uuid.UUID(req_id),
+        script_version_id=uuid.uuid4(),
+        channel_dna_revision_id=uuid.uuid4(),
+        target_width=1920,
+        target_height=1080,
+        video_codec="h264"
+    )
+    prod_req.scenes = []
+    prod_req.narration_segments = []
+    prod_req.subtitle_cues = []
+    prod_req.artifacts = []
+
+    audio_asset = ProductionAsset(
+        id=uuid.uuid4(),
+        asset_type="AUDIO",
+        source_ref="Local TTS",
+    )
+    prod_req.assets = [audio_asset]
+
+    mock_res = MagicMock()
+    mock_res.scalar_one_or_none.return_value = prod_req
+    mock_session.execute.return_value = mock_res
+
+    await detector.evaluate(context, lambda: mock_session)
+
+    kwargs = mock_adapter.evaluate.call_args[1]
+    assets_data = kwargs["assets_data"]
+
+    audio_data = next(a for a in assets_data if a["asset_type"] == "AUDIO")
+    assert audio_data["narration_source_refs"] == ["Gemini TTS", "123"]
+    assert audio_data["source_ref"] == "Gemini TTS | 123"

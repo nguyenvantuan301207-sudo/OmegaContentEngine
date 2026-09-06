@@ -263,3 +263,132 @@ async def test_v2_helper_dimension_fps_mismatch(render_service, tmp_path, mock_v
         await render_service._render_v2_staging(
             AsyncMock(), req, 30, 1920, 1080, "mp4", "h264", staging_out
         )
+
+
+@pytest.mark.asyncio
+async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mock_v2_service):
+    req = ProductionRequest(
+        mission_execution_id=uuid.uuid4(),
+        content_request_id=uuid.uuid4(),
+    )
+    staging_out = tmp_path / "staging.mp4"
+    v2_out = tmp_path / "v2_final.mp4"
+    sha = create_fake_mp4(v2_out)
+
+    class FakeResult:
+        mission_execution_id = req.mission_execution_id
+        content_request_id = req.content_request_id
+        width = 1920
+        height = 1080
+        fps = 30
+        output_path = str(v2_out)
+        content_sha256 = sha
+        narration_quality = "NEURAL_PRODUCTION"
+        narration_source_refs = ("Gemini TTS (voice: Kore)",)
+
+    mock_v2_service.render_mission_execution.return_value = FakeResult()
+    session = AsyncMock(spec=AsyncSession)
+
+    result = await render_service._render_v2_staging(
+        session, req, 30, 1920, 1080, "mp4", "h264", staging_out
+    )
+
+    assert result == (
+        "NEURAL_PRODUCTION",
+        ("Gemini TTS (voice: Kore)",),
+    )
+
+
+@pytest.mark.asyncio
+async def test_v2_helper_backward_compatibility(render_service, tmp_path, mock_v2_service):
+    req = ProductionRequest(
+        mission_execution_id=uuid.uuid4(),
+        content_request_id=uuid.uuid4(),
+    )
+    staging_out = tmp_path / "staging.mp4"
+    v2_out = tmp_path / "v2_final.mp4"
+    sha = create_fake_mp4(v2_out)
+
+    class FakeResult:
+        mission_execution_id = req.mission_execution_id
+        content_request_id = req.content_request_id
+        width = 1920
+        height = 1080
+        fps = 30
+        output_path = str(v2_out)
+        content_sha256 = sha
+
+    mock_v2_service.render_mission_execution.return_value = FakeResult()
+    session = AsyncMock(spec=AsyncSession)
+
+    result = await render_service._render_v2_staging(
+        session, req, 30, 1920, 1080, "mp4", "h264", staging_out
+    )
+
+    assert result == (None, ())
+
+
+def test_overlay_runtime_narration_provenance(render_service):
+    assets_data = [
+        {"asset_type": "AUDIO", "source_ref": "Local TTS", "id": "1"},
+        {"asset_type": "IMAGE", "source_ref": "Pexels", "id": "2"},
+        {"asset_type": "SUBTITLE", "source_ref": "Local", "id": "3"},
+    ]
+
+    result = render_service._overlay_runtime_narration_provenance(
+        assets_data,
+        narration_quality="NEURAL_PRODUCTION",
+        narration_source_refs=("Gemini TTS (voice: Kore)",),
+    )
+
+    # 3. _overlay_runtime_narration_provenance
+    audio_asset = next(a for a in result if a["asset_type"] == "AUDIO")
+    assert audio_asset["narration_quality"] == "NEURAL_PRODUCTION"
+    assert audio_asset["source_ref"] == "Gemini TTS (voice: Kore)"
+    assert audio_asset["narration_source_refs"] == ["Gemini TTS (voice: Kore)"]
+    assert "Local TTS" not in audio_asset["source_ref"]
+
+    # 4. Input non-mutation
+    assert assets_data[0]["source_ref"] == "Local TTS"
+
+    # 5. Non-AUDIO preservation
+    image_asset = next(a for a in result if a["asset_type"] == "IMAGE")
+    subtitle_asset = next(a for a in result if a["asset_type"] == "SUBTITLE")
+    assert image_asset == {"asset_type": "IMAGE", "source_ref": "Pexels", "id": "2"}
+    assert subtitle_asset == {"asset_type": "SUBTITLE", "source_ref": "Local", "id": "3"}
+
+
+def test_overlay_runtime_narration_quality_empty_refs(render_service):
+    assets_data = [
+        {"asset_type": "AUDIO", "source_ref": "Local TTS"},
+    ]
+
+    result = render_service._overlay_runtime_narration_provenance(
+        assets_data,
+        narration_quality="NEURAL_PRODUCTION",
+        narration_source_refs=(),
+    )
+
+    # 6. Runtime quality with empty refs
+    audio_asset = result[0]
+    assert audio_asset["source_ref"] is None
+    assert audio_asset["narration_quality"] == "NEURAL_PRODUCTION"
+
+
+def test_overlay_runtime_narration_no_audio(render_service):
+    assets_data = [
+        {"asset_type": "IMAGE", "source_ref": "Pexels", "id": "2"},
+    ]
+
+    result = render_service._overlay_runtime_narration_provenance(
+        assets_data,
+        narration_quality="NEURAL_PRODUCTION",
+        narration_source_refs=("Gemini TTS (voice: Kore)",),
+    )
+
+    # 7. Runtime provenance with no AUDIO
+    assert len(result) == 2
+    audio_asset = result[-1]
+    assert audio_asset["id"] == "runtime-narration"
+    assert audio_asset["asset_type"] == "AUDIO"
+    assert audio_asset["narration_quality"] == "NEURAL_PRODUCTION"

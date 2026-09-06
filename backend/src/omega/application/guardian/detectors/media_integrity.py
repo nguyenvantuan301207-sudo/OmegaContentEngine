@@ -20,6 +20,7 @@ from omega.domain.guardian import (
     GuardianCheckpoint,
     GuardianFindingData,
 )
+from omega.domain.production import AssetType
 from omega.infrastructure.models import MediaArtifact, ProductionRequest, ProductionScene
 
 
@@ -124,6 +125,43 @@ class MediaIntegrityDetector(BaseDetector):
                 for s in prod_req.scenes
                 for r in s.asset_requirements
             ]
+
+            runtime_quality = diag.get("narration_quality")
+            raw_refs = diag.get("narration_source_refs", [])
+            if not isinstance(raw_refs, (list, tuple)):
+                raw_refs = []
+
+            if runtime_quality is not None or raw_refs:
+                normalized_refs: list[str] = []
+                for value in raw_refs:
+                    ref = str(value).strip() if value is not None else ""
+                    if ref and ref not in normalized_refs:
+                        normalized_refs.append(ref)
+
+                source_ref = " | ".join(normalized_refs) if normalized_refs else None
+
+                audio_found = False
+                for a in assets_data:
+                    if a.get("asset_type") in ("AUDIO", AssetType.AUDIO.value):
+                        audio_found = True
+                        a["narration_quality"] = runtime_quality
+                        a["source_ref"] = source_ref
+                        a["narration_source_refs"] = normalized_refs
+
+                if not audio_found:
+                    assets_data.append({
+                        "id": "runtime-narration",
+                        "asset_type": "AUDIO",
+                        "provider_type": None,
+                        "mime_type": None,
+                        "storage_uri": None,
+                        "license_status": None,
+                        "source_ref": source_ref,
+                        "asset_requirement_id": None,
+                        "narration_quality": runtime_quality,
+                        "narration_source_refs": normalized_refs,
+                    })
+
             narr_data = [
                 {
                     "id": str(n.id),

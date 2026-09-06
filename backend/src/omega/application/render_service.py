@@ -255,6 +255,8 @@ class ProductionRenderService:
         artifacts_dir = self.storage.get_artifacts_dir(channel_id, request_id)
         staging_output_path = staging_dir / f"output_{job_id.hex[:8]}.mp4"
         final_artifact_path: Path | None = None
+        runtime_quality: str | None = None
+        runtime_refs: tuple[str, ...] = ()
 
         try:
             # Check if we should use V2
@@ -262,7 +264,7 @@ class ProductionRenderService:
 
             if use_v2:
                 # V2 Route
-                await self._render_v2_staging(
+                runtime_quality, runtime_refs = await self._render_v2_staging(
                     session=session,
                     req=req,
                     fps=fps,
@@ -373,6 +375,11 @@ class ProductionRenderService:
         # PHASE 3: SHORT ATOMIC DB FINALIZATION & PRODUCTION QA
         # ══════════════════════════════════════════════════════════════════
         try:
+            # 0. Apply V2 Runtime Narration Provenance Overlay
+            assets_list = self._overlay_runtime_narration_provenance(
+                assets_list, runtime_quality, runtime_refs
+            )
+
             # 1. Run local 17-rule Production QA
             qa_status, qa_findings = self.qa_engine.evaluate(
                 request_data=req_data,
@@ -431,7 +438,15 @@ class ProductionRenderService:
             # POST_RENDER Guardian Check
             if mission_id:
                 qa_status = await self._evaluate_post_render_guardian(
-                    mission_id, request_id, media_art.id, probe_summary, content_hash, final_artifact_path, qa_status
+                    mission_id,
+                    request_id,
+                    media_art.id,
+                    probe_summary,
+                    content_hash,
+                    final_artifact_path,
+                    qa_status,
+                    narration_quality=runtime_quality,
+                    narration_source_refs=runtime_refs,
                 )
 
             # 5. Update ProductionRequest status and outcome
@@ -479,6 +494,55 @@ class ProductionRenderService:
         is_mission = mode == "MISSION_EXECUTION" or (hasattr(mode, "value") and mode.value == "MISSION_EXECUTION")
         return is_mission and self.visual_production_service is not None
 
+    def _overlay_runtime_narration_provenance(
+        self,
+        assets_data: list[dict],
+        narration_quality: str | None,
+        narration_source_refs: tuple[str, ...],
+    ) -> list[dict]:
+        if narration_quality is None and not narration_source_refs:
+            return [dict(a) for a in assets_data]
+
+        raw_refs = narration_source_refs
+        if not isinstance(raw_refs, (list, tuple)):
+            raw_refs = []
+
+        normalized_refs: list[str] = []
+        for value in raw_refs:
+            ref = str(value).strip() if value is not None else ""
+            if ref and ref not in normalized_refs:
+                normalized_refs.append(ref)
+
+        source_ref = " | ".join(normalized_refs) if normalized_refs else None
+
+        new_assets = []
+        audio_found = False
+        for a in assets_data:
+            new_a = dict(a)
+            if new_a.get("asset_type") in ("AUDIO", AssetType.AUDIO.value):
+                audio_found = True
+                new_a["narration_quality"] = narration_quality
+                new_a["source_ref"] = source_ref
+                new_a["narration_source_refs"] = normalized_refs
+            new_assets.append(new_a)
+
+        if not audio_found:
+            new_assets.append(
+                {
+                    "id": "runtime-narration",
+                    "asset_type": "AUDIO",
+                    "provider_type": None,
+                    "mime_type": None,
+                    "storage_uri": None,
+                    "license_status": None,
+                    "source_ref": source_ref,
+                    "asset_requirement_id": None,
+                    "narration_quality": narration_quality,
+                    "narration_source_refs": normalized_refs,
+                }
+            )
+        return new_assets
+
     async def _evaluate_post_render_guardian(
         self,
         mission_id: uuid.UUID,
@@ -488,6 +552,8 @@ class ProductionRenderService:
         content_hash: str,
         final_artifact_path: Path | None,
         qa_status: ProductionQAStatus,
+        narration_quality: str | None = None,
+        narration_source_refs: tuple[str, ...] = (),
     ) -> ProductionQAStatus:
         try:
             from omega.application.guardian.engine import GuardianEngine
@@ -513,6 +579,8 @@ class ProductionRenderService:
                         "artifact_file_path": str(final_artifact_path)
                         if final_artifact_path
                         else None,
+                        "narration_quality": narration_quality,
+                        "narration_source_refs": list(narration_source_refs),
                     },
                 )
             )
@@ -540,7 +608,7 @@ class ProductionRenderService:
         container_format: str,
         video_codec: str,
         staging_output_path: Path,
-    ) -> None:
+    ) -> tuple[str | None, tuple[str, ...]]:
         import shutil
 
         # Lineage check
@@ -601,6 +669,11 @@ class ProductionRenderService:
         copied_sha = compute_sha256(staging_output_path)
         if copied_sha != source_sha:
             raise ValueError("V2 copied SHA mismatch")
+
+        return (
+            getattr(result, "narration_quality", None),
+            tuple(getattr(result, "narration_source_refs", ()) or ()),
+        )
 
     async def _render_synthetic_clip(
         self,
