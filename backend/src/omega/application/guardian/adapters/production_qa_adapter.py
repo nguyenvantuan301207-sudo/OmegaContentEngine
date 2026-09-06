@@ -64,6 +64,11 @@ PROD_RULE_SEVERITY_RISK_MAP: dict[str, tuple[GuardianSeverity, GuardianRiskType,
         GuardianRiskType.MEDIA_CORRUPTION,
         0.8,
     ),
+    ProductionQARuleCode.ROBOTIC_FALLBACK_TTS.value: (
+        GuardianSeverity.LOW,
+        GuardianRiskType.MEDIA_CORRUPTION,
+        0.8,
+    ),
     ProductionQARuleCode.RENDER_FILE_MISSING.value: (
         GuardianSeverity.CRITICAL,
         GuardianRiskType.MEDIA_CORRUPTION,
