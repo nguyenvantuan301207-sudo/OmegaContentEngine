@@ -362,6 +362,25 @@ async def test_post_render_payload_uses_request_target():
             ProductionQAStatus.PASSED,
             narration_quality="NEURAL_PRODUCTION",
             narration_source_refs=("Gemini TTS (voice: Kore)",),
+            runtime_timeline_duration_ms=5000,
+            runtime_narration_segments=(
+                {
+                    "id": "runtime-narration-1",
+                    "scene_index": 1,
+                    "start_ms": 0,
+                    "end_ms": 5000,
+                    "duration_ms": 5000,
+                },
+            ),
+            runtime_subtitle_cues=(
+                {
+                    "scene_index": 1,
+                    "cue_order": 1,
+                    "start_ms": 0,
+                    "end_ms": 4900,
+                    "text": "runtime cue",
+                },
+            ),
         )
 
     assert status == ProductionQAStatus.PASSED
@@ -378,6 +397,25 @@ async def test_post_render_payload_uses_request_target():
     }
     assert payload.diagnostic_context["narration_quality"] == "NEURAL_PRODUCTION"
     assert payload.diagnostic_context["narration_source_refs"] == ["Gemini TTS (voice: Kore)"]
+    assert payload.diagnostic_context["runtime_timeline_duration_ms"] == 5000
+    assert payload.diagnostic_context["runtime_narration_segments"] == [
+        {
+            "id": "runtime-narration-1",
+            "scene_index": 1,
+            "start_ms": 0,
+            "end_ms": 5000,
+            "duration_ms": 5000,
+        },
+    ]
+    assert payload.diagnostic_context["runtime_subtitle_cues"] == [
+        {
+            "scene_index": 1,
+            "cue_order": 1,
+            "start_ms": 0,
+            "end_ms": 4900,
+            "text": "runtime cue",
+        },
+    ]
 
 
 

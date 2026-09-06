@@ -284,7 +284,38 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
         output_path = str(v2_out)
         content_sha256 = sha
         narration_quality = "NEURAL_PRODUCTION"
-        narration_source_refs = ("Gemini TTS (voice: Kore)",)
+        narration_source_refs = ("Gemini TTS",)
+        runtime_timeline_duration_ms = 5000
+        runtime_narration_segments = (
+            {
+                "scene_index": 1,
+                "start_ms": 0,
+                "end_ms": 2000,
+                "duration_ms": 2000,
+            },
+            {
+                "scene_index": 2,
+                "start_ms": 2000,
+                "end_ms": 5000,
+                "duration_ms": 3000,
+            },
+        )
+        runtime_subtitle_cues = (
+            {
+                "scene_index": 1,
+                "cue_order": 1,
+                "start_ms": 0,
+                "end_ms": 1800,
+                "text": "one",
+            },
+            {
+                "scene_index": 2,
+                "cue_order": 2,
+                "start_ms": 2000,
+                "end_ms": 4900,
+                "text": "two",
+            },
+        )
 
     mock_v2_service.render_mission_execution.return_value = FakeResult()
     session = AsyncMock(spec=AsyncSession)
@@ -295,7 +326,38 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
 
     assert result == (
         "NEURAL_PRODUCTION",
-        ("Gemini TTS (voice: Kore)",),
+        ("Gemini TTS",),
+        5000,
+        (
+            {
+                "scene_index": 1,
+                "start_ms": 0,
+                "end_ms": 2000,
+                "duration_ms": 2000,
+            },
+            {
+                "scene_index": 2,
+                "start_ms": 2000,
+                "end_ms": 5000,
+                "duration_ms": 3000,
+            },
+        ),
+        (
+            {
+                "scene_index": 1,
+                "cue_order": 1,
+                "start_ms": 0,
+                "end_ms": 1800,
+                "text": "one",
+            },
+            {
+                "scene_index": 2,
+                "cue_order": 2,
+                "start_ms": 2000,
+                "end_ms": 4900,
+                "text": "two",
+            },
+        ),
     )
 
 
@@ -325,7 +387,90 @@ async def test_v2_helper_backward_compatibility(render_service, tmp_path, mock_v
         session, req, 30, 1920, 1080, "mp4", "h264", staging_out
     )
 
-    assert result == (None, ())
+    assert result == (None, (), None, (), ())
+
+
+def test_overlay_runtime_timeline_truth_overrides_prepared(render_service):
+    prepared_narr = [
+        {"id": "n1", "start_ms": 0, "end_ms": 5000},
+        {"id": "n2", "start_ms": 5200, "end_ms": 10200},
+    ]
+    prepared_subs = [
+        {"cue_order": 1, "start_ms": 0, "end_ms": 5000, "text": "one"},
+        {"cue_order": 2, "start_ms": 5200, "end_ms": 10200, "text": "two"},
+    ]
+    runtime_duration = 5000
+    runtime_narr = [
+        {"scene_index": 1, "start_ms": 0, "end_ms": 2000, "duration_ms": 2000},
+        {"scene_index": 2, "start_ms": 2000, "end_ms": 5000, "duration_ms": 3000},
+    ]
+    runtime_subs = [
+        {"scene_index": 1, "cue_order": 1, "start_ms": 0, "end_ms": 1800, "text": "one"},
+        {"scene_index": 2, "cue_order": 2, "start_ms": 2000, "end_ms": 4900, "text": "two"},
+    ]
+
+    qa_narr, qa_subs = render_service._overlay_runtime_timeline_truth(
+        prepared_narr, prepared_subs, runtime_duration, runtime_narr, runtime_subs
+    )
+
+    assert len(qa_narr) == 2
+    assert qa_narr[0]["start_ms"] == 0 and qa_narr[0]["end_ms"] == 2000
+    assert qa_narr[1]["start_ms"] == 2000 and qa_narr[1]["end_ms"] == 5000
+    assert not any(n["end_ms"] == 10200 for n in qa_narr)
+
+    assert len(qa_subs) == 2
+    assert qa_subs[0]["start_ms"] == 0 and qa_subs[0]["end_ms"] == 1800
+    assert qa_subs[1]["start_ms"] == 2000 and qa_subs[1]["end_ms"] == 4900
+    assert not any(s["end_ms"] == 10200 for s in qa_subs)
+
+
+def test_overlay_runtime_timeline_truth_no_mutation(render_service):
+    prepared_narr = [{"id": "n1", "start_ms": 0, "end_ms": 5000}]
+    prepared_subs = [{"cue_order": 1, "start_ms": 0, "end_ms": 5000, "text": "one"}]
+
+    qa_narr, qa_subs = render_service._overlay_runtime_timeline_truth(
+        prepared_narr, prepared_subs, None, (), ()
+    )
+
+    qa_narr[0]["start_ms"] = 999
+    qa_subs[0]["start_ms"] = 999
+
+    assert prepared_narr[0]["start_ms"] == 0
+    assert prepared_subs[0]["start_ms"] == 0
+
+
+def test_overlay_runtime_timeline_truth_duration_none(render_service):
+    prepared_narr = [{"id": "n1", "start_ms": 0, "end_ms": 5000}]
+    prepared_subs = [{"cue_order": 1, "start_ms": 0, "end_ms": 5000, "text": "one"}]
+
+    qa_narr, qa_subs = render_service._overlay_runtime_timeline_truth(
+        prepared_narr, prepared_subs, None, (), ()
+    )
+
+    assert qa_narr == prepared_narr
+    assert qa_subs == prepared_subs
+
+
+def test_overlay_runtime_timeline_truth_empty_subs(render_service):
+    prepared_narr = [{"id": "n1", "start_ms": 0, "end_ms": 5000}]
+    prepared_subs = [{"cue_order": 1, "start_ms": 0, "end_ms": 5000, "text": "one"}]
+
+    qa_narr, qa_subs = render_service._overlay_runtime_timeline_truth(
+        prepared_narr, prepared_subs, 5000, [{"scene_index": 1, "start_ms": 0, "end_ms": 5000, "duration_ms": 5000}], []
+    )
+
+    assert qa_subs == []
+
+
+def test_overlay_runtime_timeline_truth_empty_narr(render_service):
+    prepared_narr = [{"id": "n1", "start_ms": 0, "end_ms": 5000}]
+    prepared_subs = [{"cue_order": 1, "start_ms": 0, "end_ms": 5000, "text": "one"}]
+
+    qa_narr, qa_subs = render_service._overlay_runtime_timeline_truth(
+        prepared_narr, prepared_subs, 5000, [], []
+    )
+
+    assert qa_narr == []
 
 
 def test_overlay_runtime_narration_provenance(render_service):

@@ -181,6 +181,29 @@ class MediaIntegrityDetector(BaseDetector):
                 for sc in prod_req.subtitle_cues
             ]
 
+            runtime_duration = diag.get("runtime_timeline_duration_ms")
+            if runtime_duration is not None:
+                narr_data = []
+                for n in diag.get("runtime_narration_segments", []):
+                    nd = dict(n)
+                    narr_data.append({
+                        "id": f"runtime-narration-{nd.get('scene_index')}",
+                        "scene_index": nd.get("scene_index"),
+                        "start_ms": int(nd.get("start_ms", 0)),
+                        "end_ms": int(nd.get("end_ms", 0)),
+                        "duration_ms": int(nd.get("duration_ms", 0)),
+                    })
+                subs_data = []
+                for s in diag.get("runtime_subtitle_cues", []):
+                    sd = dict(s)
+                    subs_data.append({
+                        "cue_order": int(sd.get("cue_order", 0)),
+                        "scene_index": sd.get("scene_index"),
+                        "start_ms": int(sd.get("start_ms", 0)),
+                        "end_ms": int(sd.get("end_ms", 0)),
+                        "text": str(sd.get("text", "")).strip(),
+                    })
+
             probe_summary = diag.get("media_probe_summary")
             artifact_path = diag.get("artifact_file_path")
             expected_hash = diag.get("expected_hash")

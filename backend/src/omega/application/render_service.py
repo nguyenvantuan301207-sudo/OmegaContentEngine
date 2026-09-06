@@ -257,6 +257,9 @@ class ProductionRenderService:
         final_artifact_path: Path | None = None
         runtime_quality: str | None = None
         runtime_refs: tuple[str, ...] = ()
+        runtime_timeline_duration_ms: int | None = None
+        runtime_narration_segments = ()
+        runtime_subtitle_cues = ()
 
         try:
             # Check if we should use V2
@@ -264,7 +267,13 @@ class ProductionRenderService:
 
             if use_v2:
                 # V2 Route
-                runtime_quality, runtime_refs = await self._render_v2_staging(
+                (
+                    runtime_quality,
+                    runtime_refs,
+                    runtime_timeline_duration_ms,
+                    runtime_narration_segments,
+                    runtime_subtitle_cues,
+                ) = await self._render_v2_staging(
                     session=session,
                     req=req,
                     fps=fps,
@@ -380,6 +389,14 @@ class ProductionRenderService:
                 assets_list, runtime_quality, runtime_refs
             )
 
+            qa_narr_list, qa_subs_list = self._overlay_runtime_timeline_truth(
+                narr_list,
+                subs_list,
+                runtime_timeline_duration_ms,
+                runtime_narration_segments,
+                runtime_subtitle_cues,
+            )
+
             # 1. Run local 17-rule Production QA
             qa_status, qa_findings = self.qa_engine.evaluate(
                 request_data=req_data,
@@ -387,8 +404,8 @@ class ProductionRenderService:
                 content_request_data=content_req_data,
                 assets_data=assets_list,
                 requirements_data=reqs_list,
-                narration_segments=narr_list,
-                subtitle_cues=subs_list,
+                narration_segments=qa_narr_list,
+                subtitle_cues=qa_subs_list,
                 media_probe_summary=probe_summary,
                 artifact_file_path=final_artifact_path,
                 expected_hash=content_hash,
@@ -435,6 +452,18 @@ class ProductionRenderService:
             )
             session.add(qa_record)
 
+            guardian_runtime_narration_segments = (
+                qa_narr_list
+                if runtime_timeline_duration_ms is not None
+                else []
+            )
+
+            guardian_runtime_subtitle_cues = (
+                qa_subs_list
+                if runtime_timeline_duration_ms is not None
+                else []
+            )
+
             # POST_RENDER Guardian Check
             if mission_id:
                 qa_status = await self._evaluate_post_render_guardian(
@@ -447,6 +476,9 @@ class ProductionRenderService:
                     qa_status,
                     narration_quality=runtime_quality,
                     narration_source_refs=runtime_refs,
+                    runtime_timeline_duration_ms=runtime_timeline_duration_ms,
+                    runtime_narration_segments=guardian_runtime_narration_segments,
+                    runtime_subtitle_cues=guardian_runtime_subtitle_cues,
                 )
 
             # 5. Update ProductionRequest status and outcome
@@ -543,6 +575,41 @@ class ProductionRenderService:
             )
         return new_assets
 
+    def _overlay_runtime_timeline_truth(
+        self,
+        prepared_narration_segments: list[dict],
+        prepared_subtitle_cues: list[dict],
+        runtime_timeline_duration_ms: int | None,
+        runtime_narration_segments,
+        runtime_subtitle_cues,
+    ) -> tuple[list[dict], list[dict]]:
+        if runtime_timeline_duration_ms is None:
+            return [dict(n) for n in prepared_narration_segments], [dict(s) for s in prepared_subtitle_cues]
+
+        qa_narr_list = []
+        for n in runtime_narration_segments:
+            nd = n.model_dump() if hasattr(n, "model_dump") else dict(n)
+            qa_narr_list.append({
+                "id": f"runtime-narration-{nd.get('scene_index')}",
+                "scene_index": nd.get("scene_index"),
+                "start_ms": int(nd.get("start_ms", 0)),
+                "end_ms": int(nd.get("end_ms", 0)),
+                "duration_ms": int(nd.get("duration_ms", 0)),
+            })
+
+        qa_subs_list = []
+        for s in runtime_subtitle_cues:
+            sd = s.model_dump() if hasattr(s, "model_dump") else dict(s)
+            qa_subs_list.append({
+                "cue_order": int(sd.get("cue_order", 0)),
+                "scene_index": sd.get("scene_index"),
+                "start_ms": int(sd.get("start_ms", 0)),
+                "end_ms": int(sd.get("end_ms", 0)),
+                "text": str(sd.get("text", "")).strip(),
+            })
+
+        return qa_narr_list, qa_subs_list
+
     async def _evaluate_post_render_guardian(
         self,
         mission_id: uuid.UUID,
@@ -554,7 +621,13 @@ class ProductionRenderService:
         qa_status: ProductionQAStatus,
         narration_quality: str | None = None,
         narration_source_refs: tuple[str, ...] = (),
+        runtime_timeline_duration_ms: int | None = None,
+        runtime_narration_segments: tuple | list = (),
+        runtime_subtitle_cues: tuple | list = (),
     ) -> ProductionQAStatus:
+        def _to_dict(item):
+            return item.model_dump() if hasattr(item, "model_dump") else dict(item)
+
         try:
             from omega.application.guardian.engine import GuardianEngine
             from omega.domain.guardian import (
@@ -581,6 +654,9 @@ class ProductionRenderService:
                         else None,
                         "narration_quality": narration_quality,
                         "narration_source_refs": list(narration_source_refs),
+                        "runtime_timeline_duration_ms": runtime_timeline_duration_ms,
+                        "runtime_narration_segments": [_to_dict(n) for n in runtime_narration_segments],
+                        "runtime_subtitle_cues": [_to_dict(s) for s in runtime_subtitle_cues],
                     },
                 )
             )
@@ -608,7 +684,13 @@ class ProductionRenderService:
         container_format: str,
         video_codec: str,
         staging_output_path: Path,
-    ) -> tuple[str | None, tuple[str, ...]]:
+    ) -> tuple[
+        str | None,
+        tuple[str, ...],
+        int | None,
+        tuple[object, ...],
+        tuple[object, ...],
+    ]:
         import shutil
 
         # Lineage check
@@ -673,6 +755,9 @@ class ProductionRenderService:
         return (
             getattr(result, "narration_quality", None),
             tuple(getattr(result, "narration_source_refs", ()) or ()),
+            getattr(result, "runtime_timeline_duration_ms", None),
+            tuple(getattr(result, "runtime_narration_segments", ()) or ()),
+            tuple(getattr(result, "runtime_subtitle_cues", ()) or ()),
         )
 
     async def _render_synthetic_clip(
