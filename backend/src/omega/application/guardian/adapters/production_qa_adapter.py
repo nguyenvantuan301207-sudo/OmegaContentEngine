@@ -104,6 +104,36 @@ PROD_RULE_SEVERITY_RISK_MAP: dict[str, tuple[GuardianSeverity, GuardianRiskType,
         GuardianRiskType.MEDIA_CORRUPTION,
         1.0,
     ),
+    ProductionQARuleCode.SILENT_AUDIO_STREAM.value: (
+        GuardianSeverity.CRITICAL,
+        GuardianRiskType.MEDIA_CORRUPTION,
+        1.0,
+    ),
+    ProductionQARuleCode.DURATION_BELOW_DNA_MINIMUM.value: (
+        GuardianSeverity.LOW,
+        GuardianRiskType.CONTENT_QUALITY,
+        0.8,
+    ),
+    ProductionQARuleCode.PLACEHOLDER_ONLY_VISUALS.value: (
+        GuardianSeverity.HIGH,
+        GuardianRiskType.CONTENT_QUALITY,
+        0.95,
+    ),
+    ProductionQARuleCode.NO_CONTENTFUL_VISUAL_ASSET.value: (
+        GuardianSeverity.HIGH,
+        GuardianRiskType.CONTENT_QUALITY,
+        0.95,
+    ),
+    ProductionQARuleCode.MISSING_SUBTITLE_RENDER.value: (
+        GuardianSeverity.HIGH,
+        GuardianRiskType.MEDIA_CORRUPTION,
+        0.95,
+    ),
+    ProductionQARuleCode.SUBTITLE_OCCLUSION_RISK.value: (
+        GuardianSeverity.LOW,
+        GuardianRiskType.MEDIA_CORRUPTION,
+        0.8,
+    ),
 }
 
 
@@ -143,10 +173,7 @@ class ProductionQAAdapter:
         findings: list[GuardianFindingData] = []
         for qf in qa_findings:
             rule_code = qf.rule_code.value if hasattr(qf.rule_code, "value") else str(qf.rule_code)
-            severity, risk_type, conf = PROD_RULE_SEVERITY_RISK_MAP.get(
-                rule_code,
-                (GuardianSeverity.HIGH, GuardianRiskType.MEDIA_CORRUPTION, 0.9),
-            )
+            severity, risk_type, conf = PROD_RULE_SEVERITY_RISK_MAP[rule_code]
 
             location_ref = {
                 "production_request_id": str(request_data.get("id", "")),
