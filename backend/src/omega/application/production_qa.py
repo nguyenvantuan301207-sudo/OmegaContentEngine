@@ -30,6 +30,7 @@ class ProductionQAEngine:
         media_probe_summary: dict[str, Any] | None,
         artifact_file_path: Path | str | None,
         expected_hash: str | None,
+        scenes_data: list[dict[str, Any]] | None = None,
     ) -> tuple[ProductionQAStatus, list[ProductionQAFinding]]:
         """Run all 17 rules and return (status, findings)."""
         findings: list[ProductionQAFinding] = []
@@ -361,6 +362,86 @@ class ProductionQAEngine:
                     )
                 )
                 break
+
+        # ── QA V3: VISUAL_REPETITION & EXCESSIVE_STATIC_SCENES ──
+        if scenes_data is not None:
+            static_card_set = {"DIAGRAM", "INFOGRAPHIC", "STATISTIC", "KINETIC_TEXT"}
+
+            consecutive_same_strategy_count = 0
+            last_strategy = None
+
+            consecutive_static_count = 0
+
+            for scene in scenes_data:
+                raw_strat = scene.get("effective_strategy")
+                eff_strat = str(raw_strat).strip().upper() if raw_strat else ""
+
+                if eff_strat:
+                    if eff_strat == last_strategy:
+                        consecutive_same_strategy_count += 1
+                    else:
+                        last_strategy = eff_strat
+                        consecutive_same_strategy_count = 1
+
+                    if consecutive_same_strategy_count == 3:
+                        findings.append(
+                            ProductionQAFinding(
+                                rule_code=ProductionQARuleCode.VISUAL_REPETITION,
+                                severity=ProductionQASeverity.WARNING,
+                                message=f"Visual repetition detected: 3 or more consecutive scenes use strategy {eff_strat}.",
+                            )
+                        )
+                else:
+                    last_strategy = None
+                    consecutive_same_strategy_count = 0
+
+                if eff_strat in static_card_set:
+                    consecutive_static_count += 1
+                    if consecutive_static_count == 3:
+                        findings.append(
+                            ProductionQAFinding(
+                                rule_code=ProductionQARuleCode.EXCESSIVE_STATIC_SCENES,
+                                severity=ProductionQASeverity.WARNING,
+                                message="Excessive static scenes detected: 3 or more consecutive static cards.",
+                            )
+                        )
+                else:
+                    consecutive_static_count = 0
+
+        # ── QA V3: MISSING_INTRO & MISSING_OUTRO ──
+        if script_version_data:
+            has_hook_field = "hook_text" in script_version_data
+            has_cta_field = "cta_text" in script_version_data
+            has_sections_field = "sections" in script_version_data
+
+            hook_text = str(script_version_data.get("hook_text") or "").strip()
+            cta_text = str(script_version_data.get("cta_text") or "").strip()
+            headings = [
+                str(s.get("heading", "")).lower()
+                for s in script_version_data.get("sections", [])
+            ] if script_version_data.get("sections") else []
+
+            if has_hook_field or has_sections_field:
+                has_intro = bool(hook_text) or any("problem" in h or "setup" in h for h in headings)
+                if not has_intro:
+                    findings.append(
+                        ProductionQAFinding(
+                            rule_code=ProductionQARuleCode.MISSING_INTRO,
+                            severity=ProductionQASeverity.WARNING,
+                            message="Script is missing a hook or introductory section.",
+                        )
+                    )
+
+            if has_cta_field or has_sections_field:
+                has_outro = bool(cta_text) or any("recap" in h or "outro" in h for h in headings)
+                if not has_outro:
+                    findings.append(
+                        ProductionQAFinding(
+                            rule_code=ProductionQARuleCode.MISSING_OUTRO,
+                            severity=ProductionQASeverity.WARNING,
+                            message="Script is missing a CTA or outro/recap section.",
+                        )
+                    )
 
         # ── Calculate Overall Status ──
         has_blocking = any(

@@ -612,6 +612,10 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
     assert res2.content_sha256 == res.content_sha256
     mock_ffmpeg_renderer.concatenate_clips.assert_not_awaited()
 
+    assert res.runtime_scenes
+    assert res2.runtime_scenes
+    assert [scene.model_dump() for scene in res.runtime_scenes] == [scene.model_dump() for scene in res2.runtime_scenes]
+
 
 @pytest.mark.asyncio
 async def test_provider_secret_error_redaction(tmp_path: Path, lineage_data, monkeypatch):

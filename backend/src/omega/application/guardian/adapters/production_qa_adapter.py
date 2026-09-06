@@ -134,6 +134,26 @@ PROD_RULE_SEVERITY_RISK_MAP: dict[str, tuple[GuardianSeverity, GuardianRiskType,
         GuardianRiskType.MEDIA_CORRUPTION,
         0.8,
     ),
+    ProductionQARuleCode.VISUAL_REPETITION.value: (
+        GuardianSeverity.LOW,
+        GuardianRiskType.CONTENT_QUALITY,
+        0.8,
+    ),
+    ProductionQARuleCode.EXCESSIVE_STATIC_SCENES.value: (
+        GuardianSeverity.LOW,
+        GuardianRiskType.CONTENT_QUALITY,
+        0.8,
+    ),
+    ProductionQARuleCode.MISSING_INTRO.value: (
+        GuardianSeverity.LOW,
+        GuardianRiskType.CONTENT_QUALITY,
+        0.8,
+    ),
+    ProductionQARuleCode.MISSING_OUTRO.value: (
+        GuardianSeverity.LOW,
+        GuardianRiskType.CONTENT_QUALITY,
+        0.8,
+    ),
 }
 
 
@@ -155,6 +175,7 @@ class ProductionQAAdapter:
         media_probe_summary: dict[str, Any] | None,
         artifact_file_path: Path | str | None,
         expected_hash: str | None,
+        scenes_data: list[dict[str, Any]] | None = None,
     ) -> list[GuardianFindingData]:
         """Run OMEGA-007 canonical QA rules and return standardized Guardian findings."""
         _status, qa_findings = self.engine.evaluate(
@@ -168,6 +189,7 @@ class ProductionQAAdapter:
             media_probe_summary=media_probe_summary,
             artifact_file_path=artifact_file_path,
             expected_hash=expected_hash,
+            scenes_data=scenes_data,
         )
 
         findings: list[GuardianFindingData] = []

@@ -21,7 +21,7 @@ from omega.domain.guardian import (
     GuardianFindingData,
 )
 from omega.domain.production import AssetType
-from omega.infrastructure.models import MediaArtifact, ProductionRequest, ProductionScene
+from omega.infrastructure.models import MediaArtifact, ProductionRequest, ProductionScene, ScriptVersion
 
 
 class MediaIntegrityDetector(BaseDetector):
@@ -56,6 +56,7 @@ class MediaIntegrityDetector(BaseDetector):
                 media_probe_summary=diag.get("media_probe_summary"),
                 artifact_file_path=diag.get("artifact_file_path"),
                 expected_hash=diag.get("expected_hash"),
+                scenes_data=diag.get("scenes_data"),
             )
 
         # 2. Database resolution via production_request_id or media_artifact_id
@@ -76,6 +77,9 @@ class MediaIntegrityDetector(BaseDetector):
                 select(ProductionRequest)
                 .where(ProductionRequest.id == target_prod_id)
                 .options(
+                    selectinload(ProductionRequest.script_version).selectinload(
+                        ScriptVersion.sections
+                    ),
                     selectinload(ProductionRequest.scenes).selectinload(
                         ProductionScene.asset_requirements
                     ),
@@ -102,7 +106,20 @@ class MediaIntegrityDetector(BaseDetector):
                 "target_height": prod_req.target_height,
                 "video_codec": prod_req.video_codec,
             }
-            script_data = {"id": str(prod_req.script_version_id)}
+            script_data = {
+                "id": str(prod_req.script_version_id),
+                "hook_text": prod_req.script_version.hook_text if prod_req.script_version else None,
+                "cta_text": prod_req.script_version.cta_text if prod_req.script_version else None,
+                "closing_text": prod_req.script_version.closing_text if prod_req.script_version else None,
+                "sections": [
+                    {
+                        "section_order": sec.section_order,
+                        "heading": sec.heading,
+                        "narration_text": sec.narration_text,
+                    }
+                    for sec in sorted(prod_req.script_version.sections, key=lambda s: s.section_order)
+                ] if prod_req.script_version and getattr(prod_req.script_version, "sections", None) else []
+            }
             content_req_data = {"channel_dna_revision_id": str(prod_req.channel_dna_revision_id)}
 
             assets_data = [
@@ -204,6 +221,33 @@ class MediaIntegrityDetector(BaseDetector):
                         "text": str(sd.get("text", "")).strip(),
                     })
 
+            runtime_scenes = diag.get("runtime_scenes")
+            if runtime_scenes is not None:
+                scenes_data = []
+                for s in runtime_scenes:
+                    sd = dict(s)
+                    scenes_data.append({
+                        "sequence_index": sd.get("sequence_index"),
+                        "original_strategy": sd.get("original_strategy"),
+                        "effective_strategy": sd.get("effective_strategy"),
+                        "duration_seconds": sd.get("duration_seconds"),
+                        "asset_kind": sd.get("asset_kind"),
+                        "asset_provider": sd.get("asset_provider"),
+                        "asset_id": sd.get("asset_id"),
+                    })
+            else:
+                scenes_data = []
+                for s in prod_req.scenes:
+                    scenes_data.append({
+                        "sequence_index": s.scene_order,
+                        "original_strategy": s.scene_type,
+                        "effective_strategy": s.scene_type,
+                        "duration_seconds": (s.estimated_duration_ms / 1000.0) if s.estimated_duration_ms else 0.0,
+                        "asset_kind": None,
+                        "asset_provider": None,
+                        "asset_id": None,
+                    })
+
             probe_summary = diag.get("media_probe_summary")
             artifact_path = diag.get("artifact_file_path")
             expected_hash = diag.get("expected_hash")
@@ -232,4 +276,5 @@ class MediaIntegrityDetector(BaseDetector):
                 media_probe_summary=probe_summary,
                 artifact_file_path=artifact_path,
                 expected_hash=expected_hash,
+                scenes_data=scenes_data,
             )

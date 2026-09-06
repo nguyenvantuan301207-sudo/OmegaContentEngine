@@ -149,6 +149,7 @@ class VerticalSliceRenderResult(BaseModel):
     runtime_timeline_duration_ms: int | None = None
     runtime_narration_segments: tuple[VerticalSliceRuntimeNarrationSegment, ...] = ()
     runtime_subtitle_cues: tuple[VerticalSliceRuntimeSubtitleCue, ...] = ()
+    runtime_scenes: tuple[VerticalSliceSceneResult, ...] = ()
 
 
 _STOPWORDS = frozenset({
@@ -488,6 +489,9 @@ class VisualProductionV2Service:
                     ),
                     runtime_subtitle_cues=tuple(
                         VerticalSliceRuntimeSubtitleCue(**c) for c in manifest_data.get("runtime_subtitle_cues", [])
+                    ),
+                    runtime_scenes=tuple(
+                        VerticalSliceSceneResult(**s) for s in manifest_data.get("scenes", [])
                     ),
                 )
             except Exception as e:
@@ -1021,6 +1025,7 @@ class VisualProductionV2Service:
             runtime_timeline_duration_ms=runtime_timeline_duration_ms,
             runtime_narration_segments=tuple(runtime_narration_segments),
             runtime_subtitle_cues=tuple(runtime_subtitle_cues),
+            runtime_scenes=tuple(scene_results),
         )
 
 
@@ -1139,6 +1144,9 @@ class VisualProductionV2Service:
                 ),
                 runtime_subtitle_cues=tuple(
                     VerticalSliceRuntimeSubtitleCue(**c) for c in rev_manifest.get("runtime_subtitle_cues", [])
+                ),
+                runtime_scenes=tuple(
+                    VerticalSliceSceneResult(**s) for s in rev_manifest.get("scenes", [])
                 ),
             )
 
@@ -1339,6 +1347,9 @@ class VisualProductionV2Service:
                 ),
                 runtime_subtitle_cues=tuple(
                     VerticalSliceRuntimeSubtitleCue(**c) for c in rev_manifest.get("runtime_subtitle_cues", [])
+                ),
+                runtime_scenes=tuple(
+                    VerticalSliceSceneResult(**s) for s in rev_manifest.get("scenes", [])
                 ),
             )
 

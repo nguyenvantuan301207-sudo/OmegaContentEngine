@@ -31,6 +31,7 @@ from omega.infrastructure.models import (
     ProductionRenderJob,
     ProductionRequest,
     ProductionScene,
+    ScriptVersion,
 )
 from omega.logging import get_logger
 
@@ -112,7 +113,7 @@ class ProductionRenderService:
                 ),
                 selectinload(ProductionRenderJob.production_request).selectinload(
                     ProductionRequest.script_version
-                ),
+                ).selectinload(ScriptVersion.sections),
                 selectinload(ProductionRenderJob.production_request).selectinload(
                     ProductionRequest.content_request
                 ),
@@ -214,7 +215,20 @@ class ProductionRenderService:
             "target_height": req.target_height,
             "video_codec": req.video_codec,
         }
-        script_data = {"id": req.script_version_id}
+        script_data = {
+            "id": req.script_version_id,
+            "hook_text": req.script_version.hook_text,
+            "cta_text": req.script_version.cta_text,
+            "closing_text": req.script_version.closing_text,
+            "sections": [
+                {
+                    "section_order": sec.section_order,
+                    "heading": sec.heading,
+                    "narration_text": sec.narration_text,
+                }
+                for sec in sorted(req.script_version.sections, key=lambda s: s.section_order)
+            ] if req.script_version and getattr(req.script_version, "sections", None) else []
+        }
         content_req_data = {"channel_dna_revision_id": req.channel_dna_revision_id}
         assets_list = [
             {
@@ -260,6 +274,7 @@ class ProductionRenderService:
         runtime_timeline_duration_ms: int | None = None
         runtime_narration_segments = ()
         runtime_subtitle_cues = ()
+        runtime_scenes = ()
 
         try:
             # Check if we should use V2
@@ -273,6 +288,7 @@ class ProductionRenderService:
                     runtime_timeline_duration_ms,
                     runtime_narration_segments,
                     runtime_subtitle_cues,
+                    runtime_scenes,
                 ) = await self._render_v2_staging(
                     session=session,
                     req=req,
@@ -397,6 +413,35 @@ class ProductionRenderService:
                 runtime_subtitle_cues,
             )
 
+            if use_v2:
+                if runtime_scenes:
+                    canonical_scenes_data = []
+                    for s in runtime_scenes:
+                        sd = s.model_dump() if hasattr(s, "model_dump") else dict(s)
+                        canonical_scenes_data.append({
+                            "sequence_index": sd.get("sequence_index"),
+                            "original_strategy": sd.get("original_strategy"),
+                            "effective_strategy": sd.get("effective_strategy"),
+                            "duration_seconds": sd.get("duration_seconds"),
+                            "asset_kind": sd.get("asset_kind"),
+                            "asset_provider": sd.get("asset_provider"),
+                            "asset_id": sd.get("asset_id"),
+                        })
+                else:
+                    canonical_scenes_data = None
+            else:
+                canonical_scenes_data = []
+                for s in scenes_data:
+                    canonical_scenes_data.append({
+                        "sequence_index": s.scene_order,
+                        "original_strategy": s.scene_type,
+                        "effective_strategy": s.scene_type,
+                        "duration_seconds": (s.estimated_duration_ms / 1000.0) if s.estimated_duration_ms else 0.0,
+                        "asset_kind": None,
+                        "asset_provider": None,
+                        "asset_id": None,
+                    })
+
             # 1. Run local 17-rule Production QA
             qa_status, qa_findings = self.qa_engine.evaluate(
                 request_data=req_data,
@@ -409,6 +454,7 @@ class ProductionRenderService:
                 media_probe_summary=probe_summary,
                 artifact_file_path=final_artifact_path,
                 expected_hash=content_hash,
+                scenes_data=canonical_scenes_data,
             )
 
             # 2. Atomic rollover of current pointer
@@ -479,6 +525,7 @@ class ProductionRenderService:
                     runtime_timeline_duration_ms=runtime_timeline_duration_ms,
                     runtime_narration_segments=guardian_runtime_narration_segments,
                     runtime_subtitle_cues=guardian_runtime_subtitle_cues,
+                    runtime_scenes=runtime_scenes if use_v2 else (),
                 )
 
             # 5. Update ProductionRequest status and outcome
@@ -624,6 +671,7 @@ class ProductionRenderService:
         runtime_timeline_duration_ms: int | None = None,
         runtime_narration_segments: tuple | list = (),
         runtime_subtitle_cues: tuple | list = (),
+        runtime_scenes: tuple | list = (),
     ) -> ProductionQAStatus:
         def _to_dict(item):
             return item.model_dump() if hasattr(item, "model_dump") else dict(item)
@@ -657,6 +705,7 @@ class ProductionRenderService:
                         "runtime_timeline_duration_ms": runtime_timeline_duration_ms,
                         "runtime_narration_segments": [_to_dict(n) for n in runtime_narration_segments],
                         "runtime_subtitle_cues": [_to_dict(s) for s in runtime_subtitle_cues],
+                        "runtime_scenes": [_to_dict(sc) for sc in runtime_scenes],
                     },
                 )
             )
@@ -688,6 +737,7 @@ class ProductionRenderService:
         str | None,
         tuple[str, ...],
         int | None,
+        tuple[object, ...],
         tuple[object, ...],
         tuple[object, ...],
     ]:
@@ -758,6 +808,7 @@ class ProductionRenderService:
             getattr(result, "runtime_timeline_duration_ms", None),
             tuple(getattr(result, "runtime_narration_segments", ()) or ()),
             tuple(getattr(result, "runtime_subtitle_cues", ()) or ()),
+            tuple(getattr(result, "runtime_scenes", ()) or ()),
         )
 
     async def _render_synthetic_clip(
