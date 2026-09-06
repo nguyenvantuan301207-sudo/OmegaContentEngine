@@ -424,7 +424,11 @@ class TopicCandidate(Base):
     normalized_title: Mapped[str] = mapped_column(String(300), nullable=False, index=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_type: Mapped[str] = mapped_column(String(50), nullable=False, default="MANUAL")
-    source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_name: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        server_default="user_input",
+    )
     source_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
     language: Mapped[str] = mapped_column(String(20), nullable=False, default="en")
     region: Mapped[str] = mapped_column(String(10), nullable=False, default="US")

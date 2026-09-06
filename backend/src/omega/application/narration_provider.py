@@ -170,7 +170,9 @@ class GeminiTTSNarrationProvider:
         narration_dir = self.storage.get_narration_dir(channel_id, request_id)
 
         text = str(segment.get("text", "")).strip()
-        voice = (voice_profile or {}).get("voice_ref") or self.default_voice
+        voice = (voice_profile or {}).get("voice_ref")
+        if not voice or voice == "neutral_default":
+            voice = self.default_voice
         lang = (voice_profile or {}).get("language") or "en"
         if lang.startswith("en"):
             lang = "natural American English / en-US"
@@ -256,7 +258,15 @@ class GeminiTTSNarrationProvider:
         except httpx.HTTPStatusError as e:
             if not self.client:
                 await client.aclose()
-            raise NarrationProviderError(f"Gemini API returned status code {e.response.status_code}") from None
+            err_msg = f"Gemini API returned status code {e.response.status_code}"
+            try:
+                err_data = e.response.json()
+                reason = err_data.get("error", {}).get("message", "")
+                if reason:
+                    err_msg += f": {reason}"
+            except Exception:
+                pass
+            raise NarrationProviderError(err_msg) from None
         except httpx.RequestError:
             if not self.client:
                 await client.aclose()

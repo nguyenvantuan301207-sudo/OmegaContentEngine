@@ -244,3 +244,61 @@ def test_factory_gemini_missing_key_fails(storage, monkeypatch):
 
     with pytest.raises(NarrationProviderError, match="GEMINI_API_KEY missing"):
         get_narration_provider(storage)
+
+
+@pytest.mark.asyncio
+async def test_voice_ref_neutral_default_resolves_to_kore(storage):
+    pcm_data = generate_valid_pcm()
+    b64_data = base64.b64encode(pcm_data).decode("ascii")
+    json_resp = {"candidates": [{"content": {"parts": [{"inlineData": {"data": b64_data}}]}}]}
+
+    req_history = []
+    def handler(request):
+        req_history.append(json.loads(request.content))
+        return httpx.Response(200, json=json_resp)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiTTSNarrationProvider(storage, api_key="test", client=client)
+
+    voice_profile = {"voice_ref": "neutral_default"}
+    await provider.synthesize_segment_audio(
+        uuid.uuid4(), uuid.uuid4(), {"text": "Test"}, voice_profile
+    )
+
+    assert len(req_history) == 1
+    voice_name = req_history[0]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"]
+    assert voice_name == "Kore"
+
+
+@pytest.mark.asyncio
+async def test_voice_ref_explicit_preserved(storage):
+    pcm_data = generate_valid_pcm()
+    b64_data = base64.b64encode(pcm_data).decode("ascii")
+    json_resp = {"candidates": [{"content": {"parts": [{"inlineData": {"data": b64_data}}]}}]}
+
+    req_history = []
+    def handler(request):
+        req_history.append(json.loads(request.content))
+        return httpx.Response(200, json=json_resp)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = GeminiTTSNarrationProvider(storage, api_key="test", client=client)
+
+    voice_profile = {"voice_ref": "Puck"}
+    await provider.synthesize_segment_audio(
+        uuid.uuid4(), uuid.uuid4(), {"text": "Test"}, voice_profile
+    )
+
+    assert len(req_history) == 1
+    voice_name = req_history[0]["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"]
+    assert voice_name == "Puck"
+
+
+@pytest.mark.asyncio
+async def test_http_error_includes_sanitized_reason(storage):
+    json_resp = {"error": {"message": "Invalid model specified."}}
+    client = create_mock_client(400, json_resp)
+    provider = GeminiTTSNarrationProvider(storage, api_key="test-key-1234", client=client)
+
+    with pytest.raises(NarrationProviderError, match="Gemini API returned status code 400: Invalid model specified."):
+        await provider.synthesize_segment_audio(uuid.uuid4(), uuid.uuid4(), {"text": "Test"})
