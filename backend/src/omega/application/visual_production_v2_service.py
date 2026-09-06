@@ -66,6 +66,25 @@ KARAOKE_MAX_CHARS_PER_CUE = 36
 VISUAL_DIRECTOR_VERSION = "v2"
 
 
+class VerticalSliceRuntimeNarrationSegment(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    scene_index: int
+    start_ms: int
+    end_ms: int
+    duration_ms: int
+
+
+class VerticalSliceRuntimeSubtitleCue(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    scene_index: int
+    cue_order: int
+    start_ms: int
+    end_ms: int
+    text: str
+
+
 class VerticalSliceSceneResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -127,6 +146,9 @@ class VerticalSliceRenderResult(BaseModel):
     run_fingerprint: str
     narration_quality: str | None = None
     narration_source_refs: tuple[str, ...] = ()
+    runtime_timeline_duration_ms: int | None = None
+    runtime_narration_segments: tuple[VerticalSliceRuntimeNarrationSegment, ...] = ()
+    runtime_subtitle_cues: tuple[VerticalSliceRuntimeSubtitleCue, ...] = ()
 
 
 _STOPWORDS = frozenset({
@@ -460,6 +482,13 @@ class VisualProductionV2Service:
                     run_fingerprint=run_fingerprint,
                     narration_quality=manifest_data.get("narration_quality"),
                     narration_source_refs=tuple(manifest_data.get("narration_source_refs", [])),
+                    runtime_timeline_duration_ms=manifest_data.get("runtime_timeline_duration_ms"),
+                    runtime_narration_segments=tuple(
+                        VerticalSliceRuntimeNarrationSegment(**s) for s in manifest_data.get("runtime_narration_segments", [])
+                    ),
+                    runtime_subtitle_cues=tuple(
+                        VerticalSliceRuntimeSubtitleCue(**c) for c in manifest_data.get("runtime_subtitle_cues", [])
+                    ),
                 )
             except Exception as e:
                 raise VerticalSliceError(f"Incomplete or corrupt prior run: {e}") from e
@@ -492,6 +521,11 @@ class VisualProductionV2Service:
 
             narration_qualities: list[str] = []
             narration_source_refs_list: list[str] = []
+
+            runtime_cursor_ms = 0
+            runtime_cue_order = 1
+            runtime_narration_segments = []
+            runtime_subtitle_cues = []
 
 
             indices = set()
@@ -555,6 +589,19 @@ class VisualProductionV2Service:
                         audio_sha = audio_asset["content_hash"]
                         narration_total_duration_ms += duration_ms
 
+                        scene_start_ms = runtime_cursor_ms
+                        scene_end_ms = scene_start_ms + duration_ms
+
+                        runtime_narration_segments.append(
+                            VerticalSliceRuntimeNarrationSegment(
+                                scene_index=scene.sequence_index,
+                                start_ms=scene_start_ms,
+                                end_ms=scene_end_ms,
+                                duration_ms=duration_ms,
+                            )
+                        )
+                        runtime_cursor_ms = scene_end_ms
+
                         n_qual = audio_asset.get("narration_quality")
                         if n_qual:
                             narration_qualities.append(n_qual)
@@ -576,6 +623,27 @@ class VisualProductionV2Service:
                                     max_chars_per_cue=KARAOKE_MAX_CHARS_PER_CUE,
                                 )
                                 scene_subtitle_cues = len(scene_cues)
+
+                                for scene_cue in scene_cues:
+                                    local_start = scene_cue["start_ms"]
+                                    local_end = scene_cue["end_ms"]
+                                    if not (local_start >= 0 and local_end > local_start and local_end <= duration_ms):
+                                        raise VerticalSliceError("Malformed runtime karaoke cue")
+
+                                    absolute_start = scene_start_ms + local_start
+                                    absolute_end = scene_start_ms + local_end
+
+                                    runtime_subtitle_cues.append(
+                                        VerticalSliceRuntimeSubtitleCue(
+                                            scene_index=scene.sequence_index,
+                                            cue_order=runtime_cue_order,
+                                            start_ms=absolute_start,
+                                            end_ms=absolute_end,
+                                            text=str(scene_cue["text"]).strip(),
+                                        )
+                                    )
+                                    runtime_cue_order += 1
+
                                 ass_content = generate_karaoke_ass_content(scene_cues, width=1920, height=1080)
                                 ass_path = work_dir / f"scene_{scene.sequence_index:03d}.ass"
                                 with open(ass_path, "w", encoding="utf-8") as f:
@@ -711,6 +779,31 @@ class VisualProductionV2Service:
                             subtitle_cue_count=scene_subtitle_cues if subtitle_enabled else None,
                         )
                     )
+
+            if self._narration_provider:
+                runtime_timeline_duration_ms = runtime_cursor_ms
+                if runtime_timeline_duration_ms != narration_total_duration_ms:
+                    raise VerticalSliceError("Timeline duration mismatch")
+
+                for i in range(1, len(runtime_narration_segments)):
+                    if runtime_narration_segments[i].start_ms != runtime_narration_segments[i-1].end_ms:
+                        raise VerticalSliceError("Narration segments not contiguous")
+
+                for seg in runtime_narration_segments:
+                    if not (0 <= seg.start_ms < seg.end_ms <= runtime_timeline_duration_ms):
+                        raise VerticalSliceError("Narration segment out of bounds")
+
+                for cue in runtime_subtitle_cues:
+                    if not (0 <= cue.start_ms < cue.end_ms <= runtime_timeline_duration_ms):
+                        raise VerticalSliceError("Subtitle cue out of bounds")
+
+                for i in range(1, len(runtime_subtitle_cues)):
+                    if runtime_subtitle_cues[i].start_ms < runtime_subtitle_cues[i-1].end_ms:
+                        raise VerticalSliceError("Subtitle cues overlap")
+            else:
+                runtime_timeline_duration_ms = None
+                runtime_narration_segments = []
+                runtime_subtitle_cues = []
 
             # 8. Final Concatenation
             final_temp_mp4 = work_dir / "final_temp.mp4"
@@ -894,6 +987,9 @@ class VisualProductionV2Service:
                 "narration_voice": getattr(self._narration_provider, "default_voice", None) if self._narration_provider else None,
                 "narration_quality": final_narration_quality,
                 "narration_source_refs": list(final_narration_source_refs),
+                "runtime_timeline_duration_ms": runtime_timeline_duration_ms,
+                "runtime_narration_segments": [s.model_dump() for s in runtime_narration_segments],
+                "runtime_subtitle_cues": [c.model_dump() for c in runtime_subtitle_cues],
                 "scenes": [s.model_dump() for s in scene_results],
             }
 
@@ -922,6 +1018,9 @@ class VisualProductionV2Service:
             run_fingerprint=run_fingerprint,
             narration_quality=final_narration_quality,
             narration_source_refs=final_narration_source_refs,
+            runtime_timeline_duration_ms=runtime_timeline_duration_ms,
+            runtime_narration_segments=tuple(runtime_narration_segments),
+            runtime_subtitle_cues=tuple(runtime_subtitle_cues),
         )
 
 
@@ -1034,6 +1133,13 @@ class VisualProductionV2Service:
                 run_fingerprint=rev_fingerprint,
                 narration_quality=rev_manifest.get("narration_quality"),
                 narration_source_refs=tuple(rev_manifest.get("narration_source_refs", [])),
+                runtime_timeline_duration_ms=rev_manifest.get("runtime_timeline_duration_ms"),
+                runtime_narration_segments=tuple(
+                    VerticalSliceRuntimeNarrationSegment(**s) for s in rev_manifest.get("runtime_narration_segments", [])
+                ),
+                runtime_subtitle_cues=tuple(
+                    VerticalSliceRuntimeSubtitleCue(**c) for c in rev_manifest.get("runtime_subtitle_cues", [])
+                ),
             )
 
         work_dir = self._output_root / "work" / rev_fingerprint
@@ -1227,6 +1333,13 @@ class VisualProductionV2Service:
                 run_fingerprint=rev_fingerprint,
                 narration_quality=rev_manifest.get("narration_quality"),
                 narration_source_refs=tuple(rev_manifest.get("narration_source_refs", [])),
+                runtime_timeline_duration_ms=rev_manifest.get("runtime_timeline_duration_ms"),
+                runtime_narration_segments=tuple(
+                    VerticalSliceRuntimeNarrationSegment(**s) for s in rev_manifest.get("runtime_narration_segments", [])
+                ),
+                runtime_subtitle_cues=tuple(
+                    VerticalSliceRuntimeSubtitleCue(**c) for c in rev_manifest.get("runtime_subtitle_cues", [])
+                ),
             )
 
         finally:
