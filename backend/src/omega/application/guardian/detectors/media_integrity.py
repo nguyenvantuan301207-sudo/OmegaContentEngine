@@ -107,6 +107,10 @@ class MediaIntegrityDetector(BaseDetector):
             assets_data = [
                 {
                     "id": str(a.id),
+                    "asset_type": a.asset_type,
+                    "provider_type": a.provider_type,
+                    "mime_type": a.mime_type,
+                    "storage_uri": a.storage_uri,
                     "license_status": a.license_status,
                     "source_ref": a.source_ref,
                     "asset_requirement_id": str(a.asset_requirement_id)
@@ -139,11 +143,11 @@ class MediaIntegrityDetector(BaseDetector):
                 for sc in prod_req.subtitle_cues
             ]
 
-            probe_summary = None
-            artifact_path = None
-            expected_hash = None
+            probe_summary = diag.get("media_probe_summary")
+            artifact_path = diag.get("artifact_file_path")
+            expected_hash = diag.get("expected_hash")
 
-            if current_artifact:
+            if probe_summary is None and current_artifact:
                 probe_summary = {
                     "width": current_artifact.width,
                     "height": current_artifact.height,
@@ -151,7 +155,9 @@ class MediaIntegrityDetector(BaseDetector):
                     "video_codec": prod_req.video_codec,
                     "has_audio": True,
                 }
+            if artifact_path is None and current_artifact:
                 artifact_path = current_artifact.storage_uri
+            if expected_hash is None and current_artifact:
                 expected_hash = current_artifact.content_hash
 
             return self.adapter.evaluate(
