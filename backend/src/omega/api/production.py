@@ -12,6 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.media_storage import LocalMediaStorageProvider, StorageSecurityError
+from omega.application.production_render_factory import build_production_render_service
 from omega.application.production_service import (
     ProductionLineageError,
     ProductionService,
@@ -56,7 +57,7 @@ def _get_production_service() -> ProductionService:
 
 
 def _get_render_service() -> ProductionRenderService:
-    return ProductionRenderService()
+    return build_production_render_service()
 
 
 def _get_storage_provider() -> LocalMediaStorageProvider:
