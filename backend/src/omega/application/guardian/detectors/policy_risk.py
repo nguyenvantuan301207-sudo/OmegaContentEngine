@@ -62,9 +62,7 @@ class PolicyRiskDetector(BaseDetector):
                         "asset_requirement_id": str(a.asset_requirement_id)
                         if a.asset_requirement_id
                         else None,
-                        "commercial_use_allowed": (a.metadata_ or {}).get(
-                            "commercial_use_allowed", True
-                        ),
+                        "commercial_use_allowed": None,
                     }
                     for a in db_assets
                 ]

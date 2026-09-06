@@ -123,10 +123,7 @@ class ContentQualityDetector(BaseDetector):
                 brief = brief_res.scalar_one_or_none()
                 if brief:
                     brief_dict = {
-                        "contradictions": [
-                            {"severity": "HIGH", "claim_id": str(c.get("claim_id"))}
-                            for c in (brief.key_conflicts or [])
-                        ]
+                        "contradictions": brief.contradictions or []
                     }
 
             # Build script_data dict
@@ -160,5 +157,9 @@ class ContentQualityDetector(BaseDetector):
                 "sections": sections_data,
             }
 
-            target_dur = script_version.target_duration_seconds or 60
+            target_dur = (
+                script_version.content_request.target_duration_seconds
+                if script_version.content_request
+                else 60
+            )
             return ContentQAAdapter.evaluate(script_data, target_dur, dna_dict, brief_dict)

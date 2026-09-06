@@ -157,20 +157,35 @@ class ProductionRenderService:
                         diagnostic_context={"job_id": str(job_id)},
                     )
                 )
-                if pre_check.decision and pre_check.decision.action not in (
-                    GuardianAction.ALLOW,
-                    GuardianAction.ALLOW_WITH_WARNING,
+                if (
+                    not pre_check.decision
+                    or pre_check.decision.action
+                    not in (
+                        GuardianAction.ALLOW,
+                        GuardianAction.ALLOW_WITH_WARNING,
+                    )
                 ):
+                    reason = (
+                        pre_check.decision.reason
+                        if pre_check.decision
+                        else "missing Guardian decision"
+                    )
                     await self._record_job_failure(
                         session,
                         job_id,
-                        RenderErrorCode.VALIDATION_FAILED,
-                        f"Guardian PRE_RENDER held: {pre_check.decision.reason}",
+                        RenderErrorCode.INPUT_INVALID,
+                        f"Guardian PRE_RENDER held: {reason}",
                     )
-                    await session.commit()
                     return None, ProductionQAStatus.BLOCKED
             except Exception as exc:
                 logger.error("Guardian PRE_RENDER evaluation failed", error=str(exc))
+                await self._record_job_failure(
+                    session,
+                    job_id,
+                    RenderErrorCode.INPUT_INVALID,
+                    f"Guardian PRE_RENDER evaluation failed: {str(exc)}"
+                )
+                return None, ProductionQAStatus.BLOCKED
 
         job.state = RenderJobState.RUNNING.value
         await session.commit()
@@ -415,41 +430,9 @@ class ProductionRenderService:
 
             # POST_RENDER Guardian Check
             if mission_id:
-                try:
-                    from omega.application.guardian.engine import GuardianEngine
-                    from omega.domain.guardian import (
-                        CheckTriggerType,
-                        GuardianAction,
-                        GuardianCheckCreate,
-                        GuardianCheckpoint,
-                    )
-                    from omega.infrastructure.database import AsyncSessionLocal
-
-                    guardian_engine = GuardianEngine(session_factory=AsyncSessionLocal)
-                    post_check = await guardian_engine.execute_check(
-                        GuardianCheckCreate(
-                            mission_id=mission_id,
-                            production_request_id=request_id,
-                            media_artifact_id=media_art.id,
-                            checkpoint=GuardianCheckpoint.POST_RENDER,
-                            trigger_type=CheckTriggerType.POST_RENDER,
-                            diagnostic_context={
-                                "media_probe_summary": probe_summary,
-                                "artifact_id": str(media_art.id),
-                                "expected_hash": content_hash,
-                                "artifact_file_path": str(final_artifact_path)
-                                if final_artifact_path
-                                else None,
-                            },
-                        )
-                    )
-                    if post_check.decision and post_check.decision.action not in (
-                        GuardianAction.ALLOW,
-                        GuardianAction.ALLOW_WITH_WARNING,
-                    ):
-                        qa_status = ProductionQAStatus.BLOCKED
-                except Exception as exc:
-                    logger.error("Guardian POST_RENDER evaluation failed", error=str(exc))
+                qa_status = await self._evaluate_post_render_guardian(
+                    mission_id, request_id, media_art.id, probe_summary, content_hash, final_artifact_path, qa_status
+                )
 
             # 5. Update ProductionRequest status and outcome
             outcome = (
@@ -495,6 +478,57 @@ class ProductionRenderService:
         # Handle both string and Enum representations
         is_mission = mode == "MISSION_EXECUTION" or (hasattr(mode, "value") and mode.value == "MISSION_EXECUTION")
         return is_mission and self.visual_production_service is not None
+
+    async def _evaluate_post_render_guardian(
+        self,
+        mission_id: uuid.UUID,
+        request_id: uuid.UUID,
+        media_art_id: uuid.UUID,
+        probe_summary: dict,
+        content_hash: str,
+        final_artifact_path: Path | None,
+        qa_status: ProductionQAStatus,
+    ) -> ProductionQAStatus:
+        try:
+            from omega.application.guardian.engine import GuardianEngine
+            from omega.domain.guardian import (
+                CheckTriggerType,
+                GuardianAction,
+                GuardianCheckCreate,
+                GuardianCheckpoint,
+            )
+            from omega.infrastructure.database import AsyncSessionLocal
+
+            guardian_engine = GuardianEngine(session_factory=AsyncSessionLocal)
+            post_check = await guardian_engine.execute_check(
+                GuardianCheckCreate(
+                    mission_id=mission_id,
+                    production_request_id=request_id,
+                    checkpoint=GuardianCheckpoint.POST_RENDER,
+                    trigger_type=CheckTriggerType.POST_RENDER,
+                    diagnostic_context={
+                        "media_probe_summary": probe_summary,
+                        "artifact_id": str(media_art_id),
+                        "expected_hash": content_hash,
+                        "artifact_file_path": str(final_artifact_path)
+                        if final_artifact_path
+                        else None,
+                    },
+                )
+            )
+            if (
+                not post_check.decision
+                or post_check.decision.action
+                not in (
+                    GuardianAction.ALLOW,
+                    GuardianAction.ALLOW_WITH_WARNING,
+                )
+            ):
+                return ProductionQAStatus.BLOCKED
+        except Exception as exc:
+            logger.error("Guardian POST_RENDER evaluation failed", error=str(exc))
+            return ProductionQAStatus.BLOCKED
+        return qa_status
 
     async def _render_v2_staging(
         self,
