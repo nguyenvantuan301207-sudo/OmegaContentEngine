@@ -24,7 +24,9 @@ from omega.domain.production import (
     RenderJobState,
 )
 from omega.infrastructure.models import (
+    ContentGenerationRequest,
     MediaArtifact,
+    MissionExecution,
     ProductionQAResult,
     ProductionRenderJob,
     ProductionRequest,
@@ -48,6 +50,34 @@ class ProductionRenderService:
         self.probe = MediaProbe()
         self.qa_engine = ProductionQAEngine()
         self.visual_production_service = visual_production_service
+
+    async def _resolve_mission_id(
+        self,
+        session: AsyncSession,
+        req: ProductionRequest,
+    ) -> uuid.UUID | None:
+        """Resolve mission lineage without async ORM lazy-loading."""
+        mission_execution_id = req.mission_execution_id
+
+        if mission_execution_id is None and req.content_request_id:
+            mission_execution_id = (
+                await session.execute(
+                    select(ContentGenerationRequest.mission_execution_id).where(
+                        ContentGenerationRequest.id == req.content_request_id
+                    )
+                )
+            ).scalar_one_or_none()
+
+        if mission_execution_id is None:
+            return None
+
+        return (
+            await session.execute(
+                select(MissionExecution.mission_id).where(
+                    MissionExecution.id == mission_execution_id
+                )
+            )
+        ).scalar_one_or_none()
 
     async def execute_render_job(
         self,
@@ -103,15 +133,7 @@ class ProductionRenderService:
             return art, ProductionQAStatus.PASSED
 
         prod_req = job.production_request
-        mission_id = None
-        if prod_req.mission_execution and prod_req.mission_execution.mission_id:
-            mission_id = prod_req.mission_execution.mission_id
-        elif (
-            prod_req.content_request
-            and prod_req.content_request.mission_execution
-            and prod_req.content_request.mission_execution.mission_id
-        ):
-            mission_id = prod_req.content_request.mission_execution.mission_id
+        mission_id = await self._resolve_mission_id(session, prod_req)
 
         # PRE_RENDER Guardian gate check
         if mission_id:

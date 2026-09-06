@@ -1,7 +1,7 @@
 import hashlib
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +25,50 @@ def render_service(tmp_path, mock_v2_service):
     from omega.application.media_storage import LocalMediaStorageProvider
     storage = LocalMediaStorageProvider(base_root=str(tmp_path))
     return ProductionRenderService(storage=storage, visual_production_service=mock_v2_service)
+
+
+@pytest.mark.asyncio
+async def test_resolve_mission_id_direct_fk(render_service):
+    execution_id = uuid.uuid4()
+    mission_id = uuid.uuid4()
+    req = ProductionRequest(
+        mission_execution_id=execution_id,
+        content_request_id=uuid.uuid4(),
+    )
+
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = mission_id
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.return_value = result
+
+    resolved = await render_service._resolve_mission_id(session, req)
+
+    assert resolved == mission_id
+    session.execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_resolve_mission_id_content_request_fallback(render_service):
+    content_request_id = uuid.uuid4()
+    execution_id = uuid.uuid4()
+    mission_id = uuid.uuid4()
+    req = ProductionRequest(
+        mission_execution_id=None,
+        content_request_id=content_request_id,
+    )
+
+    execution_result = MagicMock()
+    execution_result.scalar_one_or_none.return_value = execution_id
+    mission_result = MagicMock()
+    mission_result.scalar_one_or_none.return_value = mission_id
+
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.side_effect = [execution_result, mission_result]
+
+    resolved = await render_service._resolve_mission_id(session, req)
+
+    assert resolved == mission_id
+    assert session.execute.await_count == 2
 
 
 def test_selection_interactive_no_v2():
