@@ -125,6 +125,8 @@ class VerticalSliceRenderResult(BaseModel):
     output_path: Path
     content_sha256: str
     run_fingerprint: str
+    narration_quality: str | None = None
+    narration_source_refs: tuple[str, ...] = ()
 
 
 _STOPWORDS = frozenset({
@@ -456,6 +458,8 @@ class VisualProductionV2Service:
                     output_path=final_mp4_path,
                     content_sha256=actual_sha,
                     run_fingerprint=run_fingerprint,
+                    narration_quality=manifest_data.get("narration_quality"),
+                    narration_source_refs=tuple(manifest_data.get("narration_source_refs", [])),
                 )
             except Exception as e:
                 raise VerticalSliceError(f"Incomplete or corrupt prior run: {e}") from e
@@ -485,6 +489,9 @@ class VisualProductionV2Service:
             template_scenes = 0
             image_scenes = 0
             broll_scenes = 0
+
+            narration_qualities: list[str] = []
+            narration_source_refs_list: list[str] = []
 
 
             indices = set()
@@ -547,6 +554,13 @@ class VisualProductionV2Service:
                         actual_scene_duration_seconds = audio_duration_sec
                         audio_sha = audio_asset["content_hash"]
                         narration_total_duration_ms += duration_ms
+
+                        n_qual = audio_asset.get("narration_quality")
+                        if n_qual:
+                            narration_qualities.append(n_qual)
+                        n_ref = audio_asset.get("source_ref")
+                        if n_ref and n_ref not in narration_source_refs_list:
+                            narration_source_refs_list.append(n_ref)
 
                         scene_subtitle_cues = 0
                         if subtitle_enabled:
@@ -848,6 +862,14 @@ class VisualProductionV2Service:
                 final_scene_path = scenes_dir / f"scene_{scene_res.sequence_index:03d}.mp4"
                 scene_path.replace(final_scene_path)
 
+            final_narration_quality = None
+            if "DEVELOPMENT_FALLBACK" in narration_qualities:
+                final_narration_quality = "DEVELOPMENT_FALLBACK"
+            elif "NEURAL_PRODUCTION" in narration_qualities:
+                final_narration_quality = "NEURAL_PRODUCTION"
+
+            final_narration_source_refs = tuple(narration_source_refs_list)
+
             manifest_content = {
                 "run_fingerprint": run_fingerprint,
                 "scene_artifacts_version": "v1",
@@ -870,6 +892,8 @@ class VisualProductionV2Service:
                 "narration_provider": self._narration_provider.__class__.__name__ if self._narration_provider else None,
                 "narration_model": getattr(self._narration_provider, "model", None) if self._narration_provider else None,
                 "narration_voice": getattr(self._narration_provider, "default_voice", None) if self._narration_provider else None,
+                "narration_quality": final_narration_quality,
+                "narration_source_refs": list(final_narration_source_refs),
                 "scenes": [s.model_dump() for s in scene_results],
             }
 
@@ -896,6 +920,8 @@ class VisualProductionV2Service:
             output_path=final_mp4_path,
             content_sha256=final_sha,
             run_fingerprint=run_fingerprint,
+            narration_quality=final_narration_quality,
+            narration_source_refs=final_narration_source_refs,
         )
 
 
@@ -1006,6 +1032,8 @@ class VisualProductionV2Service:
                 output_path=rev_final_mp4,
                 content_sha256=rev_manifest["content_sha256"],
                 run_fingerprint=rev_fingerprint,
+                narration_quality=rev_manifest.get("narration_quality"),
+                narration_source_refs=tuple(rev_manifest.get("narration_source_refs", [])),
             )
 
         work_dir = self._output_root / "work" / rev_fingerprint
@@ -1197,6 +1225,8 @@ class VisualProductionV2Service:
                 output_path=final_mp4_path,
                 content_sha256=final_sha,
                 run_fingerprint=rev_fingerprint,
+                narration_quality=rev_manifest.get("narration_quality"),
+                narration_source_refs=tuple(rev_manifest.get("narration_source_refs", [])),
             )
 
         finally:
