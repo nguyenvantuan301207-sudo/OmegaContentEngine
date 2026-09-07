@@ -274,6 +274,121 @@ def _execute_canonical_production(
     return asyncio.run(run())
 
 
+def _canonical_qa_correlation(
+    context: dict[str, Any],
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """Parse the exact canonical production dependency for Mission QA."""
+    dependency_outputs = context.get("dependency_outputs")
+    if not isinstance(dependency_outputs, dict):
+        raise ValueError("dependency_outputs must be an object")
+    production_output = dependency_outputs.get("production")
+    if not isinstance(production_output, dict):
+        raise ValueError("production dependency output is required")
+    required = ("production_request_id", "render_job_id", "media_artifact_id")
+    if any(key not in production_output for key in required):
+        raise ValueError("production dependency must supply all canonical correlation IDs")
+    try:
+        return tuple(uuid.UUID(str(production_output[key])) for key in required)
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("production dependency contains malformed UUID correlation") from exc
+
+
+def _execute_canonical_qa(task_id: uuid.UUID, context: dict[str, Any]) -> dict[str, str]:
+    """Observe persisted production QA and final Guardian-derived usability truth."""
+    request_id, render_job_id, artifact_id = _canonical_qa_correlation(context)
+    try:
+        mission_id = uuid.UUID(str(context["mission_id"]))
+        execution_id = uuid.UUID(str(context["execution_id"]))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("canonical QA requires valid mission and execution IDs") from exc
+
+    async def run() -> dict[str, str]:
+        from sqlalchemy import select
+
+        from omega.domain.production import (
+            MediaArtifactType,
+            ProductionOutcome,
+            ProductionQAStatus,
+            ProductionRequestStatus,
+            RenderJobState,
+        )
+        from omega.infrastructure.database import AsyncWorkerSessionLocal
+        from omega.infrastructure.models import (
+            MediaArtifact,
+            Mission,
+            MissionExecution,
+            ProductionQAResult,
+            ProductionRenderJob,
+            ProductionRequest,
+            Task,
+        )
+
+        async with AsyncWorkerSessionLocal() as async_session:
+            task = await async_session.get(Task, task_id)
+            execution = await async_session.get(MissionExecution, execution_id)
+            mission = await async_session.get(Mission, mission_id)
+            request = await async_session.get(ProductionRequest, request_id)
+            render_job = await async_session.get(ProductionRenderJob, render_job_id)
+            artifact = await async_session.get(MediaArtifact, artifact_id)
+
+            if task is None or task.execution_id != execution_id or task.mission_id != mission_id:
+                raise ValueError("QA Task MissionExecution lineage is invalid")
+            if execution is None or execution.mission_id != mission_id:
+                raise ValueError("QA MissionExecution lineage is invalid")
+            if mission is None or mission.channel_id is None:
+                raise ValueError("QA Mission channel lineage is invalid")
+            if request is None or request.mission_execution_id != execution_id:
+                raise ValueError("ProductionRequest MissionExecution lineage is invalid")
+            if request.channel_id != mission.channel_id:
+                raise ValueError("ProductionRequest channel lineage is invalid")
+            if (
+                execution.channel_dna_revision_id is None
+                or request.channel_dna_revision_id != execution.channel_dna_revision_id
+            ):
+                raise ValueError("ProductionRequest pinned DNA lineage is invalid")
+            if render_job is None or render_job.production_request_id != request_id:
+                raise ValueError("ProductionRenderJob lineage is invalid")
+            if (
+                artifact is None
+                or artifact.production_request_id != request_id
+                or artifact.render_job_id != render_job_id
+                or artifact.artifact_type != MediaArtifactType.VIDEO.value
+                or not artifact.is_current
+            ):
+                raise ValueError("MediaArtifact lineage is invalid")
+            if request.status != ProductionRequestStatus.SUCCEEDED.value:
+                raise ValueError("ProductionRequest is not mechanically successful")
+            if render_job.state != RenderJobState.SUCCEEDED.value:
+                raise ValueError("ProductionRenderJob is not mechanically successful")
+
+            qa_result = (
+                await async_session.execute(
+                    select(ProductionQAResult).where(
+                        ProductionQAResult.production_request_id == request_id,
+                        ProductionQAResult.artifact_id == artifact_id,
+                    )
+                )
+            ).scalar_one_or_none()
+            if qa_result is None:
+                raise ValueError("exact ProductionQAResult not found")
+            if request.outcome == ProductionOutcome.BLOCKED.value:
+                raise RuntimeError("production usability is BLOCKED")
+            if request.outcome != ProductionOutcome.RENDERED.value:
+                raise ValueError("ProductionRequest has no accepted final usability outcome")
+            if qa_result.status not in (
+                ProductionQAStatus.PASSED.value,
+                ProductionQAStatus.PASSED_WITH_WARNINGS.value,
+            ):
+                raise RuntimeError(f"production QA is not accepted: {qa_result.status}")
+            return {
+                "production_request_id": str(request_id),
+                "media_artifact_id": str(artifact_id),
+                "production_qa_result_id": str(qa_result.id),
+            }
+
+    return asyncio.run(run())
+
+
 def _canonical_content_pair(
     task_input: dict[str, Any] | None, context: dict[str, Any]
 ) -> tuple[uuid.UUID, uuid.UUID]:
@@ -606,6 +721,8 @@ def execute_task(self, task_id: str) -> dict:
             result_output = _execute_canonical_content(task.id, task.input, context)
         elif task.task_type == "production":
             result_output = _execute_canonical_production(task.id, context)
+        elif task.task_type == "qa":
+            result_output = _execute_canonical_qa(task.id, context)
         else:
             executor = default_executor_registry.get(task.task_type)
             result_output = executor.execute(
