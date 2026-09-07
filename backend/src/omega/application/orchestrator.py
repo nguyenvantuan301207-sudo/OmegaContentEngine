@@ -17,9 +17,17 @@ from sqlalchemy.orm import Session
 
 from omega.domain.decision import Actor, DecisionType
 from omega.domain.mission import AutonomyLevel, ExecutionState, MissionState
+from omega.domain.production import RenderJobState
 from omega.domain.scheduler import ScheduleWorkloadCategory
 from omega.domain.task import TaskState
-from omega.infrastructure.models import DecisionLog, Mission, MissionExecution, Task, TaskDependency
+from omega.infrastructure.models import (
+    DecisionLog,
+    Mission,
+    MissionExecution,
+    ProductionRenderJob,
+    Task,
+    TaskDependency,
+)
 from omega.logging import get_logger
 
 logger = get_logger(service="omega-orchestrator")
@@ -131,7 +139,30 @@ async def evaluate_mission(
             p.state in (TaskState.FAILED.value, TaskState.CANCELLED.value) for p in prereq_tasks
         )
 
-        if task.state in (TaskState.PENDING.value, TaskState.BLOCKED.value):
+        if task.state == TaskState.RUNNING.value and task.task_type == "production":
+            if isinstance(task.output, dict):
+                try:
+                    production_request_id = uuid.UUID(str(task.output["production_request_id"]))
+                    render_job_id = uuid.UUID(str(task.output["render_job_id"]))
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    production_request_id = None
+                    render_job_id = None
+                if production_request_id is not None and render_job_id is not None:
+                    job = await session.get(ProductionRenderJob, render_job_id)
+                    if (
+                        job is not None
+                        and job.id == render_job_id
+                        and job.production_request_id == production_request_id
+                        and job.state
+                        in (
+                            RenderJobState.SUCCEEDED.value,
+                            RenderJobState.FAILED.value,
+                            RenderJobState.CANCELLED.value,
+                        )
+                    ):
+                        task.state = TaskState.READY.value
+                        task.updated_at = now
+        elif task.state in (TaskState.PENDING.value, TaskState.BLOCKED.value):
             if any_prereq_failed:
                 task.state = TaskState.CANCELLED.value
                 task.updated_at = now
@@ -599,7 +630,30 @@ def evaluate_mission_sync(
             p.state in (TaskState.FAILED.value, TaskState.CANCELLED.value) for p in prereq_tasks
         )
 
-        if task.state in (TaskState.PENDING.value, TaskState.BLOCKED.value):
+        if task.state == TaskState.RUNNING.value and task.task_type == "production":
+            if isinstance(task.output, dict):
+                try:
+                    production_request_id = uuid.UUID(str(task.output["production_request_id"]))
+                    render_job_id = uuid.UUID(str(task.output["render_job_id"]))
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    production_request_id = None
+                    render_job_id = None
+                if production_request_id is not None and render_job_id is not None:
+                    job = session.get(ProductionRenderJob, render_job_id)
+                    if (
+                        job is not None
+                        and job.id == render_job_id
+                        and job.production_request_id == production_request_id
+                        and job.state
+                        in (
+                            RenderJobState.SUCCEEDED.value,
+                            RenderJobState.FAILED.value,
+                            RenderJobState.CANCELLED.value,
+                        )
+                    ):
+                        task.state = TaskState.READY.value
+                        task.updated_at = now
+        elif task.state in (TaskState.PENDING.value, TaskState.BLOCKED.value):
             if any_prereq_failed:
                 task.state = TaskState.CANCELLED.value
                 task.updated_at = now

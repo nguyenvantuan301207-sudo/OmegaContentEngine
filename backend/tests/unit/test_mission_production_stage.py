@@ -1,0 +1,658 @@
+"""Offline behavioral contracts for canonical Mission production."""
+
+from __future__ import annotations
+
+import hashlib
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, call
+from uuid import uuid4
+
+import pytest
+
+from omega.application import executor as executor_module
+from omega.application import orchestrator
+from omega.application.production_service import ProductionService
+from omega.domain.content import ContentRequestStatus
+from omega.domain.mission import MissionState
+from omega.domain.production import (
+    MediaArtifactType,
+    ProductionMode,
+    ProductionRequestStatus,
+    RenderJobState,
+)
+from omega.domain.task import TaskState
+from omega.infrastructure import database, database_sync
+from omega.infrastructure.models import (
+    ContentGenerationRequest,
+    MediaArtifact,
+    Mission,
+    MissionExecution,
+    ProductionRenderJob,
+    ProductionRequest,
+    ScriptVersion,
+    Task,
+    TaskDependency,
+)
+from omega.worker import tasks as worker_tasks
+
+
+def context(content=None):
+    result = {
+        "mission_id": str(uuid4()),
+        "execution_id": str(uuid4()),
+        "dependency_outputs": {},
+    }
+    if content is not None:
+        result["dependency_outputs"]["content_generation"] = content
+    return result
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        None,
+        {},
+        {"content_request_id": str(uuid4())},
+        {"script_version_id": str(uuid4())},
+        {"content_request_id": "bad", "script_version_id": str(uuid4())},
+    ],
+)
+def test_canonical_production_requires_complete_direct_content_correlation(content) -> None:
+    with pytest.raises(ValueError):
+        worker_tasks._canonical_production_pair(context(content))
+
+
+def test_canonical_production_pair_accepts_only_authoritative_ids() -> None:
+    request_id, script_id = uuid4(), uuid4()
+    assert worker_tasks._canonical_production_pair(
+        context({"content_request_id": str(request_id), "script_version_id": str(script_id)})
+    ) == (request_id, script_id)
+
+
+class ScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class AsyncSession:
+    def __init__(self, records, artifact=None):
+        self.records = records
+        self.artifact = artifact
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def get(self, model, record_id):
+        return self.records.get((model, record_id))
+
+    async def execute(self, statement):
+        return ScalarResult(self.artifact)
+
+
+@pytest.fixture
+def lineage():
+    mission_id, execution_id, channel_id, dna_id, task_id = (
+        uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    )
+    content_id, script_id, request_id, job_id, artifact_id = (
+        uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    )
+    task = SimpleNamespace(id=task_id, mission_id=mission_id, execution_id=execution_id)
+    execution = SimpleNamespace(id=execution_id, mission_id=mission_id, channel_dna_revision_id=dna_id)
+    mission = SimpleNamespace(id=mission_id, channel_id=channel_id)
+    content = SimpleNamespace(
+        id=content_id,
+        mission_execution_id=execution_id,
+        channel_id=channel_id,
+        channel_dna_revision_id=dna_id,
+        status=ContentRequestStatus.SUCCEEDED.value,
+    )
+    script = SimpleNamespace(id=script_id, content_request_id=content_id, is_current=True)
+    request = SimpleNamespace(
+        id=request_id,
+        mission_execution_id=execution_id,
+        channel_id=channel_id,
+        script_version_id=script_id,
+        content_request_id=content_id,
+        channel_dna_revision_id=dna_id,
+        mode=ProductionMode.MISSION_EXECUTION.value,
+        status=ProductionRequestStatus.READY.value,
+        outcome=None,
+    )
+    artifact = SimpleNamespace(
+        id=artifact_id,
+        production_request_id=request_id,
+        render_job_id=job_id,
+        artifact_type=MediaArtifactType.VIDEO.value,
+    )
+    records = {
+        (Task, task_id): task,
+        (MissionExecution, execution_id): execution,
+        (Mission, mission_id): mission,
+        (ContentGenerationRequest, content_id): content,
+        (ScriptVersion, script_id): script,
+        (ProductionRequest, request_id): request,
+        (MediaArtifact, artifact_id): artifact,
+    }
+    ctx = {
+        "mission_id": str(mission_id),
+        "execution_id": str(execution_id),
+        "dependency_outputs": {"content_generation": {
+            "content_request_id": str(content_id), "script_version_id": str(script_id)
+        }},
+    }
+    return SimpleNamespace(**locals())
+
+
+def install(monkeypatch, data, state=RenderJobState.QUEUED.value, is_new=True, artifact=None):
+    session = AsyncSession(data.records, artifact=artifact)
+    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: session)
+    create = AsyncMock(return_value=data.request)
+
+    async def prepare_request(*args):
+        data.request.status = ProductionRequestStatus.READY.value
+        return data.request
+
+    prepare = AsyncMock(side_effect=prepare_request)
+    job = SimpleNamespace(id=data.job_id, state=state)
+
+    async def allocate_ready_request(*args):
+        assert data.request.status == ProductionRequestStatus.READY.value
+        return job, SimpleNamespace(), is_new
+
+    allocate = AsyncMock(side_effect=allocate_ready_request)
+    monkeypatch.setattr(ProductionService, "create_production_request", create)
+    monkeypatch.setattr(ProductionService, "prepare_production", prepare)
+    monkeypatch.setattr(ProductionService, "allocate_render_job", allocate)
+    dispatch = MagicMock()
+    monkeypatch.setattr(worker_tasks.execute_production_render_task, "delay", dispatch)
+    return create, prepare, allocate, dispatch
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda d: setattr(d.script, "content_request_id", uuid4()),
+        lambda d: setattr(d.content, "mission_execution_id", uuid4()),
+        lambda d: setattr(d.content, "channel_id", uuid4()),
+        lambda d: setattr(d.content, "channel_dna_revision_id", uuid4()),
+        lambda d: setattr(d.script, "is_current", False),
+    ],
+)
+def test_lineage_mismatch_fails_before_production_service(monkeypatch, lineage, mutation) -> None:
+    mutation(lineage)
+    create, _, _, _ = install(monkeypatch, lineage)
+    with pytest.raises(ValueError):
+        worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+    create.assert_not_awaited()
+
+
+def test_draft_prepares_allocates_deterministically_without_early_dispatch(monkeypatch, lineage) -> None:
+    lineage.request.status = ProductionRequestStatus.DRAFT.value
+    create, prepare, allocate, dispatch = install(monkeypatch, lineage)
+    result = worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+    assert isinstance(result, worker_tasks._PendingProductionResult)
+    assert result == {"production_request_id": str(lineage.request_id), "render_job_id": str(lineage.job_id)}
+    assert create.await_args.kwargs["idempotency_key"] == hashlib.sha256(
+        f"mission-production:{lineage.execution_id}:{lineage.task_id}".encode()
+    ).hexdigest()
+    prepare.assert_awaited_once()
+    assert lineage.request.status == ProductionRequestStatus.READY.value
+    allocate.assert_awaited_once()
+    assert allocate.await_args.args[3] == hashlib.sha256(
+        f"mission-render:{lineage.request_id}:{lineage.task_id}".encode()
+    ).hexdigest()
+    assert result.dispatch_required is True
+    assert result.channel_id == str(lineage.channel_id)
+    assert result.production_request_id == str(lineage.request_id)
+    assert result.render_job_id == str(lineage.job_id)
+    dispatch.assert_not_called()
+
+
+@pytest.mark.parametrize("state", [RenderJobState.QUEUED.value, RenderJobState.RUNNING.value, RenderJobState.RETRY.value])
+def test_pending_reentry_reuses_job_without_redispatch(monkeypatch, lineage, state) -> None:
+    _, prepare, _, dispatch = install(monkeypatch, lineage, state=state, is_new=False)
+    result = worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+    assert isinstance(result, worker_tasks._PendingProductionResult)
+    assert result.dispatch_required is False
+    prepare.assert_not_awaited()
+    dispatch.assert_not_called()
+
+
+def test_terminal_success_requires_and_returns_valid_artifact(monkeypatch, lineage) -> None:
+    _, _, _, dispatch = install(
+        monkeypatch, lineage, state=RenderJobState.SUCCEEDED.value, is_new=False, artifact=lineage.artifact
+    )
+    result = worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+    assert result["media_artifact_id"] == str(lineage.artifact_id)
+    dispatch.assert_not_called()
+
+
+def test_terminal_success_without_artifact_fails_closed(monkeypatch, lineage) -> None:
+    install(monkeypatch, lineage, state=RenderJobState.SUCCEEDED.value, is_new=False)
+    with pytest.raises(ValueError, match="MediaArtifact"):
+        worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+
+
+@pytest.mark.parametrize("state", [RenderJobState.FAILED.value, RenderJobState.CANCELLED.value])
+def test_terminal_render_failure_fails_stage(monkeypatch, lineage, state) -> None:
+    install(monkeypatch, lineage, state=state, is_new=False)
+    with pytest.raises(RuntimeError, match="terminal failure"):
+        worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+
+
+def test_blocked_mechanical_success_is_still_stage_success(monkeypatch, lineage) -> None:
+    lineage.request.outcome = "BLOCKED"
+    install(monkeypatch, lineage, state=RenderJobState.SUCCEEDED.value, is_new=False, artifact=lineage.artifact)
+    assert worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)["media_artifact_id"] == str(lineage.artifact_id)
+
+
+class Query:
+    def __init__(self, record): self.record = record
+    def filter(self, *args): return self
+    def with_for_update(self): return self
+    def first(self): return self.record
+    def outerjoin(self, *args): return self
+    def order_by(self, *args): return self
+    def all(self): return []
+
+
+def test_execute_task_commits_ids_before_new_render_dispatch(monkeypatch) -> None:
+    mission_id, execution_id, task_id = uuid4(), uuid4(), uuid4()
+    request_id, job_id, channel_id = uuid4(), uuid4(), uuid4()
+    original_input = {"unrelated": "preserved"}
+    task = SimpleNamespace(id=task_id, mission_id=mission_id, execution_id=execution_id,
+        task_type="production", title="Production", state=TaskState.QUEUED.value,
+        dispatched_epoch=4, input=original_input, output=None, retry_count=0, max_retries=0)
+    mission = SimpleNamespace(id=mission_id, state=MissionState.RUNNING.value, guardian_epoch=4)
+    session = MagicMock()
+    session.query.side_effect = [
+        Query(SimpleNamespace(mission_id=mission_id)), Query(mission), Query(task),
+        Query(None), Query(mission), Query(task),
+    ]
+    commit_count = 0
+
+    def committed():
+        nonlocal commit_count
+        commit_count += 1
+
+    session.commit.side_effect = committed
+    monkeypatch.setattr(database_sync, "SyncSessionLocal", lambda: session)
+    adapter = MagicMock(return_value=worker_tasks._PendingProductionResult(
+        {"production_request_id": str(request_id), "render_job_id": str(job_id)},
+        dispatch_required=True, channel_id=str(channel_id),
+        production_request_id=str(request_id), render_job_id=str(job_id)))
+    monkeypatch.setattr(worker_tasks, "_execute_canonical_production", adapter)
+    registry = MagicMock()
+    monkeypatch.setattr(executor_module, "default_executor_registry", registry)
+    dispatch = MagicMock(side_effect=lambda *args: (
+        task.output == {"production_request_id": str(request_id), "render_job_id": str(job_id)}
+        and commit_count == 2
+    ) or pytest.fail("render dispatched before correlation commit"))
+    monkeypatch.setattr(worker_tasks.execute_production_render_task, "delay", dispatch)
+
+    result = worker_tasks.execute_task.run(str(task_id))
+
+    assert result["status"] == "pending"
+    assert task.state == TaskState.RUNNING.value
+    assert task.input is original_input
+    assert task.output == {"production_request_id": str(request_id), "render_job_id": str(job_id)}
+    dispatch.assert_called_once_with(str(channel_id), str(request_id), str(job_id))
+    assert session.query.call_args_list[4:6] == [call(Mission), call(Task)]
+    registry.get.assert_not_called()
+
+
+def test_execute_task_refuses_pending_dispatch_after_guardian_epoch_change(monkeypatch) -> None:
+    mission_id, execution_id, task_id = uuid4(), uuid4(), uuid4()
+    task = SimpleNamespace(id=task_id, mission_id=mission_id, execution_id=execution_id,
+        task_type="production", title="Production", state=TaskState.QUEUED.value,
+        dispatched_epoch=4, input={}, output=None, retry_count=0, max_retries=0)
+    initial_mission = SimpleNamespace(id=mission_id, state=MissionState.RUNNING.value, guardian_epoch=4)
+    stale_mission = SimpleNamespace(id=mission_id, state=MissionState.RUNNING.value, guardian_epoch=5)
+    session = MagicMock()
+    session.query.side_effect = [
+        Query(SimpleNamespace(mission_id=mission_id)), Query(initial_mission), Query(task),
+        Query(None), Query(stale_mission), Query(task),
+    ]
+    monkeypatch.setattr(database_sync, "SyncSessionLocal", lambda: session)
+    monkeypatch.setattr(worker_tasks, "_execute_canonical_production", MagicMock(return_value=
+        worker_tasks._PendingProductionResult(
+            {"production_request_id": str(uuid4()), "render_job_id": str(uuid4())},
+            dispatch_required=True, channel_id=str(uuid4()),
+            production_request_id=str(uuid4()), render_job_id=str(uuid4()))))
+    dispatch = MagicMock()
+    monkeypatch.setattr(worker_tasks.execute_production_render_task, "delay", dispatch)
+
+    result = worker_tasks.execute_task.run(str(task_id))
+
+    assert result == {"status": "skipped", "reason": "stale_pending_production"}
+    assert task.output is None
+    dispatch.assert_not_called()
+    session.rollback.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "request_state",
+    [ProductionRequestStatus.FAILED.value, ProductionRequestStatus.CANCELLED.value],
+)
+def test_terminal_request_without_deterministic_job_never_allocates(
+    monkeypatch, lineage, request_state
+) -> None:
+    lineage.request.status = request_state
+    _, _, allocate, dispatch = install(monkeypatch, lineage)
+    with pytest.raises(ValueError, match="no deterministic RenderJob"):
+        worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+    allocate.assert_not_awaited()
+    dispatch.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "request_state",
+    [ProductionRequestStatus.RUNNING.value, ProductionRequestStatus.SUCCEEDED.value],
+)
+def test_in_progress_or_succeeded_request_without_job_fails_closed(
+    monkeypatch, lineage, request_state
+) -> None:
+    lineage.request.status = request_state
+    _, _, allocate, _ = install(monkeypatch, lineage)
+    with pytest.raises(ValueError, match="no deterministic RenderJob"):
+        worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+    allocate.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "request_state",
+    [ProductionRequestStatus.RUNNING.value, ProductionRequestStatus.SUCCEEDED.value],
+)
+def test_non_ready_request_observes_existing_deterministic_job_without_allocation(
+    monkeypatch, lineage, request_state
+) -> None:
+    lineage.request.status = request_state
+    job = SimpleNamespace(
+        id=lineage.job_id,
+        production_request_id=lineage.request_id,
+        state=RenderJobState.RUNNING.value,
+    )
+    _, _, allocate, dispatch = install(monkeypatch, lineage, artifact=job)
+    result = worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+    assert isinstance(result, worker_tasks._PendingProductionResult)
+    allocate.assert_not_awaited()
+    dispatch.assert_not_called()
+
+
+def test_render_service_failure_returns_sanitized_result_and_wakes_mission_once(
+    monkeypatch,
+) -> None:
+    from omega.application import production_render_factory
+
+    channel_id, request_id, job_id, execution_id, mission_id = (
+        uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    )
+    request = SimpleNamespace(mission_execution_id=execution_id)
+    async_session = AsyncSession({(ProductionRequest, request_id): request})
+    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: async_session)
+    job = SimpleNamespace(id=job_id, state=RenderJobState.RUNNING.value)
+
+    async def fail_terminally(*args):
+        job.state = RenderJobState.FAILED.value
+        raise RuntimeError("render exploded")
+
+    service = SimpleNamespace(execute_render_job=AsyncMock(side_effect=fail_terminally))
+    monkeypatch.setattr(
+        production_render_factory, "build_production_render_service", lambda: service
+    )
+    execution = SimpleNamespace(id=execution_id, mission_id=mission_id)
+    sync_session = MagicMock()
+    sync_session.query.return_value = Query(execution)
+    monkeypatch.setattr(database_sync, "SyncSessionLocal", lambda: sync_session)
+    callback = MagicMock()
+    monkeypatch.setattr(worker_tasks.evaluate_mission_task, "delay", callback)
+
+    result = worker_tasks.execute_production_render_task.run(
+        str(channel_id), str(request_id), str(job_id)
+    )
+
+    assert result == {"status": "failed", "error": "RuntimeError: render exploded"}
+    assert job.state == RenderJobState.FAILED.value
+    callback.assert_called_once_with(str(mission_id), str(execution_id))
+
+
+def test_render_callback_publication_failure_propagates(monkeypatch) -> None:
+    from omega.application import production_render_factory
+
+    channel_id, request_id, job_id, execution_id, mission_id = (
+        uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    )
+    request = SimpleNamespace(mission_execution_id=execution_id)
+    async_session = AsyncSession({(ProductionRequest, request_id): request})
+    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: async_session)
+    artifact = SimpleNamespace(id=uuid4())
+    qa_status = SimpleNamespace(value="PASS")
+    service = SimpleNamespace(
+        execute_render_job=AsyncMock(return_value=(artifact, qa_status))
+    )
+    monkeypatch.setattr(
+        production_render_factory, "build_production_render_service", lambda: service
+    )
+    execution = SimpleNamespace(id=execution_id, mission_id=mission_id)
+    sync_session = MagicMock()
+    sync_session.query.return_value = Query(execution)
+    monkeypatch.setattr(database_sync, "SyncSessionLocal", lambda: sync_session)
+    monkeypatch.setattr(
+        worker_tasks.evaluate_mission_task,
+        "delay",
+        MagicMock(side_effect=RuntimeError("broker unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        worker_tasks.execute_production_render_task.run(
+            str(channel_id), str(request_id), str(job_id)
+        )
+
+
+class OrchestratorResult:
+    def __init__(self, values):
+        self.values = values if isinstance(values, list) else [values]
+
+    def scalar_one_or_none(self):
+        return self.values[0] if self.values else None
+
+    def scalar_one(self):
+        return self.values[0]
+
+    def scalars(self):
+        return self
+
+    def first(self):
+        return self.values[0] if self.values else None
+
+    def all(self):
+        return self.values
+
+
+class AsyncOrchestratorSession:
+    def __init__(self, mission, execution, task, job):
+        self.records = {
+            Mission: [mission], MissionExecution: [execution], Task: [task], TaskDependency: []
+        }
+        self.job = job
+        self.add = MagicMock()
+        self.commit = AsyncMock()
+
+    async def execute(self, statement):
+        entity = statement.column_descriptions[0]["entity"]
+        return OrchestratorResult(self.records[entity])
+
+    async def get(self, model, record_id):
+        if model is ProductionRenderJob and self.job is not None and self.job.id == record_id:
+            return self.job
+        return None
+
+
+class SyncOrchestratorQuery:
+    def __init__(self, values):
+        self.values = values
+
+    def filter(self, *args):
+        return self
+
+    def with_for_update(self):
+        return self
+
+    def order_by(self, *args):
+        return self
+
+    def first(self):
+        return self.values[0] if self.values else None
+
+    def all(self):
+        return self.values
+
+
+class SyncOrchestratorSession:
+    def __init__(self, mission, execution, task, job):
+        self.records = {
+            Mission: [mission], MissionExecution: [execution], Task: [task], TaskDependency: []
+        }
+        self.job = job
+        self.add = MagicMock()
+        self.commit = MagicMock()
+
+    def query(self, model):
+        return SyncOrchestratorQuery(self.records[model])
+
+    def get(self, model, record_id):
+        if model is ProductionRenderJob and self.job is not None and self.job.id == record_id:
+            return self.job
+        return None
+
+
+def allow_pre_task_dispatch(monkeypatch) -> AsyncMock:
+    from omega.application.guardian.engine import GuardianEngine
+    from omega.domain.guardian import GuardianAction
+
+    execute_check = AsyncMock(return_value=SimpleNamespace(
+        decision=SimpleNamespace(action=GuardianAction.ALLOW)
+    ))
+    monkeypatch.setattr(GuardianEngine, "execute_check", execute_check)
+    return execute_check
+
+
+def production_gate_records(job_state, output=None):
+    mission_id, execution_id, task_id, request_id, job_id = (
+        uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
+    )
+    mission = SimpleNamespace(
+        id=mission_id, state=MissionState.RUNNING.value, autonomy_level="MANUAL",
+        guardian_epoch=8, channel_id=uuid4(), priority=0,
+    )
+    execution = SimpleNamespace(
+        id=execution_id, mission_id=mission_id, state="RUNNING", started_at=None, updated_at=None
+    )
+    task = SimpleNamespace(
+        id=task_id, mission_id=mission_id, execution_id=execution_id, task_type="production",
+        title="Production", state=TaskState.RUNNING.value, output=output or {
+            "production_request_id": str(request_id), "render_job_id": str(job_id)
+        }, requires_approval=False, retry_count=0, max_retries=0, updated_at=None,
+    )
+    job = None if job_state is None else SimpleNamespace(
+        id=job_id, production_request_id=request_id, state=job_state
+    )
+    return mission, execution, task, job
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("job_state", [
+    RenderJobState.QUEUED.value, RenderJobState.RUNNING.value, RenderJobState.RETRY.value
+])
+async def test_async_orchestrator_pending_production_remains_running(monkeypatch, job_state) -> None:
+    mission, execution, task, job = production_gate_records(job_state)
+    session = AsyncOrchestratorSession(mission, execution, task, job)
+    observer = MagicMock()
+    monkeypatch.setattr(worker_tasks.execute_task, "delay", observer)
+
+    result = await orchestrator.evaluate_mission(session, mission.id, execution.id)
+
+    assert result["dispatched_tasks_count"] == 0
+    assert task.state == TaskState.RUNNING.value
+    observer.assert_not_called()
+
+
+@pytest.mark.parametrize("job_state", [
+    RenderJobState.QUEUED.value, RenderJobState.RUNNING.value, RenderJobState.RETRY.value
+])
+def test_sync_orchestrator_pending_production_remains_running(monkeypatch, job_state) -> None:
+    mission, execution, task, job = production_gate_records(job_state)
+    session = SyncOrchestratorSession(mission, execution, task, job)
+    observer = MagicMock()
+    monkeypatch.setattr(worker_tasks.execute_task, "delay", observer)
+
+    result = orchestrator.evaluate_mission_sync(session, mission.id, execution.id)
+
+    assert result["dispatched_tasks_count"] == 0
+    assert task.state == TaskState.RUNNING.value
+    observer.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("job_state", [
+    RenderJobState.SUCCEEDED.value, RenderJobState.FAILED.value, RenderJobState.CANCELLED.value
+])
+async def test_async_orchestrator_terminal_render_permits_bounded_reentry(
+    monkeypatch, job_state
+) -> None:
+    mission, execution, task, job = production_gate_records(job_state)
+    allow_pre_task_dispatch(monkeypatch)
+    session = AsyncOrchestratorSession(mission, execution, task, job)
+    observer = MagicMock()
+    monkeypatch.setattr(worker_tasks.execute_task, "delay", observer)
+
+    result = await orchestrator.evaluate_mission(session, mission.id, execution.id)
+
+    assert result["dispatched_tasks_count"] == 0
+    assert task.state == TaskState.READY.value
+    observer.assert_not_called()
+
+
+@pytest.mark.parametrize("job_state", [
+    RenderJobState.SUCCEEDED.value, RenderJobState.FAILED.value, RenderJobState.CANCELLED.value
+])
+def test_sync_orchestrator_terminal_render_permits_bounded_reentry(monkeypatch, job_state) -> None:
+    mission, execution, task, job = production_gate_records(job_state)
+    allow_pre_task_dispatch(monkeypatch)
+    session = SyncOrchestratorSession(mission, execution, task, job)
+    observer = MagicMock()
+    monkeypatch.setattr(worker_tasks.execute_task, "delay", observer)
+
+    result = orchestrator.evaluate_mission_sync(session, mission.id, execution.id)
+
+    assert result["dispatched_tasks_count"] == 0
+    assert task.state == TaskState.READY.value
+    observer.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("output", [None, {}, {"production_request_id": "bad", "render_job_id": "bad"}])
+async def test_async_orchestrator_malformed_correlation_never_readies(output) -> None:
+    mission, execution, task, job = production_gate_records(None, output=output)
+    session = AsyncOrchestratorSession(mission, execution, task, job)
+
+    await orchestrator.evaluate_mission(session, mission.id, execution.id)
+
+    assert task.state == TaskState.RUNNING.value
+
+
+def test_sync_orchestrator_mismatched_job_never_readies() -> None:
+    mission, execution, task, job = production_gate_records(RenderJobState.SUCCEEDED.value)
+    job.production_request_id = uuid4()
+    session = SyncOrchestratorSession(mission, execution, task, job)
+
+    orchestrator.evaluate_mission_sync(session, mission.id, execution.id)
+
+    assert task.state == TaskState.RUNNING.value

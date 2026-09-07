@@ -71,6 +71,209 @@ def _load_dependency_outputs(session: Any, task: Any) -> dict[str, dict]:
     return dependency_outputs
 
 
+class _PendingProductionResult(dict):
+    """Correlation payload plus private, process-local render dispatch instructions."""
+
+    def __init__(
+        self,
+        correlation: dict[str, str] | None = None,
+        *,
+        dispatch_required: bool = False,
+        channel_id: str | None = None,
+        production_request_id: str | None = None,
+        render_job_id: str | None = None,
+        **correlation_ids: str,
+    ) -> None:
+        super().__init__(correlation or correlation_ids)
+        self.dispatch_required = dispatch_required
+        self.channel_id = channel_id
+        self.production_request_id = production_request_id
+        self.render_job_id = render_job_id
+
+
+def _canonical_production_pair(context: dict[str, Any]) -> tuple[uuid.UUID, uuid.UUID]:
+    dependency_outputs = context.get("dependency_outputs")
+    if not isinstance(dependency_outputs, dict):
+        raise ValueError("dependency_outputs must be an object")
+    content_output = dependency_outputs.get("content_generation")
+    if not isinstance(content_output, dict):
+        raise ValueError("content_generation dependency output is required")
+    if "content_request_id" not in content_output or "script_version_id" not in content_output:
+        raise ValueError("content_generation dependency must supply both canonical correlation IDs")
+    try:
+        return (
+            uuid.UUID(str(content_output["content_request_id"])),
+            uuid.UUID(str(content_output["script_version_id"])),
+        )
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("content_generation dependency contains malformed UUID correlation") from exc
+
+
+def _execute_canonical_production(
+    task_id: uuid.UUID, context: dict[str, Any]
+) -> dict[str, str]:
+    """Create/observe canonical production and dispatch only newly allocated render work."""
+    content_request_id, script_version_id = _canonical_production_pair(context)
+    try:
+        mission_id = uuid.UUID(str(context["mission_id"]))
+        execution_id = uuid.UUID(str(context["execution_id"]))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("canonical production requires valid mission and execution IDs") from exc
+
+    async def run() -> dict[str, str]:
+        from omega.application.production_service import ProductionService
+        from omega.domain.content import ContentRequestStatus
+        from omega.domain.production import (
+            MediaArtifactType,
+            ProductionMode,
+            ProductionRequestCreate,
+            ProductionRequestStatus,
+            RenderJobState,
+        )
+        from omega.infrastructure.database import AsyncWorkerSessionLocal
+        from omega.infrastructure.models import (
+            ContentGenerationRequest,
+            MediaArtifact,
+            Mission,
+            MissionExecution,
+            ProductionRenderJob,
+            ProductionRequest,
+            ScriptVersion,
+            Task,
+        )
+
+        async with AsyncWorkerSessionLocal() as async_session:
+            task = await async_session.get(Task, task_id)
+            execution = await async_session.get(MissionExecution, execution_id)
+            mission = await async_session.get(Mission, mission_id)
+            content_request = await async_session.get(ContentGenerationRequest, content_request_id)
+            script = await async_session.get(ScriptVersion, script_version_id)
+            if task is None or task.execution_id != execution_id or task.mission_id != mission_id:
+                raise ValueError("production Task MissionExecution lineage is invalid")
+            if execution is None or execution.mission_id != mission_id:
+                raise ValueError("production MissionExecution lineage is invalid")
+            if mission is None or mission.channel_id is None:
+                raise ValueError("production Mission channel lineage is invalid")
+            if content_request is None:
+                raise ValueError("ContentGenerationRequest not found")
+            if script is None or script.content_request_id != content_request.id:
+                raise ValueError("ScriptVersion does not belong to ContentGenerationRequest")
+            if content_request.mission_execution_id != execution_id:
+                raise ValueError("ContentGenerationRequest MissionExecution lineage is invalid")
+            if content_request.channel_id != mission.channel_id:
+                raise ValueError("ContentGenerationRequest channel lineage is invalid")
+            if (
+                execution.channel_dna_revision_id is None
+                or content_request.channel_dna_revision_id != execution.channel_dna_revision_id
+            ):
+                raise ValueError("ContentGenerationRequest pinned DNA lineage is invalid")
+            if (
+                content_request.status != ContentRequestStatus.SUCCEEDED.value
+                or not script.is_current
+            ):
+                raise ValueError("ScriptVersion is not accepted under content request semantics")
+
+            request_key = hashlib.sha256(
+                f"mission-production:{execution_id}:{task_id}".encode()
+            ).hexdigest()
+            service = ProductionService()
+            request = await service.create_production_request(
+                async_session,
+                mission.channel_id,
+                ProductionRequestCreate(
+                    script_version_id=script_version_id,
+                    mission_execution_id=execution_id,
+                ),
+                idempotency_key=request_key,
+            )
+            persisted = await async_session.get(ProductionRequest, request.id)
+            if (
+                persisted is None
+                or persisted.mission_execution_id != execution_id
+                or persisted.channel_id != mission.channel_id
+                or persisted.script_version_id != script_version_id
+                or persisted.content_request_id != content_request_id
+                or persisted.channel_dna_revision_id != execution.channel_dna_revision_id
+                or persisted.mode != ProductionMode.MISSION_EXECUTION.value
+            ):
+                raise ValueError("ProductionRequest canonical lineage is invalid")
+
+            if persisted.status == ProductionRequestStatus.DRAFT.value:
+                persisted = await service.prepare_production(
+                    async_session, mission.channel_id, persisted.id
+                )
+
+            render_key = hashlib.sha256(
+                f"mission-render:{persisted.id}:{task_id}".encode()
+            ).hexdigest()
+            if persisted.status == ProductionRequestStatus.READY.value:
+                job, _plan, is_new = await service.allocate_render_job(
+                    async_session, mission.channel_id, persisted.id, render_key
+                )
+            elif persisted.status in (
+                ProductionRequestStatus.RUNNING.value,
+                ProductionRequestStatus.SUCCEEDED.value,
+                ProductionRequestStatus.FAILED.value,
+                ProductionRequestStatus.CANCELLED.value,
+            ):
+                from sqlalchemy import select
+
+                job = (
+                    await async_session.execute(
+                        select(ProductionRenderJob).where(
+                            ProductionRenderJob.production_request_id == persisted.id,
+                            ProductionRenderJob.idempotency_key == render_key,
+                        )
+                    )
+                ).scalar_one_or_none()
+                if job is None:
+                    raise ValueError(
+                        "non-READY ProductionRequest has no deterministic RenderJob"
+                    )
+                is_new = False
+            else:
+                raise ValueError(f"unsupported ProductionRequest status: {persisted.status}")
+            output = {
+                "production_request_id": str(persisted.id),
+                "render_job_id": str(job.id),
+            }
+            if job.state in (
+                RenderJobState.PENDING.value,
+                RenderJobState.QUEUED.value,
+                RenderJobState.RUNNING.value,
+                RenderJobState.RETRY.value,
+            ):
+                return _PendingProductionResult(
+                    output,
+                    dispatch_required=is_new,
+                    channel_id=str(mission.channel_id),
+                    production_request_id=str(persisted.id),
+                    render_job_id=str(job.id),
+                )
+            if job.state == RenderJobState.SUCCEEDED.value:
+                from sqlalchemy import select
+
+                artifact = (
+                    await async_session.execute(
+                        select(MediaArtifact).where(MediaArtifact.render_job_id == job.id)
+                    )
+                ).scalar_one_or_none()
+                if (
+                    artifact is None
+                    or artifact.production_request_id != persisted.id
+                    or artifact.render_job_id != job.id
+                    or artifact.artifact_type != MediaArtifactType.VIDEO.value
+                ):
+                    raise ValueError("successful render job has no valid MediaArtifact")
+                output["media_artifact_id"] = str(artifact.id)
+                return output
+            if job.state in (RenderJobState.FAILED.value, RenderJobState.CANCELLED.value):
+                raise RuntimeError(f"render job terminal failure: {job.state}")
+            raise ValueError(f"unsupported render job state: {job.state}")
+
+    return asyncio.run(run())
+
+
 def _canonical_content_pair(
     task_input: dict[str, Any] | None, context: dict[str, Any]
 ) -> tuple[uuid.UUID, uuid.UUID]:
@@ -398,10 +601,11 @@ def execute_task(self, task_id: str) -> dict:
             "dependency_outputs": _load_dependency_outputs(session, task),
         }
 
-        # Execute canonical content through its real service adapter; all other task types
-        # retain the explicit executor-registry boundary.
+        # Execute canonical service-backed stages outside the placeholder registry.
         if task.task_type == "content_generation":
             result_output = _execute_canonical_content(task.id, task.input, context)
+        elif task.task_type == "production":
+            result_output = _execute_canonical_production(task.id, context)
         else:
             executor = default_executor_registry.get(task.task_type)
             result_output = executor.execute(
@@ -410,6 +614,45 @@ def execute_task(self, task_id: str) -> dict:
                 task_input=task.input,
                 context=context,
             )
+
+        if isinstance(result_output, _PendingProductionResult):
+            # Re-enter the worker lock hierarchy before crossing the external dispatch boundary.
+            mission = (
+                session.query(Mission).filter(Mission.id == mission_id).with_for_update().first()
+            )
+            task = session.query(Task).filter(Task.id == parsed_id).with_for_update().first()
+            pending_is_current = (
+                mission is not None
+                and task is not None
+                and mission.state == MissionState.RUNNING.value
+                and task.mission_id == mission.id
+                and task.execution_id == uuid.UUID(str(context["execution_id"]))
+                and task.task_type == "production"
+                and task.state == TaskState.RUNNING.value
+                and (
+                    task.dispatched_epoch is None
+                    or task.dispatched_epoch == mission.guardian_epoch
+                )
+            )
+            if not pending_is_current:
+                session.rollback()
+                logger.warning(
+                    "Refusing stale pending production correlation and render dispatch",
+                    task_id=task_id,
+                )
+                return {"status": "skipped", "reason": "stale_pending_production"}
+
+            task.output = dict(result_output)
+            task.updated_at = datetime.now(UTC)
+            session.commit()
+
+            if result_output.dispatch_required:
+                execute_production_render_task.delay(
+                    result_output.channel_id,
+                    result_output.production_request_id,
+                    result_output.render_job_id,
+                )
+            return {"status": "pending", "task_id": task_id}
 
         # Mark SUCCEEDED under lock
         now = datetime.now(UTC)
@@ -557,22 +800,48 @@ def execute_production_render_task(
     async def _run():
         async with AsyncWorkerSessionLocal() as session:
             from omega.application.production_render_factory import build_production_render_service
+            from omega.infrastructure.models import ProductionRequest
+
             service = build_production_render_service()
             c_id = uuid.UUID(str(channel_id))
             r_id = uuid.UUID(str(request_id))
             j_id = uuid.UUID(str(job_id))
-            art, qa_status = await service.execute_render_job(session, c_id, r_id, j_id)
-            return {
-                "status": "success",
-                "artifact_id": str(art.id) if art else None,
-                "qa_status": str(qa_status.value),
-            }
+            request = await session.get(ProductionRequest, r_id)
+            mission_execution_id = request.mission_execution_id if request else None
+            try:
+                art, qa_status = await service.execute_render_job(session, c_id, r_id, j_id)
+                result = {
+                    "status": "success",
+                    "artifact_id": str(art.id) if art else None,
+                    "qa_status": str(qa_status.value),
+                }
+                error = None
+            except Exception as exc:
+                logger.error("Background render task failed", job_id=job_id, exc_info=True)
+                result = {
+                    "status": "failed",
+                    "error": _sanitize_task_error(exc),
+                }
+                error = exc
+            return result, mission_execution_id, error
 
-    try:
-        return asyncio.run(_run())
-    except Exception as exc:
-        logger.error("Background render task failed", job_id=job_id, exc_info=True)
-        return {"status": "failed", "error": _sanitize_task_error(exc)}
+    result, mission_execution_id, _error = asyncio.run(_run())
+    if mission_execution_id:
+        from omega.infrastructure.database_sync import SyncSessionLocal
+        from omega.infrastructure.models import MissionExecution
+
+        sync_session = SyncSessionLocal()
+        try:
+            execution = (
+                sync_session.query(MissionExecution)
+                .filter(MissionExecution.id == mission_execution_id)
+                .first()
+            )
+            if execution:
+                evaluate_mission_task.delay(str(execution.mission_id), str(execution.id))
+        finally:
+            sync_session.close()
+    return result
 
 
 @celery_app.task(name="omega.guardian.process_alert_outbox")
