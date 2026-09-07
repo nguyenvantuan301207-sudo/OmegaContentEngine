@@ -389,6 +389,201 @@ def _execute_canonical_qa(task_id: uuid.UUID, context: dict[str, Any]) -> dict[s
     return asyncio.run(run())
 
 
+def _canonical_topic_id(task_input: dict[str, Any] | None) -> uuid.UUID:
+    """Parse the explicit persisted TopicCandidate authority for a canonical topic task."""
+    if not isinstance(task_input, dict):
+        raise ValueError("canonical topic input must be an object")
+    if "topic_candidate_id" not in task_input:
+        raise ValueError("canonical topic requires explicit persisted topic_candidate_id authority")
+    try:
+        return uuid.UUID(str(task_input["topic_candidate_id"]))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("canonical topic contains malformed topic_candidate_id") from exc
+
+
+def _canonical_research_topic_id(context: dict[str, Any]) -> uuid.UUID:
+    """Parse the exact direct topic_discovery dependency for canonical research."""
+    dependency_outputs = context.get("dependency_outputs")
+    if not isinstance(dependency_outputs, dict):
+        raise ValueError("dependency_outputs must be an object")
+    topic_output = dependency_outputs.get("topic_discovery")
+    if not isinstance(topic_output, dict) or "topic_candidate_id" not in topic_output:
+        raise ValueError("topic_discovery dependency with topic_candidate_id is required")
+    try:
+        return uuid.UUID(str(topic_output["topic_candidate_id"]))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("topic_discovery dependency contains malformed topic_candidate_id") from exc
+
+
+def _execute_canonical_topic(
+    task_id: uuid.UUID, task_input: dict[str, Any] | None, context: dict[str, Any]
+) -> dict[str, str]:
+    """Evaluate and select an explicit persisted topic using pinned Mission context."""
+    topic_id = _canonical_topic_id(task_input)
+    try:
+        mission_id = uuid.UUID(str(context["mission_id"]))
+        execution_id = uuid.UUID(str(context["execution_id"]))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("canonical topic requires valid mission and execution IDs") from exc
+
+    async def run() -> dict[str, str]:
+        from omega.application import topic_service
+        from omega.domain.topic import EvaluationContextMode, TopicStatus
+        from omega.infrastructure.database import AsyncWorkerSessionLocal
+        from omega.infrastructure.models import Mission, MissionExecution, Task, TopicCandidate
+
+        async with AsyncWorkerSessionLocal() as async_session:
+            task = await async_session.get(Task, task_id)
+            execution = await async_session.get(MissionExecution, execution_id)
+            mission = await async_session.get(Mission, mission_id)
+            candidate = await async_session.get(TopicCandidate, topic_id)
+            if task is None or task.mission_id != mission_id or task.execution_id != execution_id:
+                raise ValueError("topic Task MissionExecution lineage is invalid")
+            if execution is None or execution.mission_id != mission_id:
+                raise ValueError("topic MissionExecution lineage is invalid")
+            if mission is None or mission.channel_id is None:
+                raise ValueError("topic Mission channel lineage is invalid")
+            if execution.channel_dna_revision_id is None:
+                raise ValueError("topic MissionExecution is missing pinned ChannelDNARevision")
+            if candidate is None or candidate.channel_id != mission.channel_id:
+                raise ValueError("TopicCandidate channel lineage is invalid")
+
+            if candidate.status != TopicStatus.SELECTED.value:
+                await topic_service.evaluate_candidate(
+                    async_session,
+                    topic_id,
+                    mode=EvaluationContextMode.MISSION_EXECUTION,
+                    mission_execution_id=execution_id,
+                )
+                await topic_service.select_candidate(async_session, topic_id)
+
+            persisted = await async_session.get(TopicCandidate, topic_id)
+            if (
+                persisted is None
+                or persisted.channel_id != mission.channel_id
+                or persisted.status != TopicStatus.SELECTED.value
+            ):
+                raise ValueError("TopicCandidate did not reach authoritative SELECTED state")
+            return {"topic_candidate_id": str(persisted.id)}
+
+    return asyncio.run(run())
+
+
+def _execute_canonical_research(task_id: uuid.UUID, context: dict[str, Any]) -> dict[str, str]:
+    """Create/reuse and run canonical research through the persisted ResearchService lifecycle."""
+    topic_id = _canonical_research_topic_id(context)
+    try:
+        mission_id = uuid.UUID(str(context["mission_id"]))
+        execution_id = uuid.UUID(str(context["execution_id"]))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("canonical research requires valid mission and execution IDs") from exc
+
+    async def run() -> dict[str, str]:
+        from sqlalchemy import select
+
+        from omega.application import research_service
+        from omega.domain.research import ResearchRequestCreate, ResearchRequestStatus
+        from omega.domain.topic import TopicStatus
+        from omega.infrastructure.database import AsyncWorkerSessionLocal
+        from omega.infrastructure.models import (
+            Mission,
+            MissionExecution,
+            ResearchBrief,
+            ResearchRequest,
+            Task,
+            TopicCandidate,
+        )
+
+        async with AsyncWorkerSessionLocal() as async_session:
+            task = await async_session.get(Task, task_id)
+            execution = await async_session.get(MissionExecution, execution_id)
+            mission = await async_session.get(Mission, mission_id)
+            topic = await async_session.get(TopicCandidate, topic_id)
+            if task is None or task.mission_id != mission_id or task.execution_id != execution_id:
+                raise ValueError("research Task MissionExecution lineage is invalid")
+            if execution is None or execution.mission_id != mission_id:
+                raise ValueError("research MissionExecution lineage is invalid")
+            if mission is None or mission.channel_id is None:
+                raise ValueError("research Mission channel lineage is invalid")
+            if execution.channel_dna_revision_id is None:
+                raise ValueError("research MissionExecution is missing pinned ChannelDNARevision")
+            if (
+                topic is None
+                or topic.channel_id != mission.channel_id
+                or topic.status != TopicStatus.SELECTED.value
+            ):
+                raise ValueError("research TopicCandidate lineage is invalid")
+
+            identity = f"mission-research:{execution_id}:{task_id}"
+            request = (
+                await async_session.execute(
+                    select(ResearchRequest).where(
+                        ResearchRequest.mission_execution_id == execution_id,
+                        ResearchRequest.topic_candidate_id == topic_id,
+                        ResearchRequest.channel_id == mission.channel_id,
+                        ResearchRequest.metadata_["canonical_task_identity"].as_string() == identity,
+                    )
+                )
+            ).scalar_one_or_none()
+            if request is None:
+                created = await research_service.create_research_request(
+                    async_session,
+                    mission.channel_id,
+                    ResearchRequestCreate(
+                        topic_candidate_id=topic_id,
+                        mission_execution_id=execution_id,
+                        metadata={"canonical_task_identity": identity},
+                    ),
+                )
+                request = await async_session.get(ResearchRequest, created.id)
+
+            if (
+                request is None
+                or request.topic_candidate_id != topic_id
+                or request.mission_execution_id != execution_id
+                or request.channel_id != mission.channel_id
+                or dict(request.metadata_ or {}).get("canonical_task_identity") != identity
+            ):
+                raise ValueError("ResearchRequest canonical lineage is invalid")
+
+            brief = None
+            if request.status == ResearchRequestStatus.SUCCEEDED.value:
+                brief = (
+                    await async_session.execute(
+                        select(ResearchBrief).where(
+                            ResearchBrief.research_request_id == request.id,
+                            ResearchBrief.is_current.is_(True),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if brief is None:
+                    raise ValueError("successful ResearchRequest has no authoritative current brief")
+            elif request.status in (
+                ResearchRequestStatus.FAILED.value,
+                ResearchRequestStatus.CANCELLED.value,
+                ResearchRequestStatus.RUNNING.value,
+            ):
+                raise ValueError(f"ResearchRequest cannot run from state '{request.status}'")
+            else:
+                generated = await research_service.run_research(async_session, request.id)
+                brief = await async_session.get(ResearchBrief, generated.id)
+
+            if (
+                brief is None
+                or brief.research_request_id != request.id
+                or brief.topic_candidate_id != topic_id
+                or brief.channel_id != mission.channel_id
+            ):
+                raise ValueError("ResearchBrief canonical lineage is invalid")
+            return {
+                "topic_candidate_id": str(topic_id),
+                "research_request_id": str(request.id),
+                "research_brief_id": str(brief.id),
+            }
+
+    return asyncio.run(run())
+
+
 def _canonical_content_pair(
     task_input: dict[str, Any] | None, context: dict[str, Any]
 ) -> tuple[uuid.UUID, uuid.UUID]:
@@ -717,7 +912,11 @@ def execute_task(self, task_id: str) -> dict:
         }
 
         # Execute canonical service-backed stages outside the placeholder registry.
-        if task.task_type == "content_generation":
+        if task.task_type == "topic_discovery":
+            result_output = _execute_canonical_topic(task.id, task.input, context)
+        elif task.task_type == "research":
+            result_output = _execute_canonical_research(task.id, context)
+        elif task.task_type == "content_generation":
             result_output = _execute_canonical_content(task.id, task.input, context)
         elif task.task_type == "production":
             result_output = _execute_canonical_production(task.id, context)

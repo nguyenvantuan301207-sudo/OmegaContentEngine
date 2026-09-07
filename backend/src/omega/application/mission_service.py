@@ -40,8 +40,17 @@ from omega.worker.tasks import evaluate_mission_task
 logger = get_logger(service="omega-mission-service")
 
 
+def _normalize_canonical_uuid(value: object, field_name: str) -> str:
+    if not isinstance(value, (str, UUID)) or (isinstance(value, str) and not value.strip()):
+        raise ValueError(f"Canonical input {field_name} must be a valid UUID.")
+    try:
+        return str(UUID(str(value)))
+    except (ValueError, AttributeError, TypeError) as exc:
+        raise ValueError(f"Canonical input {field_name} must be a valid UUID.") from exc
+
+
 def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
-    """Copy an explicit, complete canonical content seed into the planned content task."""
+    """Copy explicit canonical authorities into their planned Mission stages."""
     metadata = mission_metadata or {}
     canonical_inputs = metadata.get("canonical_inputs")
     if canonical_inputs is None:
@@ -51,31 +60,37 @@ def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
 
     topic_supplied = "topic_candidate_id" in canonical_inputs
     research_supplied = "research_brief_id" in canonical_inputs
-    if not topic_supplied and not research_supplied:
-        return
-    if topic_supplied != research_supplied:
+    if research_supplied and not topic_supplied:
         raise ValueError(
-            "Canonical content seed requires both topic_candidate_id and research_brief_id."
+            "Canonical content seed requires topic_candidate_id with research_brief_id."
         )
 
-    normalized_seed: dict[str, str] = {}
-    for field_name in ("topic_candidate_id", "research_brief_id"):
-        value = canonical_inputs[field_name]
-        if not isinstance(value, (str, UUID)) or (isinstance(value, str) and not value.strip()):
-            raise ValueError(f"Canonical content seed {field_name} must be a valid UUID.")
-        try:
-            normalized_seed[field_name] = str(UUID(str(value)))
-        except (ValueError, AttributeError, TypeError) as exc:
-            raise ValueError(
-                f"Canonical content seed {field_name} must be a valid UUID."
-            ) from exc
+    normalized_topic_id = None
+    if topic_supplied:
+        normalized_topic_id = _normalize_canonical_uuid(
+            canonical_inputs["topic_candidate_id"], "topic_candidate_id"
+        )
+
+    normalized_brief_id = None
+    if research_supplied:
+        normalized_brief_id = _normalize_canonical_uuid(
+            canonical_inputs["research_brief_id"], "research_brief_id"
+        )
 
     for planned_task in plan.tasks:
         task_create = planned_task.task_create
-        if task_create.task_type == "content_generation":
+        if task_create.task_type == "topic_discovery" and normalized_topic_id:
             task_create.input = {
                 **(task_create.input or {}),
-                "canonical_seed": normalized_seed,
+                "topic_candidate_id": normalized_topic_id,
+            }
+        elif task_create.task_type == "content_generation" and normalized_brief_id:
+            task_create.input = {
+                **(task_create.input or {}),
+                "canonical_seed": {
+                    "topic_candidate_id": normalized_topic_id,
+                    "research_brief_id": normalized_brief_id,
+                },
             }
 
 
