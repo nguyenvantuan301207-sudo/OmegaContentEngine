@@ -9,6 +9,7 @@ from uuid import uuid4
 import pytest
 
 from omega.application import executor as executor_module
+from omega.application.durable_dispatch import DurableDispatchService
 from omega.domain.mission import MissionState
 from omega.domain.task import TaskState
 from omega.infrastructure import database_sync
@@ -99,6 +100,8 @@ def test_execute_task_supplies_dependency_outputs_without_replacing_task_input(
     )
     task.title = "Production"
     task.dispatched_epoch = 7
+    task.retry_count = 0
+    task.max_retries = 0
     upstream_output = {
         "content_request_id": "content-request-1",
         "script_version_id": "script-version-1",
@@ -123,24 +126,35 @@ def test_execute_task_supplies_dependency_outputs_without_replacing_task_input(
         RecordQuery(mission),
         RecordQuery(task),
     ]
-    executor = MagicMock()
-    executor.execute.return_value = {"production_request_id": "production-request-1"}
-    registry = MagicMock()
-    registry.get.return_value = executor
+
+    # Capture the context passed to the canonical production adapter.
+    received_context = {}
+    received_task_input = {}
+
+    def fake_canonical_production(task_id, context):
+        received_context.update(context)
+        received_task_input["value"] = task.input
+        # Return a plain dict (not _PendingProductionResult) so execute_task
+        # takes the SUCCEEDED path without calling DurableDispatchService for render.
+        return {"production_request_id": "production-request-1"}
+
+    monkeypatch.setattr(worker_tasks, "_execute_canonical_production", fake_canonical_production)
     monkeypatch.setattr(database_sync, "SyncSessionLocal", lambda: session)
+    # Monkeypatch durable dispatch so the success-path outbox enqueue is a no-op
+    monkeypatch.setattr(DurableDispatchService, "enqueue", MagicMock())
+    registry = MagicMock()
     monkeypatch.setattr(executor_module, "default_executor_registry", registry)
-    monkeypatch.setattr(worker_tasks.evaluate_mission_task, "delay", MagicMock())
 
     result = worker_tasks.execute_task.run(str(task.id))
 
     assert result == {"status": "success", "task_id": str(task.id)}
-    registry.get.assert_called_once_with("production")
-    execute_kwargs = executor.execute.call_args.kwargs
-    assert execute_kwargs["context"]["dependency_outputs"] == {
+    # canonical production adapter was used (not the registry)
+    registry.get.assert_not_called()
+    assert received_context["dependency_outputs"] == {
         "content_generation": upstream_output
     }
-    assert execute_kwargs["task_input"] is original_input
-    assert execute_kwargs["task_input"] == {
+    assert received_task_input["value"] is original_input
+    assert received_task_input["value"] == {
         "request": {"topic": "persisted-current-task-input"}
     }
     assert task.input is original_input

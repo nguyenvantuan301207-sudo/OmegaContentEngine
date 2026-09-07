@@ -10,6 +10,7 @@ import pytest
 
 from omega.application import executor as executor_module
 from omega.application import orchestrator
+from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.planner import StaticMissionPlanner
 from omega.domain.mission import MissionState
 from omega.domain.production import (
@@ -298,8 +299,8 @@ def test_execute_task_routes_qa_around_placeholder_and_preserves_input(monkeypat
     monkeypatch.setattr(worker_tasks, "_execute_canonical_qa", adapter)
     registry = MagicMock()
     monkeypatch.setattr(executor_module, "default_executor_registry", registry)
-    callback = MagicMock()
-    monkeypatch.setattr(worker_tasks.evaluate_mission_task, "delay", callback)
+    # Monkeypatch durable dispatch so the success-path outbox enqueue is a no-op
+    monkeypatch.setattr(DurableDispatchService, "enqueue", MagicMock())
 
     assert worker_tasks.execute_task.run(str(task_id))["status"] == "success"
     adapter.assert_called_once()

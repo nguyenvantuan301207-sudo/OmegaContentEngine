@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import hashlib
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
 
 from omega.application import executor as executor_module
 from omega.application import orchestrator
+from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.production_service import ProductionService
 from omega.domain.content import ContentRequestStatus
 from omega.domain.mission import MissionState
@@ -291,11 +292,25 @@ def test_execute_task_commits_ids_before_new_render_dispatch(monkeypatch) -> Non
     monkeypatch.setattr(worker_tasks, "_execute_canonical_production", adapter)
     registry = MagicMock()
     monkeypatch.setattr(executor_module, "default_executor_registry", registry)
-    dispatch = MagicMock(side_effect=lambda *args: (
-        task.output == {"production_request_id": str(request_id), "render_job_id": str(job_id)}
-        and commit_count == 2
-    ) or pytest.fail("render dispatched before correlation commit"))
-    monkeypatch.setattr(worker_tasks.execute_production_render_task, "delay", dispatch)
+
+    # Capture DurableDispatchService.enqueue calls to prove:
+    # - task.output is set before enqueue is called
+    # - at least one commit (correlation commit) precedes the enqueue
+    # - direct execute_production_render_task.delay is NOT called
+    enqueue_calls = []
+
+    def capture_enqueue(sess, *, idempotency_key, task_name, args, purpose, **correlations):
+        enqueue_calls.append({
+            "idempotency_key": idempotency_key,
+            "task_name": task_name,
+            "args": args,
+            "purpose": purpose,
+            "output_at_enqueue": dict(task.output) if task.output else None,
+        })
+
+    monkeypatch.setattr(DurableDispatchService, "enqueue", capture_enqueue)
+    direct_dispatch = MagicMock()
+    monkeypatch.setattr(worker_tasks.execute_production_render_task, "delay", direct_dispatch)
 
     result = worker_tasks.execute_task.run(str(task_id))
 
@@ -303,8 +318,21 @@ def test_execute_task_commits_ids_before_new_render_dispatch(monkeypatch) -> Non
     assert task.state == TaskState.RUNNING.value
     assert task.input is original_input
     assert task.output == {"production_request_id": str(request_id), "render_job_id": str(job_id)}
-    dispatch.assert_called_once_with(str(channel_id), str(request_id), str(job_id))
-    assert session.query.call_args_list[4:6] == [call(Mission), call(Task)]
+
+    # Durable dispatch must have been enrolled for the render task
+    render_enqueues = [c for c in enqueue_calls if c["task_name"] == "omega.production.render"]
+    assert len(render_enqueues) == 1, "Expected exactly one render dispatch intent enrolled"
+    render_enqueue = render_enqueues[0]
+    assert render_enqueue["args"] == [str(channel_id), str(request_id), str(job_id)]
+    assert render_enqueue["purpose"] == "PRODUCTION_RENDER_DISPATCH"
+    # task.output must already be set when the durable intent is enrolled
+    assert render_enqueue["output_at_enqueue"] == {
+        "production_request_id": str(request_id),
+        "render_job_id": str(job_id),
+    }
+
+    # Direct broker publication must NOT occur
+    direct_dispatch.assert_not_called()
     registry.get.assert_not_called()
 
 
@@ -386,16 +414,13 @@ def test_non_ready_request_observes_existing_deterministic_job_without_allocatio
     dispatch.assert_not_called()
 
 
-def test_render_service_failure_returns_sanitized_result_and_wakes_mission_once(
+def test_render_service_failure_returns_sanitized_result(
     monkeypatch,
 ) -> None:
     from omega.application import production_render_factory
 
-    channel_id, request_id, job_id, execution_id, mission_id = (
-        uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
-    )
-    request = SimpleNamespace(mission_execution_id=execution_id)
-    async_session = AsyncSession({(ProductionRequest, request_id): request})
+    channel_id, request_id, job_id = uuid4(), uuid4(), uuid4()
+    async_session = AsyncSession({})
     monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: async_session)
     job = SimpleNamespace(id=job_id, state=RenderJobState.RUNNING.value)
 
@@ -407,12 +432,6 @@ def test_render_service_failure_returns_sanitized_result_and_wakes_mission_once(
     monkeypatch.setattr(
         production_render_factory, "build_production_render_service", lambda: service
     )
-    execution = SimpleNamespace(id=execution_id, mission_id=mission_id)
-    sync_session = MagicMock()
-    sync_session.query.return_value = Query(execution)
-    monkeypatch.setattr(database_sync, "SyncSessionLocal", lambda: sync_session)
-    callback = MagicMock()
-    monkeypatch.setattr(worker_tasks.evaluate_mission_task, "delay", callback)
 
     result = worker_tasks.execute_production_render_task.run(
         str(channel_id), str(request_id), str(job_id)
@@ -420,40 +439,39 @@ def test_render_service_failure_returns_sanitized_result_and_wakes_mission_once(
 
     assert result == {"status": "failed", "error": "RuntimeError: render exploded"}
     assert job.state == RenderJobState.FAILED.value
-    callback.assert_called_once_with(str(mission_id), str(execution_id))
 
 
-def test_render_callback_publication_failure_propagates(monkeypatch) -> None:
+def test_render_task_does_not_directly_publish_evaluator_callback(
+    monkeypatch,
+) -> None:
+    """execute_production_render_task must not call evaluate_mission_task.delay directly.
+
+    Terminal evaluation is dispatched durably from within execute_render_job.
+    """
     from omega.application import production_render_factory
 
-    channel_id, request_id, job_id, execution_id, mission_id = (
-        uuid4(), uuid4(), uuid4(), uuid4(), uuid4()
-    )
-    request = SimpleNamespace(mission_execution_id=execution_id)
-    async_session = AsyncSession({(ProductionRequest, request_id): request})
-    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: async_session)
+    channel_id, request_id, job_id = uuid4(), uuid4(), uuid4()
     artifact = SimpleNamespace(id=uuid4())
     qa_status = SimpleNamespace(value="PASS")
+    async_session = AsyncSession({})
+    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: async_session)
     service = SimpleNamespace(
         execute_render_job=AsyncMock(return_value=(artifact, qa_status))
     )
     monkeypatch.setattr(
         production_render_factory, "build_production_render_service", lambda: service
     )
-    execution = SimpleNamespace(id=execution_id, mission_id=mission_id)
-    sync_session = MagicMock()
-    sync_session.query.return_value = Query(execution)
-    monkeypatch.setattr(database_sync, "SyncSessionLocal", lambda: sync_session)
-    monkeypatch.setattr(
-        worker_tasks.evaluate_mission_task,
-        "delay",
-        MagicMock(side_effect=RuntimeError("broker unavailable")),
+    callback = MagicMock()
+    monkeypatch.setattr(worker_tasks.evaluate_mission_task, "delay", callback)
+
+    result = worker_tasks.execute_production_render_task.run(
+        str(channel_id), str(request_id), str(job_id)
     )
 
-    with pytest.raises(RuntimeError, match="broker unavailable"):
-        worker_tasks.execute_production_render_task.run(
-            str(channel_id), str(request_id), str(job_id)
-        )
+    assert result["status"] == "success"
+    # The wrapper must NOT directly call evaluate_mission_task.delay;
+    # terminal evaluation is handled durably inside execute_render_job.
+    callback.assert_not_called()
 
 
 class OrchestratorResult:

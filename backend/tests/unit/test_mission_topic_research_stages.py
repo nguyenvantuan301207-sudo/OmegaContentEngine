@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 import pytest
 
 from omega.application import executor as executor_module
+from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.mission_service import _enrich_canonical_content_seed
 from omega.application.planner import StaticMissionPlanner
 from omega.domain.mission import MissionState
@@ -168,7 +169,8 @@ def test_execute_task_routes_canonical_stages_around_placeholder(monkeypatch, ta
     monkeypatch.setattr(worker_tasks, "_execute_canonical_topic", topic_adapter)
     monkeypatch.setattr(worker_tasks, "_execute_canonical_research", research_adapter)
     monkeypatch.setattr(executor_module, "default_executor_registry", registry)
-    monkeypatch.setattr(worker_tasks.evaluate_mission_task, "delay", MagicMock())
+    # Monkeypatch durable dispatch so the success-path outbox enqueue is a no-op
+    monkeypatch.setattr(DurableDispatchService, "enqueue", MagicMock())
 
     result = worker_tasks.execute_task.run(str(task_id))
 

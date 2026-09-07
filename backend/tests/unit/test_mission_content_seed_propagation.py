@@ -20,7 +20,7 @@ def task_inputs(plan) -> dict[str, dict | None]:
     return {task.task_create.task_type: task.task_create.input for task in plan.tasks}
 
 
-def test_complete_seed_is_normalized_and_copied_only_to_content_task() -> None:
+def test_complete_seed_is_normalized_and_propagated_to_canonical_stages() -> None:
     topic_id = uuid4()
     research_id = uuid4()
     metadata = {
@@ -37,19 +37,29 @@ def test_complete_seed_is_normalized_and_copied_only_to_content_task() -> None:
     _enrich_canonical_content_seed(plan, metadata)
 
     inputs = task_inputs(plan)
+
+    assert inputs["topic_discovery"] == {
+        "topic_candidate_id": str(topic_id),
+    }
     assert inputs["content_generation"] == {
         "canonical_seed": {
             "topic_candidate_id": str(topic_id),
             "research_brief_id": str(research_id),
         }
     }
+
+    assert UUID(inputs["topic_discovery"]["topic_candidate_id"])
     assert UUID(inputs["content_generation"]["canonical_seed"]["topic_candidate_id"])
     assert UUID(inputs["content_generation"]["canonical_seed"]["research_brief_id"])
+
+    assert "unrelated" not in inputs["topic_discovery"]
     assert "unrelated" not in inputs["content_generation"]
+
     assert metadata == original_metadata
     assert metadata["canonical_inputs"]["research_brief_id"] is research_id
+
     for task_type, task_input in inputs.items():
-        if task_type != "content_generation":
+        if task_type not in ("topic_discovery", "content_generation"):
             assert task_input == original_inputs[task_type]
 
 
@@ -67,7 +77,6 @@ def test_absent_seed_preserves_canonical_task_inputs(metadata) -> None:
 @pytest.mark.parametrize(
     "canonical_inputs",
     [
-        {"topic_candidate_id": str(uuid4())},
         {"research_brief_id": str(uuid4())},
     ],
 )
@@ -75,10 +84,24 @@ def test_partial_seed_fails_closed(canonical_inputs) -> None:
     plan = make_plan()
     original_inputs = deepcopy(task_inputs(plan))
 
-    with pytest.raises(ValueError, match="requires both"):
+    with pytest.raises(ValueError, match="requires"):
         _enrich_canonical_content_seed(plan, {"canonical_inputs": canonical_inputs})
 
     assert task_inputs(plan) == original_inputs
+
+
+def test_topic_candidate_id_alone_is_valid_authority() -> None:
+    topic_id = uuid4()
+    plan = make_plan()
+
+    _enrich_canonical_content_seed(
+        plan, {"canonical_inputs": {"topic_candidate_id": str(topic_id)}}
+    )
+
+    inputs = task_inputs(plan)
+    assert inputs["topic_discovery"] == {"topic_candidate_id": str(topic_id)}
+    # content_generation receives nothing when research_brief_id is absent
+    assert inputs["content_generation"] == {}
 
 
 @pytest.mark.parametrize("malformed_topic_id", ["not-a-uuid", "", "   ", 123, None])

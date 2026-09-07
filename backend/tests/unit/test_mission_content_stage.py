@@ -11,6 +11,7 @@ import pytest
 
 from omega.application import content_service
 from omega.application import executor as executor_module
+from omega.application.durable_dispatch import DurableDispatchService
 from omega.domain.content import ContentRequestStatus
 from omega.domain.mission import MissionState
 from omega.domain.task import TaskState
@@ -320,7 +321,8 @@ def test_execute_task_routes_canonical_content_around_placeholder_and_preserves_
     monkeypatch.setattr(database_sync, "SyncSessionLocal", lambda: session)
     monkeypatch.setattr(worker_tasks, "_execute_canonical_content", adapter)
     monkeypatch.setattr(executor_module, "default_executor_registry", registry)
-    monkeypatch.setattr(worker_tasks.evaluate_mission_task, "delay", MagicMock())
+    # Monkeypatch durable dispatch so the success-path outbox enqueue is a no-op
+    monkeypatch.setattr(DurableDispatchService, "enqueue", MagicMock())
 
     result = worker_tasks.execute_task.run(str(task_id))
 
