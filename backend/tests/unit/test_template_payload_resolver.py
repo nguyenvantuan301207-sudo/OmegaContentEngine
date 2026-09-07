@@ -76,6 +76,54 @@ def test_flow_diagram_resolve(resolver, scene_base):
     ]
 
 
+def test_flow_diagram_resolves_sealed_conceptual_text(resolver, scene_base):
+    scene_base.visual_strategy = VisualStrategy.DIAGRAM
+    scene_base.narration_excerpt = (
+        "The system architecture and workflow pipeline consists of many different "
+        "components processing the various data stages."
+    )
+    direction = VisualDirection(
+        scene_index=1,
+        render_mode=VisualRenderMode.TEMPLATE,
+        template_id=VisualTemplateId.FLOW_DIAGRAM,
+        asset_requirements=[],
+        motion_profile="sequential_flow",
+        rationale="",
+    )
+
+    payload = resolver.resolve(scene_base, direction)
+
+    assert payload.inputs[TemplateInputKey.NODES] == [
+        "system architecture",
+        "workflow pipeline",
+        "components",
+        "data stages",
+    ]
+
+
+def test_flow_diagram_resolves_independent_lowercase_concepts(resolver, scene_base):
+    scene_base.visual_strategy = VisualStrategy.DIAGRAM
+    scene_base.narration_excerpt = (
+        "The request flow moves through processing stages into service components."
+    )
+    direction = VisualDirection(
+        scene_index=1,
+        render_mode=VisualRenderMode.TEMPLATE,
+        template_id=VisualTemplateId.FLOW_DIAGRAM,
+        asset_requirements=[],
+        motion_profile="sequential_flow",
+        rationale="",
+    )
+
+    payload = resolver.resolve(scene_base, direction)
+
+    assert payload.inputs[TemplateInputKey.NODES] == [
+        "request flow",
+        "processing stages",
+        "service components",
+    ]
+
+
 def test_statistic_hero_resolve(resolver, scene_base):
     scene_base.visual_strategy = VisualStrategy.STATISTIC
     scene_base.narration_excerpt = "72% of teams reduced average latency after adopting caching."
@@ -129,7 +177,7 @@ def test_image_explainer_resolve(resolver, scene_base):
 
 
 def test_diagram_without_nodes_fails(resolver, scene_base):
-    scene_base.narration_excerpt = "something simple"
+    scene_base.narration_excerpt = "the weather is pleasant and people enjoy lunch"
     direction = VisualDirection(
         scene_index=1,
         render_mode=VisualRenderMode.TEMPLATE,

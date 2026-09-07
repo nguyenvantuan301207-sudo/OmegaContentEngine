@@ -200,6 +200,20 @@ class TemplatePayloadResolver:
             if node and node not in ("The", "A", "An") and node not in raw_nodes:
                 raw_nodes.append(node)
 
+        if len(raw_nodes) < 2:
+            conceptual_pattern = re.compile(
+                r"\b(?:"
+                r"(?:system|software|service|data|network|request|event|ingestion|processing|delivery|deployment|workflow)\s+"
+                r"(?:architecture|workflow|pipeline|process|flow|relationship|components?|stages?)"
+                r"|architecture|workflow|pipeline|process|flow|relationship|components?|stages?"
+                r")\b",
+                re.IGNORECASE,
+            )
+            for match in conceptual_pattern.finditer(text):
+                node = match.group(0).strip().lower()
+                if node not in raw_nodes:
+                    raw_nodes.append(node)
+
         nodes = raw_nodes[:5]
         edges = []
         for i in range(len(nodes) - 1):

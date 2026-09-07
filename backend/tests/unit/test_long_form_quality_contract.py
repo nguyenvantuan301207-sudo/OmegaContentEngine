@@ -1,7 +1,10 @@
 from types import SimpleNamespace
 
+from omega.application.scene_template_registry import TemplateInputKey
 from omega.application.storyboard_engine import StoryboardEngine, VisualStrategy
 from omega.application.subtitle_engine import generate_karaoke_cues
+from omega.application.template_payload_resolver import TemplatePayloadResolver
+from omega.application.visual_direction import VisualDirector, VisualTemplateId
 from omega.application.visual_production_v2_service import ScriptStoryboardAdapter
 
 
@@ -128,6 +131,15 @@ def test_long_form_fixture_contract():
     assert strategies.count(VisualStrategy.IMAGE) == 1
     assert strategies.count(VisualStrategy.DIAGRAM) == 1
     assert strategies.count(VisualStrategy.INFOGRAPHIC) == 1
+
+    diagram_scene = next(
+        scene for scene in plan.scenes
+        if scene.visual_strategy == VisualStrategy.DIAGRAM
+    )
+    direction = VisualDirector().resolve(diagram_scene)
+    payload = TemplatePayloadResolver().resolve(diagram_scene, direction)
+    assert payload.template_id == VisualTemplateId.FLOW_DIAGRAM
+    assert len(payload.inputs[TemplateInputKey.NODES]) >= 2
 
     # EXPECTED_GEMINI_CALLS = storyboard scene count
     assert len(plan.scenes) == 6
