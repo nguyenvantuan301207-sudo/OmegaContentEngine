@@ -960,14 +960,29 @@ def execute_task(self, task_id: str) -> dict:
 
             task.output = dict(result_output)
             task.updated_at = datetime.now(UTC)
-            session.commit()
-
             if result_output.dispatch_required:
-                execute_production_render_task.delay(
-                    result_output.channel_id,
-                    result_output.production_request_id,
-                    result_output.render_job_id,
+                from omega.application.durable_dispatch import DurableDispatchService
+
+                DurableDispatchService.enqueue(
+                    session,
+                    idempotency_key=(
+                        "render-dispatch:"
+                        f"{result_output.production_request_id}:{result_output.render_job_id}"
+                    ),
+                    task_name="omega.production.render",
+                    args=[
+                        result_output.channel_id,
+                        result_output.production_request_id,
+                        result_output.render_job_id,
+                    ],
+                    purpose="PRODUCTION_RENDER_DISPATCH",
+                    mission_id=task.mission_id,
+                    mission_execution_id=task.execution_id,
+                    mission_task_id=task.id,
+                    production_request_id=uuid.UUID(result_output.production_request_id),
+                    render_job_id=uuid.UUID(result_output.render_job_id),
                 )
+            session.commit()
             return {"status": "pending", "task_id": task_id}
 
         # Mark SUCCEEDED under lock
@@ -980,26 +995,32 @@ def execute_task(self, task_id: str) -> dict:
             task.completed_at = now
             task.updated_at = now
 
-            session.add(
-                DecisionLog(
-                    mission_id=task.mission_id,
-                    execution_id=task.execution_id,
-                    task_id=task.id,
-                    decision_type=DecisionType.TASK_SUCCEEDED.value,
-                    decision=f"Task '{task.title}' succeeded",
-                    reason="Executor returned successfully",
-                    actor=Actor.WORKER.value,
-                )
+            decision = DecisionLog(
+                mission_id=task.mission_id,
+                execution_id=task.execution_id,
+                task_id=task.id,
+                decision_type=DecisionType.TASK_SUCCEEDED.value,
+                decision=f"Task '{task.title}' succeeded",
+                reason="Executor returned successfully",
+                actor=Actor.WORKER.value,
+            )
+            session.add(decision)
+            session.flush()
+            from omega.application.durable_dispatch import DurableDispatchService
+
+            DurableDispatchService.enqueue(
+                session,
+                idempotency_key=f"mission-evaluation:{task.execution_id}:{decision.id}",
+                task_name="omega.orchestrator.evaluate",
+                args=[str(task.mission_id), str(task.execution_id) if task.execution_id else ""],
+                purpose="MISSION_TASK_TERMINAL_EVALUATION",
+                mission_id=task.mission_id,
+                mission_execution_id=task.execution_id,
+                mission_task_id=task.id,
             )
             session.commit()
 
             logger.info("Task completed successfully", task_id=task_id)
-
-            # Trigger sync orchestrator evaluation in background Celery queue
-            evaluate_mission_task.delay(
-                str(task.mission_id),
-                str(task.execution_id) if task.execution_id else "",
-            )
 
         return {"status": "success", "task_id": task_id}
 
@@ -1057,13 +1078,22 @@ def execute_task(self, task_id: str) -> dict:
                         )
                     )
 
-                session.commit()
+                from omega.application.durable_dispatch import DurableDispatchService
 
-                # Trigger orchestrator evaluation to handle retry or failure propagation
-                evaluate_mission_task.delay(
-                    str(task.mission_id),
-                    str(task.execution_id) if task.execution_id else "",
+                DurableDispatchService.enqueue(
+                    session,
+                    idempotency_key=(
+                        f"mission-evaluation:{task.execution_id}:{task.id}:"
+                        f"{task.state}:{task.retry_count}"
+                    ),
+                    task_name="omega.orchestrator.evaluate",
+                    args=[str(task.mission_id), str(task.execution_id) if task.execution_id else ""],
+                    purpose="MISSION_TASK_FAILURE_EVALUATION",
+                    mission_id=task.mission_id,
+                    mission_execution_id=task.execution_id,
+                    mission_task_id=task.id,
                 )
+                session.commit()
 
         except Exception:
             logger.error("Failed to persist task error state", task_id=task_id, exc_info=True)
@@ -1116,48 +1146,43 @@ def execute_production_render_task(
     async def _run():
         async with AsyncWorkerSessionLocal() as session:
             from omega.application.production_render_factory import build_production_render_service
-            from omega.infrastructure.models import ProductionRequest
 
             service = build_production_render_service()
             c_id = uuid.UUID(str(channel_id))
             r_id = uuid.UUID(str(request_id))
             j_id = uuid.UUID(str(job_id))
-            request = await session.get(ProductionRequest, r_id)
-            mission_execution_id = request.mission_execution_id if request else None
             try:
                 art, qa_status = await service.execute_render_job(session, c_id, r_id, j_id)
-                result = {
+                return {
                     "status": "success",
                     "artifact_id": str(art.id) if art else None,
                     "qa_status": str(qa_status.value),
                 }
-                error = None
             except Exception as exc:
                 logger.error("Background render task failed", job_id=job_id, exc_info=True)
-                result = {
+                return {
                     "status": "failed",
                     "error": _sanitize_task_error(exc),
                 }
-                error = exc
-            return result, mission_execution_id, error
 
-    result, mission_execution_id, _error = asyncio.run(_run())
-    if mission_execution_id:
-        from omega.infrastructure.database_sync import SyncSessionLocal
-        from omega.infrastructure.models import MissionExecution
+    return asyncio.run(_run())
 
-        sync_session = SyncSessionLocal()
-        try:
-            execution = (
-                sync_session.query(MissionExecution)
-                .filter(MissionExecution.id == mission_execution_id)
-                .first()
-            )
-            if execution:
-                evaluate_mission_task.delay(str(execution.mission_id), str(execution.id))
-        finally:
-            sync_session.close()
-    return result
+
+@celery_app.task(name="omega.dispatch.relay")
+def durable_dispatch_relay_task() -> dict[str, int | str]:
+    """Publish one bounded batch of persisted generic dispatch intents."""
+    from omega.application.durable_dispatch import DurableDispatchService
+    from omega.infrastructure.database_sync import SyncSessionLocal
+
+    session = SyncSessionLocal()
+    try:
+        return {"status": "success", **DurableDispatchService.relay_batch(session, publisher=celery_app)}
+    except Exception:
+        session.rollback()
+        logger.error("Durable dispatch relay failed", exc_info=True)
+        return {"status": "error", "claimed": 0, "sent": 0, "retried": 0, "dead_letter": 0}
+    finally:
+        session.close()
 
 
 @celery_app.task(name="omega.guardian.process_alert_outbox")

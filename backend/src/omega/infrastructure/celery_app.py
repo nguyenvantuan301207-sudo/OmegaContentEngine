@@ -28,6 +28,11 @@ celery_app.conf.update(
     worker_hijack_root_logger=False,
     broker_connection_retry_on_startup=True,
     beat_schedule={
+        "durable-dispatch-relay": {
+            "task": "omega.dispatch.relay",
+            "schedule": 5.0,
+            "options": {"expires": 15},
+        },
         "schedule-dispatch-sweep": {
             "task": "omega.scheduler.dispatch_sweep",
             "schedule": 10.0,

@@ -67,6 +67,67 @@ class Job(Base):
         return f"<Job id={self.id} type={self.job_type} state={self.state}>"
 
 
+class DurableDispatchIntent(Base):
+    """Generic transactional intent for deferred Celery publication."""
+
+    __tablename__ = "durable_dispatch_intents"
+    __table_args__ = (
+        CheckConstraint(
+            "state IN ('PENDING', 'CLAIMED', 'RETRY', 'SENT', 'DEAD_LETTER')",
+            name="ck_durable_dispatch_intents_state",
+        ),
+        Index(
+            "idx_durable_dispatch_intents_relay",
+            "state",
+            "next_attempt_at",
+            "created_at",
+        ),
+        Index(
+            "idx_durable_dispatch_intents_claim_recovery",
+            "state",
+            "claimed_at",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    task_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    args: Mapped[list] = mapped_column(JSON, nullable=False, default=list, server_default="[]")
+    purpose: Mapped[str] = mapped_column(String(100), nullable=False)
+    state: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=5)
+    next_attempt_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claimed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    claim_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    sent_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    mission_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("missions.id", ondelete="SET NULL"), nullable=True
+    )
+    mission_execution_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mission_executions.id", ondelete="SET NULL"), nullable=True
+    )
+    mission_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="SET NULL"), nullable=True
+    )
+    production_request_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("production_requests.id", ondelete="SET NULL"), nullable=True
+    )
+    render_job_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("production_render_jobs.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    def __repr__(self) -> str:
+        return f"<DurableDispatchIntent id={self.id} task={self.task_name} state={self.state}>"
+
+
 # ── OMEGA-003 Channel Manager Models ──
 
 

@@ -366,49 +366,24 @@ async def evaluate_mission(
                         )
                     )
 
-    await session.commit()
+    from omega.application.durable_dispatch import DurableDispatchService
 
-    # 6. Dispatch queued tasks to Celery
-    from omega.worker.tasks import execute_task
-
-    dispatched_count = 0
     for task in tasks_to_dispatch:
-        try:
-            execute_task.delay(str(task.id))
-            dispatched_count += 1
-            logger.info(
-                "Dispatched task to worker queue",
-                task_id=str(task.id),
-                mission_id=str(mission_id),
-                task_type=task.task_type,
-            )
-        except Exception as exc:
-            logger.error(
-                "Celery broker dispatch failed for task",
-                task_id=str(task.id),
-                mission_id=str(mission_id),
-                exc_info=True,
-            )
-            failed_task_res = await session.execute(
-                select(Task).where(Task.id == task.id).with_for_update()
-            )
-            failed_task = failed_task_res.scalar_one_or_none()
-            if failed_task:
-                failed_task.state = TaskState.FAILED.value
-                failed_task.error = _sanitize_error(exc)
-                failed_task.updated_at = datetime.now(UTC)
-                session.add(
-                    DecisionLog(
-                        mission_id=mission_id,
-                        execution_id=current_execution_id,
-                        task_id=task.id,
-                        decision_type=DecisionType.TASK_FAILED.value,
-                        decision=f"Mark task {task.title} FAILED on dispatch failure",
-                        reason=f"Broker dispatch exception: {_sanitize_error(exc)}",
-                        actor=Actor.ORCHESTRATOR.value,
-                    )
-                )
-                await session.commit()
+        await DurableDispatchService.enqueue_async(
+            session,
+            idempotency_key=(
+                f"mission-task-dispatch:{current_execution_id}:{task.id}"
+                f":{task.retry_count}:{mission.guardian_epoch}"
+            ),
+            task_name="omega.tasks.execute",
+            args=[str(task.id)],
+            purpose="MISSION_TASK_DISPATCH",
+            mission_id=mission_id,
+            mission_execution_id=current_execution_id,
+            mission_task_id=task.id,
+        )
+    await session.commit()
+    dispatched_count = len(tasks_to_dispatch)
 
     # 7. Check overall Mission completion or unrecoverable failure predicates
     fresh_tasks_res = await session.execute(
@@ -794,38 +769,24 @@ def evaluate_mission_sync(
                     )
                 )
 
-    session.commit()
+    from omega.application.durable_dispatch import DurableDispatchService
 
-    # 6. Dispatch queued tasks to Celery
-    from omega.worker.tasks import execute_task
-
-    dispatched_count = 0
     for task in tasks_to_dispatch:
-        try:
-            execute_task.delay(str(task.id))
-            dispatched_count += 1
-            logger.info("Dispatched task to worker queue (sync)", task_id=str(task.id))
-        except Exception as exc:
-            logger.error(
-                "Celery broker dispatch failed for task (sync)", task_id=str(task.id), exc_info=True
-            )
-            failed_task = session.query(Task).filter(Task.id == task.id).with_for_update().first()
-            if failed_task:
-                failed_task.state = TaskState.FAILED.value
-                failed_task.error = _sanitize_error(exc)
-                failed_task.updated_at = datetime.now(UTC)
-                session.add(
-                    DecisionLog(
-                        mission_id=mission_id,
-                        execution_id=current_execution_id,
-                        task_id=task.id,
-                        decision_type=DecisionType.TASK_FAILED.value,
-                        decision=f"Mark task {task.title} FAILED on dispatch failure",
-                        reason=f"Broker dispatch exception: {_sanitize_error(exc)}",
-                        actor=Actor.ORCHESTRATOR.value,
-                    )
-                )
-                session.commit()
+        DurableDispatchService.enqueue(
+            session,
+            idempotency_key=(
+                f"mission-task-dispatch:{current_execution_id}:{task.id}"
+                f":{task.retry_count}:{mission.guardian_epoch}"
+            ),
+            task_name="omega.tasks.execute",
+            args=[str(task.id)],
+            purpose="MISSION_TASK_DISPATCH",
+            mission_id=mission_id,
+            mission_execution_id=current_execution_id,
+            mission_task_id=task.id,
+        )
+    session.commit()
+    dispatched_count = len(tasks_to_dispatch)
 
     # 7. Check mission completion or failure predicates
     all_current_tasks = (

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.ffmpeg_renderer import FFmpegRenderer
 from omega.application.media_probe import MediaProbe
 from omega.application.media_storage import LocalMediaStorageProvider, compute_sha256
@@ -97,6 +99,7 @@ class ProductionRenderService:
                 ProductionRenderJob.id == job_id,
                 ProductionRenderJob.production_request_id == request_id,
             )
+            .with_for_update()
             .options(
                 selectinload(ProductionRenderJob.render_plan),
                 selectinload(ProductionRenderJob.production_request)
@@ -125,18 +128,27 @@ class ProductionRenderService:
         if not job:
             raise ValueError(f"Render job {job_id} not found.")
 
-        # Check for duplicate execution / idempotent no-op
+        # Persisted state is the sole duplicate-delivery authority under row lock.
         if job.state == RenderJobState.SUCCEEDED.value:
-            # Check existing artifact
             art_stmt = select(MediaArtifact).where(MediaArtifact.render_job_id == job.id)
             art_res = await session.execute(art_stmt)
             art = art_res.scalar_one_or_none()
+            await session.rollback()
             return art, ProductionQAStatus.PASSED
+        if job.state == RenderJobState.RUNNING.value:
+            await session.rollback()
+            return None, ProductionQAStatus.PENDING
+        if job.state in (RenderJobState.FAILED.value, RenderJobState.CANCELLED.value):
+            await session.rollback()
+            return None, ProductionQAStatus.BLOCKED
+        if job.state not in (RenderJobState.QUEUED.value, RenderJobState.RETRY.value):
+            await session.rollback()
+            return None, ProductionQAStatus.PENDING
 
         prod_req = job.production_request
         mission_id = await self._resolve_mission_id(session, prod_req)
 
-        # PRE_RENDER Guardian gate check
+        # PRE_RENDER Guardian gate check — must run BEFORE persisting RUNNING
         if mission_id:
             try:
                 from omega.application.guardian.engine import GuardianEngine
@@ -188,7 +200,9 @@ class ProductionRenderService:
                 )
                 return None, ProductionQAStatus.BLOCKED
 
+        # All pre-render checks passed — now persist RUNNING before entering render phase.
         job.state = RenderJobState.RUNNING.value
+        job.started_at = job.started_at or datetime.now(UTC)
         await session.commit()
 
         # Extract snapshot data for phase 2 execution
@@ -543,12 +557,13 @@ class ProductionRenderService:
                 )
             )
 
-            # 6. Update RenderJob to SUCCEEDED
+            # 6. Update RenderJob to SUCCEEDED and atomically persist its evaluator wake-up.
             await session.execute(
                 update(ProductionRenderJob)
                 .where(ProductionRenderJob.id == job_id)
                 .values(state=RenderJobState.SUCCEEDED.value)
             )
+            await self._enqueue_terminal_evaluation(session, prod_req, job_id)
 
             await session.commit()
             await session.refresh(media_art)
@@ -853,6 +868,35 @@ class ProductionRenderService:
         )
         await proc.communicate()
 
+    async def _enqueue_terminal_evaluation(
+        self,
+        session: AsyncSession,
+        request: ProductionRequest,
+        job_id: uuid.UUID,
+    ) -> None:
+        """Persist the Mission evaluator wake-up in the render terminal transaction."""
+        execution_id = request.mission_execution_id
+        if execution_id is None:
+            return
+        mission_id = (
+            await session.execute(
+                select(MissionExecution.mission_id).where(MissionExecution.id == execution_id)
+            )
+        ).scalar_one_or_none()
+        if mission_id is None:
+            return
+        await DurableDispatchService.enqueue_async(
+            session,
+            idempotency_key=f"render-terminal-evaluation:{request.id}:{job_id}",
+            task_name="omega.orchestrator.evaluate",
+            args=[str(mission_id), str(execution_id)],
+            purpose="RENDER_TERMINAL_EVALUATION",
+            mission_id=mission_id,
+            mission_execution_id=execution_id,
+            production_request_id=request.id,
+            render_job_id=job_id,
+        )
+
     async def _record_job_failure(
         self,
         session: AsyncSession,
@@ -862,6 +906,13 @@ class ProductionRenderService:
     ) -> None:
         """Record failed render job state in a short transaction."""
         try:
+            request_id = (
+                await session.execute(
+                    select(ProductionRenderJob.production_request_id).where(
+                        ProductionRenderJob.id == job_id
+                    )
+                )
+            ).scalar_one_or_none()
             await session.execute(
                 update(ProductionRenderJob)
                 .where(ProductionRenderJob.id == job_id)
@@ -871,6 +922,10 @@ class ProductionRenderService:
                     sanitized_error=error_msg[:1000],
                 )
             )
+            if request_id is not None:
+                request = await session.get(ProductionRequest, request_id)
+                if request is not None:
+                    await self._enqueue_terminal_evaluation(session, request, job_id)
             await session.commit()
         except Exception:
             await session.rollback()
