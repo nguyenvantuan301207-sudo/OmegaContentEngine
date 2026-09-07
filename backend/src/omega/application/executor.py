@@ -60,7 +60,7 @@ class TestExecutor(TaskExecutor):
 
 
 class GenericWorkflowExecutor(TaskExecutor):
-    """Generic workflow node executor for placeholder stages (e.g. strategy, script)."""
+    """Generic workflow node executor retained for repository-compatible unknown tasks."""
 
     def execute(
         self,
@@ -75,6 +75,32 @@ class GenericWorkflowExecutor(TaskExecutor):
             "task_id": str(task_id),
             "summary": f"Placeholder execution for stage '{task_type}' completed successfully.",
         }
+
+
+class ExplicitMissionStageExecutor(TaskExecutor):
+    """Provider-free adapter boundary for an explicitly registered Mission stage."""
+
+    def execute(
+        self,
+        task_id: UUID,
+        task_type: str,
+        task_input: dict[str, Any] | None,
+        context: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "stage": task_type,
+            "status": "success",
+            "task_id": str(task_id),
+            "summary": f"Placeholder execution for stage '{task_type}' completed successfully.",
+        }
+
+
+class StrategyExecutor(ExplicitMissionStageExecutor):
+    """Bounded Mission-context strategy stage with placeholder execution semantics."""
+
+
+class PublishExecutor(ExplicitMissionStageExecutor):
+    """Explicit placeholder boundary for the canonical Mission publish stage."""
 
 
 class TopicIntelligenceExecutor(TaskExecutor):
@@ -153,6 +179,10 @@ class ProductionEngineExecutor(TaskExecutor):
         }
 
 
+class MissionQAExecutor(ProductionEngineExecutor):
+    """Explicit placeholder boundary for the canonical Mission QA stage."""
+
+
 class TaskExecutorRegistry:
     """Registry mapping task_type strings to TaskExecutor instances."""
 
@@ -160,7 +190,17 @@ class TaskExecutorRegistry:
         self._executors: dict[str, TaskExecutor] = {}
         self._default_executor: TaskExecutor = GenericWorkflowExecutor()
 
-        # Register standard built-in generic executors
+        # Register canonical Mission stages explicitly. These adapters intentionally
+        # retain placeholder semantics until service-backed execution is wired.
+        self.register("strategy", StrategyExecutor())
+        self.register("topic_discovery", TopicIntelligenceExecutor())
+        self.register("research", ResearchEngineExecutor())
+        self.register("content_generation", ContentEngineExecutor())
+        self.register("production", ProductionEngineExecutor())
+        self.register("qa", MissionQAExecutor())
+        self.register("publish", PublishExecutor())
+
+        # Register standard built-in and legacy workflow executors.
         self.register("system.noop", NoopExecutor())
         self.register("system.test", TestExecutor())
         self.register("topic.evaluate", TopicIntelligenceExecutor())
