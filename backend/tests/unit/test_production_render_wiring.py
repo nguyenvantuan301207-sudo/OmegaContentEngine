@@ -1,8 +1,10 @@
-from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import pytest
 
+from omega.api import production
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.production_render_factory import (
     ProductionVisualV2Adapter,
@@ -10,6 +12,7 @@ from omega.application.production_render_factory import (
 )
 from omega.application.render_service import ProductionRenderService
 from omega.infrastructure.models import ProductionRequest
+from omega.worker import tasks
 
 
 def test_factory_missing_pexels_api_key(monkeypatch):
@@ -22,6 +25,7 @@ def test_factory_missing_pexels_api_key(monkeypatch):
     assert service.visual_production_service is not None
     assert isinstance(service.visual_production_service, ProductionVisualV2Adapter)
 
+
 def test_factory_shared_storage():
     storage = LocalMediaStorageProvider(base_root="test")
     service = build_production_render_service(storage=storage)
@@ -29,6 +33,7 @@ def test_factory_shared_storage():
     # 2. Factory uses one shared LocalMediaStorageProvider instance
     assert service.storage is storage
     assert service.visual_production_service.storage is storage
+
 
 def test_factory_selection_logic():
     service = build_production_render_service()
@@ -40,6 +45,7 @@ def test_factory_selection_logic():
     req_mission = ProductionRequest(mode="MISSION_EXECUTION")
     assert service._should_use_v2(req_mission) is True
 
+
 @pytest.mark.asyncio
 async def test_lazy_adapter_missing_api_key(monkeypatch):
     monkeypatch.delenv("PEXELS_API_KEY", raising=False)
@@ -49,6 +55,7 @@ async def test_lazy_adapter_missing_api_key(monkeypatch):
     # 4. Lazy adapter with missing PEXELS_API_KEY raises
     with pytest.raises(ValueError, match="PEXELS_API_KEY missing for Visual V2 production"):
         await adapter.render_mission_execution()
+
 
 @pytest.mark.asyncio
 async def test_lazy_adapter_successful_wiring(monkeypatch, tmp_path):
@@ -116,6 +123,7 @@ async def test_lazy_adapter_successful_wiring(monkeypatch, tmp_path):
     # 6. Provider closed on success
     mock_provider.close.assert_called_once()
 
+
 @pytest.mark.asyncio
 async def test_lazy_adapter_provider_close_on_exception(monkeypatch):
     monkeypatch.setenv("PEXELS_API_KEY", "test-key")
@@ -145,53 +153,145 @@ async def test_lazy_adapter_provider_close_on_exception(monkeypatch):
     mock_provider.close.assert_called_once()
 
 
-def test_fastapi_render_wiring():
-    # 8. FastAPI _get_render_service() returns configured adapter
-    from omega.api.production import _get_render_service
-    service = _get_render_service()
-    assert isinstance(service, ProductionRenderService)
-    assert isinstance(service.visual_production_service, ProductionVisualV2Adapter)
+@pytest.mark.parametrize(
+    ("endpoint", "is_rerender"),
+    [
+        (production.render_production, False),
+        (production.rerender_production, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_new_render_job_is_allocated_and_published_once(
+    monkeypatch,
+    endpoint,
+    is_rerender,
+):
+    channel_id = uuid4()
+    request_id = uuid4()
+    job = SimpleNamespace(id=uuid4(), state="QUEUED")
+    prod_service = SimpleNamespace(
+        allocate_render_job=AsyncMock(return_value=(job, object(), True))
+    )
+    publish = MagicMock()
+    monkeypatch.setattr(production.execute_production_render_task, "delay", publish)
 
-def test_celery_render_wiring():
-    # 9. Celery production-render service construction
-
-    # Read the tasks file
-    tasks_path = Path("src/omega/worker/tasks.py")
-    if not tasks_path.exists():
-        tasks_path = Path("backend/src/omega/worker/tasks.py") # fallback for local execution
-
-    content = tasks_path.read_text()
-
-    # Verify build_production_render_service is in the file and called
-    assert "build_production_render_service()" in content
-    assert "from omega.application.production_render_factory import build_production_render_service" in content
-
-def test_api_render_rerender_wiring():
-    """Both production render endpoints use the same render-service dependency."""
-    from typing import Annotated, get_args, get_origin, get_type_hints
-
-    from fastapi.params import Depends as DependsParam
-
-    from omega.api.production import (
-        _get_render_service,
-        render_production,
-        rerender_production,
+    result = await endpoint(
+        channel_id=channel_id,
+        request_id=request_id,
+        payload=SimpleNamespace(idempotency_key="render-key"),
+        session=MagicMock(),
+        prod_service=prod_service,
     )
 
-    def render_service_dependency(func):
-        hints = get_type_hints(func, include_extras=True)
-        annotation = hints["render_service"]
+    assert result is job
+    assert result.state == "QUEUED"
+    prod_service.allocate_render_job.assert_awaited_once_with(
+        session=prod_service.allocate_render_job.await_args.kwargs["session"],
+        channel_id=channel_id,
+        request_id=request_id,
+        idempotency_key="render-key",
+        is_rerender=is_rerender,
+    )
+    publish.assert_called_once_with(str(channel_id), str(request_id), str(job.id))
 
-        assert get_origin(annotation) is Annotated
 
-        dependencies = [
-            metadata
-            for metadata in get_args(annotation)[1:]
-            if isinstance(metadata, DependsParam)
-        ]
+@pytest.mark.asyncio
+async def test_idempotent_render_replay_does_not_publish(monkeypatch):
+    job = SimpleNamespace(id=uuid4(), state="QUEUED")
+    prod_service = SimpleNamespace(
+        allocate_render_job=AsyncMock(return_value=(job, object(), False))
+    )
+    publish = MagicMock()
+    monkeypatch.setattr(production.execute_production_render_task, "delay", publish)
 
-        assert len(dependencies) == 1
-        return dependencies[0].dependency
+    result = await production.render_production(
+        channel_id=uuid4(),
+        request_id=uuid4(),
+        payload=SimpleNamespace(idempotency_key="existing-key"),
+        session=MagicMock(),
+        prod_service=prod_service,
+    )
 
-    assert render_service_dependency(render_production) is _get_render_service
-    assert render_service_dependency(rerender_production) is _get_render_service
+    assert result is job
+    publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_publication_failure_is_not_silently_converted_to_success(monkeypatch):
+    job = SimpleNamespace(id=uuid4(), state="QUEUED")
+    prod_service = SimpleNamespace(
+        allocate_render_job=AsyncMock(return_value=(job, object(), True))
+    )
+    monkeypatch.setattr(
+        production.execute_production_render_task,
+        "delay",
+        MagicMock(side_effect=RuntimeError("broker unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        await production.render_production(
+            channel_id=uuid4(),
+            request_id=uuid4(),
+            payload=SimpleNamespace(idempotency_key="render-key"),
+            session=MagicMock(),
+            prod_service=prod_service,
+        )
+
+
+class _WorkerSessionContext:
+    def __init__(self, session):
+        self.session = session
+
+    async def __aenter__(self):
+        return self.session
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+def test_worker_render_task_uses_async_worker_session_and_existing_service(monkeypatch):
+    channel_id = uuid4()
+    request_id = uuid4()
+    job_id = uuid4()
+    artifact = SimpleNamespace(id=uuid4())
+    qa_status = SimpleNamespace(value="PASSED")
+    session = object()
+    session_factory = MagicMock(return_value=_WorkerSessionContext(session))
+    render_service = SimpleNamespace(
+        execute_render_job=AsyncMock(return_value=(artifact, qa_status))
+    )
+    service_factory = MagicMock(return_value=render_service)
+
+    monkeypatch.setattr(
+        "omega.infrastructure.database.AsyncWorkerSessionLocal",
+        session_factory,
+    )
+    monkeypatch.setattr(
+        "omega.application.production_render_factory.build_production_render_service",
+        service_factory,
+    )
+
+    result = tasks.execute_production_render_task.run(
+        str(channel_id),
+        str(request_id),
+        str(job_id),
+    )
+
+    session_factory.assert_called_once_with()
+    service_factory.assert_called_once_with()
+    render_service.execute_render_job.assert_awaited_once_with(
+        session,
+        channel_id,
+        request_id,
+        job_id,
+    )
+    assert result == {
+        "status": "success",
+        "artifact_id": str(artifact.id),
+        "qa_status": "PASSED",
+    }
+
+
+def test_render_task_has_no_celery_retry_policy():
+    assert tasks.execute_production_render_task.name == "omega.production.render"
+    assert getattr(tasks.execute_production_render_task, "autoretry_for", ()) == ()

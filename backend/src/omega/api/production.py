@@ -12,13 +12,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.media_storage import LocalMediaStorageProvider, StorageSecurityError
-from omega.application.production_render_factory import build_production_render_service
 from omega.application.production_service import (
     ProductionLineageError,
     ProductionService,
     ProductionStateError,
 )
-from omega.application.render_service import ProductionRenderService
 from omega.domain.production import (
     MediaArtifactResponse,
     NarrationSegmentResponse,
@@ -46,6 +44,7 @@ from omega.infrastructure.models import (
     RenderPlan,
     SubtitleCue,
 )
+from omega.worker.tasks import execute_production_render_task
 
 logger = structlog.get_logger()
 
@@ -54,10 +53,6 @@ router = APIRouter(prefix="/api/v1/channels/{channel_id}/production", tags=["Pro
 
 def _get_production_service() -> ProductionService:
     return ProductionService()
-
-
-def _get_render_service() -> ProductionRenderService:
-    return build_production_render_service()
 
 
 def _get_storage_provider() -> LocalMediaStorageProvider:
@@ -298,7 +293,6 @@ async def render_production(
     payload: ProductionRenderPayload,
     session: Annotated[AsyncSession, Depends(get_async_session)],
     prod_service: Annotated[ProductionService, Depends(_get_production_service)],
-    render_service: Annotated[ProductionRenderService, Depends(_get_render_service)],
 ) -> ProductionRenderJob:
     try:
         job, _, is_new = await prod_service.allocate_render_job(
@@ -312,18 +306,11 @@ async def render_production(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     if is_new:
-        # Execute render synchronously in local environment (or dispatch Celery task)
-        try:
-            await render_service.execute_render_job(
-                session=session,
-                channel_id=channel_id,
-                request_id=request_id,
-                job_id=job.id,
-            )
-            await session.refresh(job)
-        except Exception as exc:
-            logger.error("Render failed synchronously", error=str(exc), exc_info=True)
-            await session.refresh(job)
+        execute_production_render_task.delay(
+            str(channel_id),
+            str(request_id),
+            str(job.id),
+        )
 
     return job
 
@@ -340,7 +327,6 @@ async def rerender_production(
     payload: ProductionRerenderPayload,
     session: Annotated[AsyncSession, Depends(get_async_session)],
     prod_service: Annotated[ProductionService, Depends(_get_production_service)],
-    render_service: Annotated[ProductionRenderService, Depends(_get_render_service)],
 ) -> ProductionRenderJob:
     try:
         job, _, is_new = await prod_service.allocate_render_job(
@@ -354,16 +340,11 @@ async def rerender_production(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
     if is_new:
-        try:
-            await render_service.execute_render_job(
-                session=session,
-                channel_id=channel_id,
-                request_id=request_id,
-                job_id=job.id,
-            )
-            await session.refresh(job)
-        except Exception:
-            await session.refresh(job)
+        execute_production_render_task.delay(
+            str(channel_id),
+            str(request_id),
+            str(job.id),
+        )
 
     return job
 

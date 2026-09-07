@@ -335,7 +335,7 @@ def execute_production_render_task(
     """Asynchronous background rendering task using ProductionRenderService."""
     import asyncio
 
-    from omega.infrastructure.database import async_session_factory
+    from omega.infrastructure.database import AsyncWorkerSessionLocal
 
     logger.info(
         "Starting background render task",
@@ -345,7 +345,7 @@ def execute_production_render_task(
     )
 
     async def _run():
-        async with async_session_factory() as session:
+        async with AsyncWorkerSessionLocal() as session:
             from omega.application.production_render_factory import build_production_render_service
             service = build_production_render_service()
             c_id = uuid.UUID(str(channel_id))
