@@ -8,6 +8,8 @@ See docs/decisions/001-foundation-architecture.md for rationale.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import time
 import uuid
 from datetime import UTC, datetime
@@ -67,6 +69,174 @@ def _load_dependency_outputs(session: Any, task: Any) -> dict[str, dict]:
         dependency_outputs[upstream_task.task_type] = upstream_task.output
 
     return dependency_outputs
+
+
+def _canonical_content_pair(
+    task_input: dict[str, Any] | None, context: dict[str, Any]
+) -> tuple[uuid.UUID, uuid.UUID]:
+    """Resolve and normalize the canonical topic/research-brief handoff."""
+
+    def parse_source(source: Any, label: str, *, absent_is_empty: bool) -> tuple[uuid.UUID, uuid.UUID] | None:
+        if source is None and absent_is_empty:
+            return None
+        if not isinstance(source, dict):
+            raise ValueError(f"{label} must be an object")
+        present = {key for key in ("topic_candidate_id", "research_brief_id") if key in source}
+        if not present:
+            if absent_is_empty:
+                return None
+            raise ValueError(f"{label} must supply both canonical correlation IDs")
+        if len(present) != 2:
+            raise ValueError(f"{label} must supply both canonical correlation IDs")
+        try:
+            return (
+                uuid.UUID(str(source["topic_candidate_id"])),
+                uuid.UUID(str(source["research_brief_id"])),
+            )
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError(f"{label} contains malformed UUID correlation") from exc
+
+    dependency_outputs = context.get("dependency_outputs")
+    if not isinstance(dependency_outputs, dict):
+        raise ValueError("dependency_outputs must be an object")
+    dependency_pair = parse_source(
+        dependency_outputs.get("research"), "research dependency output", absent_is_empty=True
+    )
+
+    if task_input is not None and not isinstance(task_input, dict):
+        raise ValueError("task_input must be an object")
+    seed_present = isinstance(task_input, dict) and "canonical_seed" in task_input
+    seed_pair = parse_source(
+        task_input.get("canonical_seed") if isinstance(task_input, dict) else None,
+        "canonical_seed",
+        absent_is_empty=not seed_present,
+    )
+
+    if dependency_pair and seed_pair and dependency_pair != seed_pair:
+        raise ValueError("research dependency output and canonical_seed correlation mismatch")
+    pair = dependency_pair or seed_pair
+    if pair is None:
+        raise ValueError("canonical content correlation pair is required")
+    return pair
+
+
+def _execute_canonical_content(
+    task_id: uuid.UUID, task_input: dict[str, Any] | None, context: dict[str, Any]
+) -> dict[str, str]:
+    """Run canonical Mission content through the existing async ContentService lifecycle."""
+    topic_id, brief_id = _canonical_content_pair(task_input, context)
+    try:
+        mission_id = uuid.UUID(str(context["mission_id"]))
+        execution_id = uuid.UUID(str(context["execution_id"]))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("canonical content requires valid mission and execution IDs") from exc
+
+    async def run() -> dict[str, str]:
+        from sqlalchemy import select
+
+        from omega.application import content_service
+        from omega.domain.content import ContentGenerationRequestCreate, ContentRequestStatus
+        from omega.domain.topic import TopicStatus
+        from omega.infrastructure.database import AsyncWorkerSessionLocal
+        from omega.infrastructure.models import (
+            ContentGenerationRequest,
+            Mission,
+            MissionExecution,
+            ResearchBrief,
+            ResearchRequest,
+            ScriptVersion,
+            TopicCandidate,
+        )
+
+        async with AsyncWorkerSessionLocal() as async_session:
+            execution = await async_session.get(MissionExecution, execution_id)
+            if execution is None or execution.mission_id != mission_id:
+                raise ValueError("task MissionExecution lineage is invalid")
+            mission = await async_session.get(Mission, mission_id)
+            if mission is None or mission.channel_id is None:
+                raise ValueError("Mission channel lineage is invalid")
+            if execution.channel_dna_revision_id is None:
+                raise ValueError("MissionExecution is missing pinned ChannelDNARevision")
+
+            topic = await async_session.get(TopicCandidate, topic_id)
+            if (
+                topic is None
+                or topic.channel_id != mission.channel_id
+                or topic.status != TopicStatus.SELECTED.value
+            ):
+                raise ValueError("TopicCandidate is not valid for Mission content generation")
+
+            brief = await async_session.get(ResearchBrief, brief_id)
+            if (
+                brief is None
+                or brief.topic_candidate_id != topic_id
+                or brief.channel_id != mission.channel_id
+            ):
+                raise ValueError("ResearchBrief does not match the canonical topic/channel")
+            research_request = await async_session.get(ResearchRequest, brief.research_request_id)
+            if (
+                research_request is None
+                or research_request.topic_candidate_id != topic_id
+                or research_request.channel_id != mission.channel_id
+                or research_request.mission_execution_id != execution_id
+            ):
+                raise ValueError("ResearchBrief parent request MissionExecution lineage is invalid")
+
+            idempotency_key = hashlib.sha256(
+                f"mission-content:{execution_id}:{task_id}".encode()
+            ).hexdigest()
+            request_in = ContentGenerationRequestCreate(
+                topic_candidate_id=topic_id,
+                research_brief_id=brief_id,
+                mission_execution_id=execution_id,
+            )
+            request = await content_service.create_request(
+                async_session, mission.channel_id, request_in, idempotency_key=idempotency_key
+            )
+            persisted_request = await async_session.get(ContentGenerationRequest, request.id)
+            if (
+                persisted_request is None
+                or persisted_request.mission_execution_id != execution_id
+                or persisted_request.channel_id != mission.channel_id
+                or persisted_request.topic_candidate_id != topic_id
+                or persisted_request.research_brief_id != brief_id
+                or persisted_request.channel_dna_revision_id != execution.channel_dna_revision_id
+            ):
+                raise ValueError("ContentGenerationRequest lineage is invalid")
+
+            script = None
+            if persisted_request.status == ContentRequestStatus.SUCCEEDED.value:
+                script = (
+                    await async_session.execute(
+                        select(ScriptVersion).where(
+                            ScriptVersion.content_request_id == persisted_request.id,
+                            ScriptVersion.is_current.is_(True),
+                        )
+                    )
+                ).scalar_one_or_none()
+                if script is None:
+                    raise ValueError("successful content request has no authoritative current script")
+            elif persisted_request.status in (
+                ContentRequestStatus.FAILED.value,
+                ContentRequestStatus.CANCELLED.value,
+            ):
+                raise ValueError(f"content request is terminal: {persisted_request.status}")
+            else:
+                generated = await content_service.generate_content(
+                    async_session, mission.channel_id, persisted_request.id
+                )
+                script = await async_session.get(ScriptVersion, generated.id)
+
+            if script is None or script.content_request_id != persisted_request.id:
+                raise ValueError("ScriptVersion does not belong to ContentGenerationRequest")
+            return {
+                "content_request_id": str(persisted_request.id),
+                "script_version_id": str(script.id),
+                "topic_candidate_id": str(topic_id),
+                "research_brief_id": str(brief_id),
+            }
+
+    return asyncio.run(run())
 
 
 # ── OMEGA-001 Foundation Task (Preserved) ──
@@ -222,20 +392,24 @@ def execute_task(self, task_id: str) -> dict:
         session.commit()
 
         # Resolve executor and hydrate canonical direct-dependency correlation outputs.
-        executor = default_executor_registry.get(task.task_type)
         context = {
             "mission_id": str(task.mission_id),
             "execution_id": str(task.execution_id) if task.execution_id else None,
             "dependency_outputs": _load_dependency_outputs(session, task),
         }
 
-        # Execute
-        result_output = executor.execute(
-            task_id=task.id,
-            task_type=task.task_type,
-            task_input=task.input,
-            context=context,
-        )
+        # Execute canonical content through its real service adapter; all other task types
+        # retain the explicit executor-registry boundary.
+        if task.task_type == "content_generation":
+            result_output = _execute_canonical_content(task.id, task.input, context)
+        else:
+            executor = default_executor_registry.get(task.task_type)
+            result_output = executor.execute(
+                task_id=task.id,
+                task_type=task.task_type,
+                task_input=task.input,
+                context=context,
+            )
 
         # Mark SUCCEEDED under lock
         now = datetime.now(UTC)
