@@ -12,7 +12,6 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from omega.application.orchestrator import evaluate_mission
 from omega.application.planner import StaticMissionPlanner
 from omega.domain.channel import ChannelState
 from omega.domain.decision import Actor, DecisionLogResponse, DecisionType
@@ -36,6 +35,7 @@ from omega.infrastructure.models import (
     TaskDependency,
 )
 from omega.logging import get_logger
+from omega.worker.tasks import evaluate_mission_task
 
 logger = get_logger(service="omega-mission-service")
 
@@ -304,8 +304,11 @@ async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
     await session.commit()
     logger.info("Mission started", mission_id=str(mission.id))
 
-    # 3. Trigger initial Orchestrator evaluation
-    await evaluate_mission(session, mission.id, execution.id if execution else None)
+    # 3. Publish initial Orchestrator evaluation after the RUNNING state commit
+    evaluate_mission_task.delay(
+        str(mission.id),
+        str(execution.id) if execution else "",
+    )
 
     # Reload fresh state
     fresh_res = await session.execute(select(Mission).where(Mission.id == mission_id))
@@ -502,8 +505,11 @@ async def resume_mission(
         "Mission safely resumed", mission_id=str(mission.id), guardian_epoch=mission.guardian_epoch
     )
 
-    # Trigger orchestrator evaluation
-    await evaluate_mission(session, mission.id, execution.id if execution else None)
+    # Publish Orchestrator evaluation after the resumed RUNNING state commit
+    evaluate_mission_task.delay(
+        str(mission.id),
+        str(execution.id) if execution else "",
+    )
 
     fresh_res = await session.execute(select(Mission).where(Mission.id == mission_id))
     return MissionResponse.model_validate(fresh_res.scalar_one())
