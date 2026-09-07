@@ -40,6 +40,45 @@ from omega.worker.tasks import evaluate_mission_task
 logger = get_logger(service="omega-mission-service")
 
 
+def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
+    """Copy an explicit, complete canonical content seed into the planned content task."""
+    metadata = mission_metadata or {}
+    canonical_inputs = metadata.get("canonical_inputs")
+    if canonical_inputs is None:
+        return
+    if not isinstance(canonical_inputs, dict):
+        raise ValueError("Mission metadata canonical_inputs must be an object.")
+
+    topic_supplied = "topic_candidate_id" in canonical_inputs
+    research_supplied = "research_brief_id" in canonical_inputs
+    if not topic_supplied and not research_supplied:
+        return
+    if topic_supplied != research_supplied:
+        raise ValueError(
+            "Canonical content seed requires both topic_candidate_id and research_brief_id."
+        )
+
+    normalized_seed: dict[str, str] = {}
+    for field_name in ("topic_candidate_id", "research_brief_id"):
+        value = canonical_inputs[field_name]
+        if not isinstance(value, (str, UUID)) or (isinstance(value, str) and not value.strip()):
+            raise ValueError(f"Canonical content seed {field_name} must be a valid UUID.")
+        try:
+            normalized_seed[field_name] = str(UUID(str(value)))
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise ValueError(
+                f"Canonical content seed {field_name} must be a valid UUID."
+            ) from exc
+
+    for planned_task in plan.tasks:
+        task_create = planned_task.task_create
+        if task_create.task_type == "content_generation":
+            task_create.input = {
+                **(task_create.input or {}),
+                "canonical_seed": normalized_seed,
+            }
+
+
 async def create_mission(session: AsyncSession, mission_in: MissionCreate) -> MissionResponse:
     """Create a new mission in DRAFT state with optional channel association."""
     # 1. Channel validation
@@ -193,6 +232,7 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
         mission_objective=mission.objective,
         autonomy_level=mission.autonomy_level,
     )
+    _enrich_canonical_content_seed(plan, mission.metadata_)
 
     # 4. Persist planned tasks associated with this execution_id
     temp_id_to_real_id: dict[UUID, UUID] = {}
