@@ -34,6 +34,41 @@ def _sanitize_task_error(error: Exception) -> str:
     return f"{error_type}: {message}"
 
 
+def _load_dependency_outputs(session: Any, task: Any) -> dict[str, dict]:
+    """Load and validate canonical outputs from a task's direct dependencies."""
+    from omega.domain.task import TaskState
+    from omega.infrastructure.models import Task, TaskDependency
+
+    dependency_rows = (
+        session.query(TaskDependency, Task)
+        .outerjoin(Task, Task.id == TaskDependency.depends_on_task_id)
+        .filter(TaskDependency.task_id == task.id)
+        .order_by(Task.task_type, Task.id)
+        .all()
+    )
+
+    dependency_outputs: dict[str, dict] = {}
+    for dependency, upstream_task in dependency_rows:
+        if upstream_task is None:
+            raise RuntimeError("Direct dependency references a missing upstream task")
+        if dependency.mission_id != task.mission_id or upstream_task.mission_id != task.mission_id:
+            raise RuntimeError("Direct dependency belongs to a different mission")
+        if upstream_task.execution_id != task.execution_id:
+            raise RuntimeError("Direct dependency belongs to a different mission execution")
+        if upstream_task.state != TaskState.SUCCEEDED.value:
+            raise RuntimeError("Direct dependency is not SUCCEEDED")
+        if not isinstance(upstream_task.task_type, str) or not upstream_task.task_type.strip():
+            raise RuntimeError("Direct dependency has no deterministic task_type identity")
+        if not isinstance(upstream_task.output, dict):
+            raise RuntimeError("Direct dependency output is malformed")
+        if upstream_task.task_type in dependency_outputs:
+            raise RuntimeError("Duplicate direct dependency task_type is ambiguous")
+
+        dependency_outputs[upstream_task.task_type] = upstream_task.output
+
+    return dependency_outputs
+
+
 # ── OMEGA-001 Foundation Task (Preserved) ──
 
 
@@ -186,11 +221,12 @@ def execute_task(self, task_id: str) -> dict:
         task.updated_at = now
         session.commit()
 
-        # Resolve executor
+        # Resolve executor and hydrate canonical direct-dependency correlation outputs.
         executor = default_executor_registry.get(task.task_type)
         context = {
             "mission_id": str(task.mission_id),
             "execution_id": str(task.execution_id) if task.execution_id else None,
+            "dependency_outputs": _load_dependency_outputs(session, task),
         }
 
         # Execute
