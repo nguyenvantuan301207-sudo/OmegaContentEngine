@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -18,6 +18,7 @@ from omega.application.analytics.adapters.base import (
 from omega.application.analytics.computed_service import ComputedMetricsService
 from omega.application.analytics.ingestion_service import AnalyticsIngestionService
 from omega.application.analytics.learning_service import LearningExportService
+from omega.application.analytics.normalizer import AnalyticsNormalizer
 from omega.application.analytics.poll_service import AnalyticsPollService
 from omega.domain.analytics import (
     AnalyticsErrorCategory,
@@ -253,6 +254,154 @@ async def sample_analytics_fixtures(db_session: AsyncSession):
     }
 
 
+# ── P11-A Recovery & Window Lifecycle Tests ───────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_recovery_creates_one_asset_and_reuses_deterministic_windows(
+    db_session: AsyncSession, sample_analytics_fixtures
+):
+    fix = sample_analytics_fixtures
+    original_asset = fix["asset"]
+    intent = fix["intent"]
+    attempt = fix["attempt"]
+    attempt.provider_video_id = f"recovery-{attempt.id.hex}"
+    published_at = datetime(1900, 1, 1, tzinfo=UTC)
+    attempt.completed_at = published_at
+    await db_session.delete(original_asset)
+    await db_session.commit()
+
+    first = await AnalyticsPollService.recover_published_assets(db_session, limit=1)
+    await db_session.commit()
+    assert len(first) == 1
+    recovered_asset_id = first[0].id
+
+    second = await AnalyticsPollService.recover_published_assets(db_session, limit=50)
+    await db_session.commit()
+
+    # A14: test-owned asset was retired by exact-lineage match — not returned again
+    second_ids = {a.id for a in second}
+    assert recovered_asset_id not in second_ids
+
+    # Test-owned canonical provider/content still has exactly one AnalyticsAsset
+    assets = (
+        await db_session.execute(
+            select(AnalyticsAsset).where(
+                AnalyticsAsset.provider == "YOUTUBE",
+                AnalyticsAsset.provider_video_id == attempt.provider_video_id,
+                AnalyticsAsset.publish_intent_id == intent.id,
+                AnalyticsAsset.publish_attempt_id == attempt.id,
+            )
+        )
+    ).scalars().all()
+    assert len(assets) == 1
+    assert assets[0].id == recovered_asset_id
+    assert assets[0].published_at == published_at
+
+    # Exactly one window per type for THIS asset
+    windows = (
+        await db_session.execute(
+            select(AnalyticsWindow).where(AnalyticsWindow.asset_id == recovered_asset_id)
+        )
+    ).scalars().all()
+    by_type = {
+        window_type: [window for window in windows if window.window_type == window_type]
+        for window_type in (WindowType.FIRST_24H.value, WindowType.FIRST_7D.value)
+    }
+    assert all(len(type_windows) == 1 for type_windows in by_type.values())
+    assert by_type[WindowType.FIRST_24H.value][0].window_end_utc == published_at + timedelta(
+        hours=24
+    )
+    assert by_type[WindowType.FIRST_7D.value][0].window_end_utc == published_at + timedelta(
+        days=7
+    )
+    assert all(window.window_state == WindowState.PROVISIONAL.value for window in windows)
+
+
+@pytest.mark.asyncio
+async def test_recovery_conflicting_provider_lineage_fails_closed(
+    db_session: AsyncSession, sample_analytics_fixtures
+):
+    fix = sample_analytics_fixtures
+    original_attempt = fix["attempt"]
+    conflicting_attempt = PublishAttempt(
+        id=uuid4(),
+        publish_intent_id=fix["intent"].id,
+        attempt_number=2,
+        idempotency_key=f"conflicting_attempt_{uuid4().hex}",
+        state="SUCCEEDED",
+        provider_video_id=original_attempt.provider_video_id,
+        provider_url=original_attempt.provider_url,
+        completed_at=datetime(1900, 1, 2, tzinfo=UTC),
+    )
+    try:
+        db_session.add(conflicting_attempt)
+        await db_session.flush()  # Validate real FKs without committing the conflict fixture.
+        with pytest.raises(ValueError, match="conflicts with authoritative publish lineage"):
+            await AnalyticsPollService._recover_publish_attempt_candidate(
+                db_session, conflicting_attempt, fix["intent"]
+            )
+    finally:
+        await db_session.rollback()  # Retire only this test's uncommitted conflict.
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_finalizes_only_ended_p11_windows(
+    db_session: AsyncSession, sample_analytics_fixtures
+):
+    fix = sample_analytics_fixtures
+    ended = fix["window"]
+    future = await AnalyticsPollService.create_or_get_active_window(
+        db_session, fix["asset"], WindowType.FIRST_7D
+    )
+    ended_id = ended.id
+    future_id = future.id
+    ended.window_end_utc = datetime.now(UTC) - timedelta(minutes=1)
+    future.window_end_utc = datetime.now(UTC) + timedelta(days=1)
+    await db_session.commit()
+
+    now_utc = (await db_session.execute(select(func.now()))).scalar_one()
+    assert AnalyticsPollService._finalize_window_if_eligible(ended, now_utc) is True
+    assert AnalyticsPollService._finalize_window_if_eligible(future, now_utc) is False
+    await db_session.commit()
+    await db_session.refresh(ended)
+    await db_session.refresh(future)
+
+    ended = await db_session.get(AnalyticsWindow, ended_id)
+    future = await db_session.get(AnalyticsWindow, future_id)
+    assert ended is not None
+    assert ended.window_state == WindowState.FINALIZED.value
+    assert ended.finalized_at is not None
+    assert future is not None
+    assert future.window_state == WindowState.PROVISIONAL.value
+    assert future.finalized_at is None
+
+
+@pytest.mark.asyncio
+async def test_deep_report_normalization_preserves_nullable_quality():
+    facts = AnalyticsNormalizer.normalize_analytics_report_payload(
+        {
+            "columnHeaders": [
+                {"name": "estimatedMinutesWatched"},
+                {"name": "averageViewDuration"},
+            ],
+            "rows": [[None, 0]],
+        },
+        uuid4(),
+        uuid4(),
+        datetime.now(UTC),
+    )
+    by_metric = {fact.metric_name: fact for fact in facts}
+
+    missing = by_metric["watch_time_seconds"]
+    assert missing.numeric_value is None
+    assert missing.integer_value is None
+    assert missing.metric_quality.value == "UNKNOWN_MISSING"
+    confirmed_zero = by_metric["average_view_duration_seconds"]
+    assert confirmed_zero.numeric_value == 0.0
+    assert confirmed_zero.metric_quality.value == "ZERO_CONFIRMED"
+
+
 # ── Identity & Deduplication Tests ─────────────────────────────────────────────
 
 
@@ -327,7 +476,15 @@ async def test_same_poll_job_delivered_twice_yields_one_raw_snapshot(
         AnalyticsProviderSnapshot.poll_execution_key == poll_exec_key
     )
     all_snaps = (await db_session.execute(stmt)).scalars().all()
+    observations = (
+        await db_session.execute(
+            select(AnalyticsMetricObservation).where(
+                AnalyticsMetricObservation.snapshot_id == snap1.id
+            )
+        )
+    ).scalars().all()
     assert len(all_snaps) == 1
+    assert all(observation.revision_sequence == 1 for observation in observations)
 
 
 @pytest.mark.asyncio

@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from omega.application.analytics.adapters.base import ProviderFetchResult
 from omega.application.analytics.capabilities import MetricCapabilityRegistry
+from omega.application.analytics.poll_service import AnalyticsPollService
 from omega.application.analytics.quota_service import QuotaService
 from omega.application.network.preflight import NetworkPreflightService
 from omega.application.publisher.oauth_service import YOUTUBE_ANALYTICS_SCOPE, OAuthService
@@ -20,6 +25,7 @@ from omega.domain.analytics import (
     MetricQuality,
     WindowState,
     WindowType,
+    compute_payload_checksum,
 )
 from omega.domain.network import (
     NetworkAction,
@@ -355,6 +361,121 @@ async def test_missing_analytics_scope_degrades_without_breaking_publisher(
     )
     assert not is_valid
     assert quality == MetricQuality.PERMISSION_DENIED
+
+
+@pytest.mark.asyncio
+async def test_missing_scope_skips_deep_provider_but_leaves_public_path_available(
+    db_session: AsyncSession, setup_api_asset, monkeypatch: pytest.MonkeyPatch
+):
+    account = setup_api_asset["account"]
+    asset = setup_api_asset["asset"]
+    account.scopes = [
+        "https://www.googleapis.com/auth/youtube.upload",
+        "https://www.googleapis.com/auth/youtube.readonly",
+    ]
+    await db_session.commit()
+    report_mock = AsyncMock()
+    batch_mock = AsyncMock()
+    monkeypatch.setattr(
+        "omega.application.analytics.poll_service.YouTubeAnalyticsAdapter.fetch_video_report",
+        report_mock,
+    )
+    monkeypatch.setattr(
+        "omega.application.analytics.poll_service.YouTubeAnalyticsAdapter.fetch_video_batch",
+        batch_mock,
+    )
+
+    result = await AnalyticsPollService.execute_asset_report(db_session, asset.id)
+
+    assert result == {
+        "status": "not_ready",
+        "category": "AUTH_SCOPE_MISSING",
+        "metric_quality": MetricQuality.PERMISSION_DENIED.value,
+    }
+    report_mock.assert_not_awaited()
+    batch_mock.assert_not_awaited()
+    public_valid, public_quality = MetricCapabilityRegistry.validate_metric_request(
+        provider="YOUTUBE",
+        canonical_metric_name="views",
+        api_source="DATA_API_V3",
+        report_type="VIDEOS_LIST",
+        dimensions=[],
+        account_scopes=account.scopes,
+    )
+    assert public_valid
+    assert public_quality == MetricQuality.AVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_deep_report_preflight_and_quota_gate_before_report_io(
+    db_session: AsyncSession, setup_api_asset, monkeypatch: pytest.MonkeyPatch
+):
+    asset = setup_api_asset["asset"]
+    events: list[str] = []
+    permit = NetworkEgressPermit(
+        network_check_id=uuid4(),
+        route_id=uuid4(),
+        route_config_version=1,
+        canonical_destination="https://youtubeanalytics.googleapis.com",
+        service_category=ServiceCategory.YOUTUBE_API,
+        issued_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+    )
+
+    async def preflight(*_args, **_kwargs):
+        events.append("preflight")
+        return SimpleNamespace(), permit
+
+    original_get_bucket = QuotaService.get_or_create_bucket
+
+    async def get_bucket(*args, **kwargs):
+        events.append("quota")
+        return await original_get_bucket(*args, **kwargs)
+
+    async def fetch_report(*_args, **kwargs):
+        events.append("report")
+        assert kwargs["permit"] is permit
+        return ProviderFetchResult(
+            api_endpoint="YOUTUBE_ANALYTICS_REPORTS",
+            request_params={"metrics": kwargs["metrics"]},
+            raw_payload={
+                "columnHeaders": [{"name": "estimatedMinutesWatched"}],
+                "rows": [[None]],
+            },
+            payload_checksum=compute_payload_checksum(b"deep-report-null"),
+            http_status=200,
+            retrieval_timestamp=datetime.now(UTC),
+        )
+
+    monkeypatch.setattr(NetworkPreflightService, "preflight", preflight)
+    monkeypatch.setattr(QuotaService, "get_or_create_bucket", get_bucket)
+    report_mock = AsyncMock(side_effect=fetch_report)
+    batch_mock = AsyncMock()
+    monkeypatch.setattr(
+        "omega.application.analytics.poll_service.YouTubeAnalyticsAdapter.fetch_video_report",
+        report_mock,
+    )
+    monkeypatch.setattr(
+        "omega.application.analytics.poll_service.YouTubeAnalyticsAdapter.fetch_video_batch",
+        batch_mock,
+    )
+
+    result = await AnalyticsPollService.execute_asset_report(db_session, asset.id)
+
+    assert result["status"] == "success"
+    assert events[:3] == ["preflight", "quota", "report"]
+    report_mock.assert_awaited_once()
+    batch_mock.assert_not_awaited()
+    observation = (
+        await db_session.execute(
+            select(AnalyticsMetricObservation).where(
+                AnalyticsMetricObservation.asset_id == asset.id,
+                AnalyticsMetricObservation.metric_name == "watch_time_seconds",
+            )
+        )
+    ).scalar_one()
+    assert observation.numeric_value is None
+    assert observation.metric_quality == MetricQuality.UNKNOWN_MISSING.value
 
 
 @pytest.mark.asyncio
