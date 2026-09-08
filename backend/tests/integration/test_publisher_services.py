@@ -35,8 +35,10 @@ from omega.infrastructure.models import (
     ChannelDNARevision,
     ContentGenerationRequest,
     CredentialVault,
+    DurableDispatchIntent,
     MediaArtifact,
     Mission,
+    MissionExecution,
     NetworkProfile,
     NetworkRoute,
     PlatformAccount,
@@ -196,19 +198,28 @@ async def setup_publisher_fixtures(db_session: AsyncSession):
     )
     db_session.add(mission)
 
+    # Media Artifact with full ancestry
+    art_hash = "f" * 64
+    artifact = await create_artifact_with_ancestry(db_session, channel.id, art_hash)
+
+    execution = MissionExecution(
+        id=uuid4(),
+        mission_id=mission.id,
+        state="RUNNING",
+        trigger_type="MANUAL",
+    )
+    db_session.add(execution)
+
     # Task
     task = Task(
         id=uuid4(),
         mission_id=mission.id,
+        execution_id=execution.id,
         task_type="PUBLISH_VIDEO",
         title="Publish Video Task",
         state=TaskState.READY.value,
     )
     db_session.add(task)
-
-    # Media Artifact with full ancestry
-    art_hash = "f" * 64
-    artifact = await create_artifact_with_ancestry(db_session, channel.id, art_hash)
 
     # Platform Account & Vault
     account = PlatformAccount(
@@ -244,6 +255,18 @@ async def setup_publisher_fixtures(db_session: AsyncSession):
         "artifact": artifact,
         "account": account,
     }
+
+
+async def terminal_mission_dispatches(
+    db_session: AsyncSession, task_id
+) -> list[DurableDispatchIntent]:
+    result = await db_session.execute(
+        select(DurableDispatchIntent).where(
+            DurableDispatchIntent.mission_task_id == task_id,
+            DurableDispatchIntent.purpose == "PUBLISH_TERMINAL_MISSION_EVALUATION",
+        )
+    )
+    return list(result.scalars().all())
 
 
 @pytest.mark.asyncio
@@ -326,6 +349,7 @@ async def test_privacy_fallback_policy_rejection_and_opt_in(
 ):
     """Verify requested PUBLIC without fallback is blocked, but with opt-in fallback uploads PRIVATE."""
     f = setup_publisher_fixtures
+    task_id = f["task"].id
     os.environ["OMEGA_TEST_MODE"] = "1"
 
     # 1. Fallback disabled (default) -> BLOCKED_GUARDIAN
@@ -347,6 +371,8 @@ async def test_privacy_fallback_policy_rejection_and_opt_in(
 
     attempt_blocked = await PublishExecutionService.execute_publish(db_session, f["task"].id)
     assert attempt_blocked.state == PublishAttemptState.BLOCKED_GUARDIAN.value
+    assert f["task"].state == TaskState.READY.value
+    assert await terminal_mission_dispatches(db_session, f["task"].id) == []
 
     # 2. Fallback enabled -> Uploads with effective privacy = PRIVATE
     from omega.application.publisher.adapters.base import ChunkUploadResult, UploadSessionInitResult
@@ -394,6 +420,17 @@ async def test_privacy_fallback_policy_rejection_and_opt_in(
     assert attempt_opt_in.state == PublishAttemptState.SUCCEEDED.value
     assert attempt_opt_in.effective_privacy_status == PrivacyStatus.PRIVATE.value
     assert intent_opt_in.requested_privacy_status == PrivacyStatus.PUBLIC.value
+    task_res = await db_session.execute(select(Task).where(Task.id == task_id))
+    persisted_task = task_res.scalar_one()
+    assert persisted_task.state == TaskState.SUCCEEDED.value
+    dispatches = await terminal_mission_dispatches(db_session, f["task"].id)
+    assert len(dispatches) == 1
+    assert dispatches[0].purpose == "PUBLISH_TERMINAL_MISSION_EVALUATION"
+    assert dispatches[0].task_name == "omega.orchestrator.evaluate"
+    assert dispatches[0].args == [str(f["mission"].id), str(f["task"].execution_id)]
+    assert dispatches[0].idempotency_key == (
+        f"publisher-terminal-evaluation:{f['task'].id}:{attempt_opt_in.id}:SUCCEEDED"
+    )
 
 
 @pytest.mark.asyncio
@@ -402,6 +439,7 @@ async def test_handoff_outbox_and_scheduler_relay(
 ):
     """Verify failed retryable publish inserts handoff outbox and relay invokes Scheduler."""
     f = setup_publisher_fixtures
+    task_id = f["task"].id
     os.environ["OMEGA_TEST_MODE"] = "1"
 
     # Mock adapter failure with retryable network error
@@ -427,6 +465,10 @@ async def test_handoff_outbox_and_scheduler_relay(
 
     attempt = await PublishExecutionService.execute_publish(db_session, f["task"].id)
     assert attempt.state == PublishAttemptState.RETRYABLE_FAILED.value
+    task_res = await db_session.execute(select(Task).where(Task.id == task_id))
+    persisted_task = task_res.scalar_one()
+    assert persisted_task.state == TaskState.READY.value
+    assert await terminal_mission_dispatches(db_session, f["task"].id) == []
 
     # Verify handoff row exists
     res = await db_session.execute(
@@ -508,6 +550,7 @@ async def test_reconciliation_service_sweep(
 
     status = await ReconciliationService.reconcile_attempt(db_session, attempt.id)
     assert status == ReconciliationStatus.MANUAL_HOLD
+    assert await terminal_mission_dispatches(db_session, f["task"].id) == []
 
     from omega.infrastructure.database import AsyncSessionLocal
 
@@ -599,6 +642,7 @@ async def test_final_timeout_becomes_unknown_and_prevents_blind_reupload(
 ):
     """Verify when final chunk times out, attempt becomes UNKNOWN and prevents blind re-upload."""
     f = setup_publisher_fixtures
+    task_id = f["task"].id
     os.environ["OMEGA_TEST_MODE"] = "1"
 
     from omega.application.publisher.adapters.base import UploadSessionInitResult
@@ -639,6 +683,10 @@ async def test_final_timeout_becomes_unknown_and_prevents_blind_reupload(
     attempt = await PublishExecutionService.execute_publish(db_session, f["task"].id)
     assert attempt.state == PublishAttemptState.UNKNOWN.value
     assert attempt.reconciliation_status == ReconciliationStatus.PENDING.value
+    task_res = await db_session.execute(select(Task).where(Task.id == task_id))
+    persisted_task = task_res.scalar_one()
+    assert persisted_task.state == TaskState.READY.value
+    assert await terminal_mission_dispatches(db_session, f["task"].id) == []
 
 
 @pytest.mark.asyncio
@@ -830,6 +878,16 @@ async def test_artifact_path_traversal_rejected(db_session: AsyncSession, setup_
     attempt = await PublishExecutionService.execute_publish(db_session, f["task"].id)
     assert attempt.state == PublishAttemptState.PERMANENT_FAILED.value
     assert "Artifact path escape detected" in (attempt.error_message or "")
+    await db_session.refresh(f["task"])
+    assert f["task"].state == TaskState.FAILED.value
+    dispatches = await terminal_mission_dispatches(db_session, f["task"].id)
+    assert len(dispatches) == 1
+    assert dispatches[0].purpose == "PUBLISH_TERMINAL_MISSION_EVALUATION"
+    assert dispatches[0].task_name == "omega.orchestrator.evaluate"
+    assert dispatches[0].args == [str(f["mission"].id), str(f["task"].execution_id)]
+    assert dispatches[0].idempotency_key == (
+        f"publisher-terminal-evaluation:{f['task'].id}:{attempt.id}:FAILED"
+    )
 
 
 @pytest.mark.asyncio

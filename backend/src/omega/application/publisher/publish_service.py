@@ -19,6 +19,7 @@ import httpx
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.guardian.engine import GuardianEngine
 from omega.application.media_storage import LocalMediaStorageProvider, StorageSecurityError
 from omega.application.network.preflight import NetworkPreflightService
@@ -729,6 +730,9 @@ class PublishExecutionService:
                         .where(Task.id == task.id)
                         .values(state=TaskState.SUCCEEDED.value, completed_at=datetime.now(UTC))
                     )
+                    await cls._enqueue_terminal_mission_evaluation(
+                        session, task, attempt, TaskState.SUCCEEDED.value
+                    )
                     await session.execute(
                         update(UploadSession)
                         .where(UploadSession.id == upload_session.id)
@@ -859,12 +863,39 @@ class PublishExecutionService:
                         state=TaskState.FAILED.value, error=str(exc), completed_at=datetime.now(UTC)
                     )
                 )
+                await cls._enqueue_terminal_mission_evaluation(
+                    session, task, attempt, TaskState.FAILED.value
+                )
                 await session.commit()
 
         res_final = await session.execute(
             select(PublishAttempt).where(PublishAttempt.id == attempt.id)
         )
         return res_final.scalar_one()
+
+    @classmethod
+    async def _enqueue_terminal_mission_evaluation(
+        cls,
+        session: AsyncSession,
+        task: Task,
+        attempt: PublishAttempt,
+        terminal_state: str,
+    ) -> None:
+        """Enroll Mission evaluation in the publisher's terminal transaction."""
+        if task.execution_id is None:
+            raise PublishExecutionError("Terminal publish task has no MissionExecution identity.")
+        await DurableDispatchService.enqueue_async(
+            session,
+            idempotency_key=(
+                f"publisher-terminal-evaluation:{task.id}:{attempt.id}:{terminal_state}"
+            ),
+            task_name="omega.orchestrator.evaluate",
+            args=[str(task.mission_id), str(task.execution_id)],
+            purpose="PUBLISH_TERMINAL_MISSION_EVALUATION",
+            mission_id=task.mission_id,
+            mission_execution_id=task.execution_id,
+            mission_task_id=task.id,
+        )
 
     @classmethod
     async def _transition_attempt(

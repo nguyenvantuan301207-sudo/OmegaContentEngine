@@ -71,6 +71,10 @@ def _load_dependency_outputs(session: Any, task: Any) -> dict[str, dict]:
     return dependency_outputs
 
 
+class _PendingPublishResult(dict):
+    """Marker for a publish task whose provider lifecycle is now durably dispatched."""
+
+
 class _PendingProductionResult(dict):
     """Correlation payload plus private, process-local render dispatch instructions."""
 
@@ -385,6 +389,133 @@ def _execute_canonical_qa(task_id: uuid.UUID, context: dict[str, Any]) -> dict[s
                 "media_artifact_id": str(artifact_id),
                 "production_qa_result_id": str(qa_result.id),
             }
+
+    return asyncio.run(run())
+
+
+def _canonical_publish_artifact_id(context: dict[str, Any]) -> uuid.UUID:
+    """Parse the exact media artifact correlation from the direct QA dependency."""
+    dependency_outputs = context.get("dependency_outputs")
+    if not isinstance(dependency_outputs, dict):
+        raise ValueError("dependency_outputs must be an object")
+    qa_output = dependency_outputs.get("qa")
+    if not isinstance(qa_output, dict) or "media_artifact_id" not in qa_output:
+        raise ValueError("QA dependency must supply canonical media_artifact_id")
+    try:
+        return uuid.UUID(str(qa_output["media_artifact_id"]))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("QA dependency contains malformed media_artifact_id") from exc
+
+
+def _execute_canonical_publish(
+    task_id: uuid.UUID, task_input: dict[str, Any] | None, context: dict[str, Any]
+) -> _PendingPublishResult:
+    """Atomically prepare an approved intent, task correlation, and durable dispatch."""
+    if not isinstance(task_input, dict):
+        raise ValueError("canonical publish task input must be an object")
+    canonical_publish = task_input.get("canonical_publish")
+    if not isinstance(canonical_publish, dict):
+        raise ValueError("canonical publish authority is required")
+    required_authority = ("platform_account_id", "title", "made_for_kids")
+    if any(key not in canonical_publish for key in required_authority):
+        raise ValueError("canonical publish authority is malformed")
+
+    artifact_id = _canonical_publish_artifact_id(context)
+    try:
+        mission_id = uuid.UUID(str(context["mission_id"]))
+        execution_id = uuid.UUID(str(context["execution_id"]))
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise ValueError("canonical publish requires valid mission and execution IDs") from exc
+
+    async def run() -> _PendingPublishResult:
+        from sqlalchemy import select
+
+        from omega.application.durable_dispatch import DurableDispatchService
+        from omega.application.publisher.intent_service import PublishIntentService
+        from omega.domain.mission import MissionState
+        from omega.domain.publisher import PublishIntentCreate, PublishIntentState
+        from omega.domain.task import TaskState
+        from omega.infrastructure.database import AsyncWorkerSessionLocal
+        from omega.infrastructure.models import MediaArtifact, Mission, MissionExecution, Task
+
+        async with AsyncWorkerSessionLocal() as async_session:
+            mission = (
+                await async_session.execute(
+                    select(Mission).where(Mission.id == mission_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            task = (
+                await async_session.execute(
+                    select(Task).where(Task.id == task_id).with_for_update()
+                )
+            ).scalar_one_or_none()
+            execution = await async_session.get(MissionExecution, execution_id)
+            artifact = await async_session.get(MediaArtifact, artifact_id)
+
+            current = (
+                mission is not None
+                and mission.state == MissionState.RUNNING.value
+                and mission.channel_id is not None
+                and task is not None
+                and task.mission_id == mission.id
+                and task.task_type == "publish"
+                and task.state == TaskState.RUNNING.value
+                and task.execution_id == execution_id
+                and (task.dispatched_epoch is None or task.dispatched_epoch == mission.guardian_epoch)
+                and execution is not None
+                and execution.mission_id == mission.id
+                and artifact is not None
+            )
+            if not current:
+                raise ValueError("canonical publish current-state or QA artifact fence failed")
+
+            payload = PublishIntentCreate(
+                mission_id=mission.id,
+                task_id=task.id,
+                channel_id=mission.channel_id,
+                platform_account_id=canonical_publish["platform_account_id"],
+                media_artifact_id=artifact.id,
+                media_artifact_checksum=artifact.content_hash,
+                channel_dna_revision_id=execution.channel_dna_revision_id,
+                title=canonical_publish["title"],
+                description=canonical_publish.get("description", ""),
+                tags=canonical_publish.get("tags", []),
+                requested_privacy_status=canonical_publish.get(
+                    "requested_privacy_status", "PRIVATE"
+                ),
+                category_id=canonical_publish.get("category_id", "28"),
+                made_for_kids=canonical_publish["made_for_kids"],
+                platform_custom_options=canonical_publish.get("platform_custom_options", {}),
+            )
+            intent = await PublishIntentService.create_publish_intent(
+                async_session,
+                payload,
+                actor="MISSION_WORKER",
+                initial_state=PublishIntentState.APPROVED,
+                commit=False,
+            )
+            if intent.state != PublishIntentState.APPROVED.value:
+                raise ValueError(
+                    f"canonical PublishIntent is not execution eligible: {intent.state}"
+                )
+
+            task.output = {
+                "publish_intent_id": str(intent.id),
+                "media_artifact_id": str(artifact.id),
+            }
+            task.updated_at = datetime.now(UTC)
+            await DurableDispatchService.enqueue_async(
+                async_session,
+                idempotency_key=f"publish-dispatch:{intent.id}",
+                task_name="omega.publisher.execute_publish",
+                args=[str(task.id)],
+                purpose="PUBLISH_EXECUTION_DISPATCH",
+                mission_id=task.mission_id,
+                mission_execution_id=task.execution_id,
+                mission_task_id=task.id,
+            )
+            await async_session.commit()
+            return _PendingPublishResult(task.output)
 
     return asyncio.run(run())
 
@@ -922,6 +1053,8 @@ def execute_task(self, task_id: str) -> dict:
             result_output = _execute_canonical_production(task.id, context)
         elif task.task_type == "qa":
             result_output = _execute_canonical_qa(task.id, context)
+        elif task.task_type == "publish":
+            result_output = _execute_canonical_publish(task.id, task.input, context)
         else:
             executor = default_executor_registry.get(task.task_type)
             result_output = executor.execute(
@@ -930,6 +1063,10 @@ def execute_task(self, task_id: str) -> dict:
                 task_input=task.input,
                 context=context,
             )
+
+        if isinstance(result_output, _PendingPublishResult):
+            # Preparation committed all correlation and dispatch state. Do not race the publisher.
+            return {"status": "pending", "task_id": task_id}
 
         if isinstance(result_output, _PendingProductionResult):
             # Re-enter the worker lock hierarchy before crossing the external dispatch boundary.

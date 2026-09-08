@@ -47,6 +47,7 @@ class PublishIntentService:
         *,
         actor: str = "SYSTEM",
         initial_state: PublishIntentState = PublishIntentState.DRAFT,
+        commit: bool = True,
     ) -> PublishIntent:
         """Construct or revision an approved PublishIntent snapshot before scheduling."""
         # 1. Validate mandatory audience compliance
@@ -201,9 +202,11 @@ class PublishIntentService:
             actor=actor,
         )
         session.add(trans_new)
+        await session.flush()
 
-        await session.commit()
-        await session.refresh(new_intent)
+        if commit:
+            await session.commit()
+            await session.refresh(new_intent)
         logger.info(
             "PublishIntent created",
             intent_id=str(new_intent.id),

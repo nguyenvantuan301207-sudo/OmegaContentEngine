@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.network.preflight import NetworkPreflightService
 from omega.application.publisher.adapters.base import AdapterRegistry
 from omega.domain.network import NetworkEgressPermit, ServiceCategory
@@ -148,6 +149,8 @@ class ReconciliationService:
             session.add(intent_trans)
 
             if task:
+                if task.execution_id is None:
+                    raise ValueError("Terminal publish task has no MissionExecution identity.")
                 await session.execute(
                     update(Task)
                     .where(Task.id == task.id)
@@ -155,6 +158,19 @@ class ReconciliationService:
                         state=TaskState.SUCCEEDED.value,
                         completed_at=datetime.now(UTC),
                     )
+                )
+                await DurableDispatchService.enqueue_async(
+                    session,
+                    idempotency_key=(
+                        "publisher-terminal-evaluation:"
+                        f"{task.id}:{attempt.id}:{TaskState.SUCCEEDED.value}"
+                    ),
+                    task_name="omega.orchestrator.evaluate",
+                    args=[str(task.mission_id), str(task.execution_id)],
+                    purpose="PUBLISH_TERMINAL_MISSION_EVALUATION",
+                    mission_id=task.mission_id,
+                    mission_execution_id=task.execution_id,
+                    mission_task_id=task.id,
                 )
 
             await session.commit()
