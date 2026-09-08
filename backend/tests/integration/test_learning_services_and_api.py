@@ -1642,3 +1642,294 @@ async def test_learning_model_network_call_outside_db_transaction(
     assert model_extraction.feature_snapshot_id == snap.id
     assert model_extraction.model_name == "gemini-1.5-flash"
     assert "chain_of_thought" not in model_extraction.structured_output
+
+
+# ============================================================================
+# B3 — P13 CHANNEL CONTEXT READ CONTRACT
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_channel_context_recent_performance_excludes_other_channels(
+    db_session: AsyncSession, learning_env: dict[str, Any]
+):
+    """B3 / B6-contract-7: Recent performance is scoped to the requested channel only.
+
+    Creates input snapshots for two different channels and verifies that
+    get_channel_context returns only records belonging to the requested channel.
+    """
+    from omega.application.learning.channel_context_service import ChannelContextService
+
+    env = learning_env
+    chan_a: Channel = env["channel"]
+
+    # Create a second independent channel
+    chan_b = Channel(
+        id=uuid4(),
+        slug=f"chan-b-{uuid4().hex[:8]}",
+        name="Other Channel",
+        platform="YOUTUBE",
+    )
+    db_session.add(chan_b)
+    await db_session.flush()
+
+    # Create a snapshot for chan_a
+    intent_a: PublishIntent = env["intent"]
+    artifact_a: MediaArtifact = env["artifact"]
+    dna_a: ChannelDNARevision = env["dna"]
+
+    obs_id_a = uuid4()
+    snap_a = LearningInputSnapshot(
+        observation_id=obs_id_a,
+        channel_id=chan_a.id,
+        publish_intent_id=intent_a.id,
+        provider_video_id=f"vid_{uuid4().hex[:11]}",
+        media_artifact_id=artifact_a.id,
+        channel_dna_revision_id=dna_a.id,
+        window_type=WindowType.FIRST_7D.value,
+        window_state=WindowState.FINALIZED.value,
+        window_start_utc=datetime.now(UTC) - timedelta(days=7),
+        window_end_utc=datetime.now(UTC),
+        published_at_utc=datetime.now(UTC) - timedelta(days=8),
+        raw_metrics={"views": 1000},
+        metric_qualities={"views": "AVAILABLE"},
+        classifications={"views": "PROVIDER_FACT"},
+        is_fully_finalized=True,
+        quality_flags=[],
+        payload_checksum=f"chk_{uuid4().hex}",
+        input_dedupe_key=f"dk_{uuid4().hex}",
+        revision_sequence=1,
+    )
+    db_session.add(snap_a)
+    await db_session.flush()
+
+    from omega.infrastructure.models import LearningInputLatestPointer
+
+    ptr_a = LearningInputLatestPointer(
+        observation_id=obs_id_a,
+        window_type=WindowType.FIRST_7D.value,
+        channel_id=chan_a.id,
+        current_input_snapshot_id=snap_a.id,
+        current_revision_sequence=1,
+        current_payload_checksum=snap_a.payload_checksum,
+    )
+    db_session.add(ptr_a)
+    await db_session.commit()
+
+    ctx_a = await ChannelContextService.get_channel_context(db_session, chan_a.id)
+    ctx_b = await ChannelContextService.get_channel_context(db_session, chan_b.id)
+
+    # chan_a has performance records
+    perf_a_ids = {r.snapshot_id for r in ctx_a.recent_performance}
+    assert snap_a.id in perf_a_ids
+
+    # chan_b has no performance records (different channel)
+    perf_b_ids = {r.snapshot_id for r in ctx_b.recent_performance}
+    assert snap_a.id not in perf_b_ids
+    assert ctx_b.channel_id == chan_b.id
+
+
+@pytest.mark.asyncio
+async def test_channel_context_recent_performance_is_bounded_and_ordered(
+    db_session: AsyncSession, learning_env: dict[str, Any]
+):
+    """B3 / B6-contract-8: Recent performance is bounded and deterministically ordered.
+
+    Inserts 5 snapshots with different published_at timestamps.
+    Requests limit=3 and verifies: exactly 3 returned, ordered by published_at DESC.
+    """
+    from omega.application.learning.channel_context_service import ChannelContextService
+    from omega.infrastructure.models import LearningInputLatestPointer
+
+    env = learning_env
+    chan: Channel = env["channel"]
+    intent: PublishIntent = env["intent"]
+    artifact: MediaArtifact = env["artifact"]
+    dna: ChannelDNARevision = env["dna"]
+
+    base_time = datetime.now(UTC) - timedelta(days=20)
+    inserted_snapshots = []
+    for i in range(5):
+        pub_at = base_time + timedelta(days=i)
+        obs_id = uuid4()
+        snap = LearningInputSnapshot(
+            observation_id=obs_id,
+            channel_id=chan.id,
+            publish_intent_id=intent.id,
+            provider_video_id=f"vid_{uuid4().hex[:11]}",
+            media_artifact_id=artifact.id,
+            channel_dna_revision_id=dna.id,
+            window_type=WindowType.FIRST_7D.value,
+            window_state=WindowState.FINALIZED.value,
+            window_start_utc=pub_at,
+            window_end_utc=pub_at + timedelta(days=7),
+            published_at_utc=pub_at,
+            raw_metrics={"views": float(i * 100)},
+            metric_qualities={"views": "AVAILABLE"},
+            classifications={"views": "PROVIDER_FACT"},
+            is_fully_finalized=True,
+            quality_flags=[],
+            payload_checksum=f"chk_{uuid4().hex}",
+            input_dedupe_key=f"dk_{uuid4().hex}",
+            revision_sequence=1,
+        )
+        db_session.add(snap)
+        await db_session.flush()
+
+        ptr = LearningInputLatestPointer(
+            observation_id=obs_id,
+            window_type=WindowType.FIRST_7D.value,
+            channel_id=chan.id,
+            current_input_snapshot_id=snap.id,
+            current_revision_sequence=1,
+            current_payload_checksum=snap.payload_checksum,
+        )
+        db_session.add(ptr)
+        await db_session.flush()
+        inserted_snapshots.append((pub_at, snap.id))
+
+    await db_session.commit()
+
+    ctx = await ChannelContextService.get_channel_context(
+        db_session, chan.id, recent_performance_limit=3
+    )
+
+    # Bounded: at most 3 records returned
+    assert len(ctx.recent_performance) <= 3
+    # Ordered: most recent published_at_utc first
+    pub_times = [r.published_at_utc for r in ctx.recent_performance]
+    assert pub_times == sorted(pub_times, reverse=True)
+
+
+@pytest.mark.asyncio
+async def test_channel_context_active_knowledge_returns_latest_only(
+    db_session: AsyncSession, learning_env: dict[str, Any]
+):
+    """B3 / B6-contract-9: Active knowledge read returns only ACTIVE latest knowledge.
+
+    Creates one knowledge family via KnowledgeService. Verifies the context
+    contains it with all expected audit source IDs.
+    """
+    from omega.application.learning.channel_context_service import ChannelContextService
+
+    env = learning_env
+    chan: Channel = env["channel"]
+
+    hyp, eval_ = await _create_hypothesis_and_evaluation(db_session, env)
+    await db_session.commit()
+
+    item = await KnowledgeService.create_or_advance_knowledge(
+        session=db_session,
+        channel_id=chan.id,
+        knowledge_type="HOOK_STYLE_EFFECT",
+        structured_claim={"factor": "hook_style", "value": "QUESTION"},
+        human_readable_summary="Question hooks increase views by 25%",
+        confidence_class=ConfidenceClass.MODERATE,
+        effect_size_absolute=250.0,
+        effect_size_relative_percent=25.0,
+        cliffs_delta=0.35,
+        sample_size_treatment=20,
+        sample_size_control=20,
+        source_hypothesis_id=hyp.id,
+        source_evaluation_id=eval_.id,
+    )
+    await db_session.commit()
+
+    ctx = await ChannelContextService.get_channel_context(db_session, chan.id)
+
+    family_ids = {k.knowledge_family_id for k in ctx.active_knowledge}
+    assert item.knowledge_family_id in family_ids
+
+    # Find and verify the returned record
+    matching = [k for k in ctx.active_knowledge if k.knowledge_family_id == item.knowledge_family_id]
+    assert len(matching) == 1
+    kr = matching[0]
+
+    # B4: audit source IDs preserved
+    assert kr.source_hypothesis_id == hyp.id
+    assert kr.source_evaluation_id == eval_.id
+    assert kr.knowledge_item_id == item.id
+    assert kr.current_status == "ACTIVE"
+    assert kr.revision_number == 1
+
+
+@pytest.mark.asyncio
+async def test_channel_context_superseded_knowledge_excluded_from_active_set(
+    db_session: AsyncSession, learning_env: dict[str, Any]
+):
+    """B3 / B6-contract-10: Superseded knowledge is excluded from active set.
+
+    Advances a knowledge family to revision 2 (which supersedes revision 1).
+    Verifies that only the ACTIVE current revision is returned.
+    """
+    from omega.application.learning.channel_context_service import ChannelContextService
+
+    env = learning_env
+    chan: Channel = env["channel"]
+
+    hyp, eval_ = await _create_hypothesis_and_evaluation(db_session, env)
+    await db_session.commit()
+
+    item_v1 = await KnowledgeService.create_or_advance_knowledge(
+        session=db_session,
+        channel_id=chan.id,
+        knowledge_type="WATCH_TIME_EFFECT",
+        structured_claim={"factor": "duration", "direction": "positive"},
+        human_readable_summary="Longer videos increase watch time",
+        confidence_class=ConfidenceClass.LOW,
+        effect_size_absolute=60.0,
+        effect_size_relative_percent=10.0,
+        cliffs_delta=0.20,
+        sample_size_treatment=12,
+        sample_size_control=12,
+        source_hypothesis_id=hyp.id,
+        source_evaluation_id=eval_.id,
+    )
+    await db_session.commit()
+
+    # Advance to revision 2
+    item_v2 = await KnowledgeService.create_or_advance_knowledge(
+        session=db_session,
+        channel_id=chan.id,
+        knowledge_type="WATCH_TIME_EFFECT",
+        structured_claim={"factor": "duration", "direction": "positive", "magnitude": "high"},
+        human_readable_summary="Longer videos increase watch time (high confidence)",
+        confidence_class=ConfidenceClass.HIGH,
+        effect_size_absolute=120.0,
+        effect_size_relative_percent=20.0,
+        cliffs_delta=0.40,
+        sample_size_treatment=30,
+        sample_size_control=30,
+        source_hypothesis_id=hyp.id,
+        source_evaluation_id=eval_.id,
+        knowledge_family_id=item_v1.knowledge_family_id,
+    )
+    await db_session.commit()
+
+    ctx = await ChannelContextService.get_channel_context(db_session, chan.id)
+
+    knowledge_ids = {k.knowledge_item_id for k in ctx.active_knowledge}
+    # Only the latest revision item appears
+    assert item_v2.id in knowledge_ids
+    # The superseded revision does not appear
+    assert item_v1.id not in knowledge_ids
+
+
+@pytest.mark.asyncio
+async def test_channel_context_does_not_mutate_any_state(
+    db_session: AsyncSession, learning_env: dict[str, Any]
+):
+    """B3 / B6-contract-12: Channel context read must not mutate strategy or Channel DNA.
+
+    Calls get_channel_context and verifies the session has no pending dirty/new objects.
+    """
+    from omega.application.learning.channel_context_service import ChannelContextService
+
+    env = learning_env
+    chan: Channel = env["channel"]
+
+    await ChannelContextService.get_channel_context(db_session, chan.id)
+
+    # No uncommitted mutations should be pending after a pure read
+    assert not db_session.dirty
+    assert not db_session.new

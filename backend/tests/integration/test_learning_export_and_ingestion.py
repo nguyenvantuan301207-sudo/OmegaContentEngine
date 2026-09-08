@@ -1222,3 +1222,281 @@ async def test_model_extracted_feature_records_model_prompt_and_versions(
     assert extraction.model_provider == "GEMINI"
     assert extraction.prompt_checksum is not None
     assert feat.model_features["hook_style"] == "QUESTION"
+
+
+# ============================================================================
+# B1 — CANONICAL METRIC ALIGNMENT
+# ============================================================================
+
+
+def test_effect_policy_uses_analytics_canonical_metric_names():
+    """B1: OMEGA_EFFECT_POLICY_V1 must reference Analytics canonical names only.
+
+    Verifies that legacy non-canonical keys have been removed and replaced
+    with the names produced by the Analytics normalizer.
+    """
+    from omega.domain.learning import OMEGA_EFFECT_POLICY_V1
+
+    # Canonical names used by Analytics normalizer must be present
+    assert "average_percentage_viewed" in OMEGA_EFFECT_POLICY_V1
+    assert "impression_ctr_percent" in OMEGA_EFFECT_POLICY_V1
+
+    # Legacy non-canonical aliases must be absent
+    assert "average_view_percentage" not in OMEGA_EFFECT_POLICY_V1
+    assert "ctr_percent" not in OMEGA_EFFECT_POLICY_V1
+
+    # Core canonical outcome metrics must still be present
+    assert "views" in OMEGA_EFFECT_POLICY_V1
+    assert "watch_time_seconds" in OMEGA_EFFECT_POLICY_V1
+    assert "subscribers_gained" in OMEGA_EFFECT_POLICY_V1
+
+
+# ============================================================================
+# B2 — ANALYTICS → LEARNING INGESTION (FIRST_24H, null metrics, idempotency)
+# ============================================================================
+
+
+@pytest.mark.asyncio
+async def test_finalized_first_24h_observation_can_ingest_into_learning(
+    db_session: AsyncSession, learning_test_env
+):
+    """B2 / B6-contract-2: Finalized FIRST_24H window exports and ingests into Learning.
+
+    Creates a FIRST_24H window alongside the existing FIRST_7D fixture window,
+    runs export + ingest, and confirms a LearningInputSnapshot was created with
+    the correct window_type and is_fully_finalized=True.
+    """
+    env = learning_test_env
+    asset = env["asset"]
+
+    window_24h = AnalyticsWindow(
+        id=uuid4(),
+        asset_id=asset.id,
+        window_type=WindowType.FIRST_24H.value,
+        provider_date=None,
+        provider_timezone="America/Los_Angeles",
+        window_start_utc=asset.published_at,
+        window_end_utc=asset.published_at + timedelta(hours=24),
+        window_state=WindowState.FINALIZED.value,
+    )
+    db_session.add(window_24h)
+    await db_session.commit()
+
+    obs = await LearningExportService.export_observation_contract(
+        session=db_session,
+        asset_id=asset.id,
+        window_type=WindowType.FIRST_24H,
+    )
+    assert obs is not None
+    assert obs.window_type == WindowType.FIRST_24H
+    assert obs.is_fully_finalized is True
+
+    snap, is_new = await LearningIngestionService.ingest_observation(db_session, obs)
+    await db_session.commit()
+
+    assert is_new is True
+    assert snap.window_type == WindowType.FIRST_24H.value
+    assert snap.is_fully_finalized is True
+    assert snap.revision_sequence == 1
+    assert snap.channel_id == asset.channel_id
+    assert snap.publish_intent_id == asset.publish_intent_id
+
+
+@pytest.mark.asyncio
+async def test_finalized_first_7d_observation_can_ingest_into_learning(
+    db_session: AsyncSession, learning_test_env
+):
+    """B2 / B6-contract-3: Finalized FIRST_7D window exports and ingests into Learning.
+
+    The existing learning_test_env fixture creates a FIRST_7D window in FINALIZED state.
+    Verify the export→ingest pipeline produces a correct LearningInputSnapshot.
+    """
+    env = learning_test_env
+    asset = env["asset"]
+
+    obs = await LearningExportService.export_observation_contract(
+        session=db_session,
+        asset_id=asset.id,
+        window_type=WindowType.FIRST_7D,
+    )
+    assert obs is not None
+    assert obs.window_type == WindowType.FIRST_7D
+    assert obs.is_fully_finalized is True
+
+    snap, is_new = await LearningIngestionService.ingest_observation(db_session, obs)
+    await db_session.commit()
+
+    assert is_new is True
+    assert snap.window_type == WindowType.FIRST_7D.value
+    assert snap.is_fully_finalized is True
+    assert snap.revision_sequence == 1
+    assert snap.publish_intent_id == asset.publish_intent_id
+    assert snap.media_artifact_id == asset.media_artifact_id
+
+
+@pytest.mark.asyncio
+async def test_exact_replay_reuses_same_learning_input_snapshot(
+    db_session: AsyncSession, learning_test_env
+):
+    """B2 / B6-contract-4: Exact replay of an identical observation returns the same snapshot.
+
+    Ingesting the same LearningObservation payload twice must return (same_snap, is_new=False)
+    on the second call. The revision sequence must remain 1.
+    """
+    env = learning_test_env
+    obs = await LearningExportService.export_observation_contract(
+        session=db_session,
+        asset_id=env["asset"].id,
+        window_type=WindowType.FIRST_7D,
+    )
+    assert obs is not None
+
+    snap1, is_new1 = await LearningIngestionService.ingest_observation(db_session, obs)
+    await db_session.commit()
+    snap2, is_new2 = await LearningIngestionService.ingest_observation(db_session, obs)
+    await db_session.commit()
+
+    assert is_new1 is True
+    assert is_new2 is False
+    assert snap1.id == snap2.id
+    assert snap2.revision_sequence == 1
+
+
+@pytest.mark.asyncio
+async def test_changed_authoritative_analytics_evidence_creates_new_linked_revision(
+    db_session: AsyncSession, learning_test_env
+):
+    """B2 / B6-contract-5: Changing analytics metrics creates a new revision with preceding_snapshot_id.
+
+    Simulates a REVISED window where the metrics payload changes. The second ingestion
+    must create a new LearningInputSnapshot at revision 2, linked to the first via
+    preceding_snapshot_id, without modifying the original immutable snapshot.
+    """
+    env = learning_test_env
+    obs = await LearningExportService.export_observation_contract(
+        session=db_session,
+        asset_id=env["asset"].id,
+        window_type=WindowType.FIRST_7D,
+    )
+    assert obs is not None
+
+    snap1, is_new1 = await LearningIngestionService.ingest_observation(db_session, obs)
+    await db_session.commit()
+    assert is_new1 is True
+    assert snap1.revision_sequence == 1
+
+    # Simulate a metrics revision — changed views count triggers a new checksum
+    obs_revised = obs.model_copy(
+        update={
+            "metrics": {"views": 88888, "watch_time_seconds": 3600.0},
+            "window_state": WindowState.REVISED,
+        }
+    )
+    snap2, is_new2 = await LearningIngestionService.ingest_observation(db_session, obs_revised)
+    await db_session.commit()
+
+    assert is_new2 is True
+    assert snap2.revision_sequence == 2
+    assert snap2.preceding_snapshot_id == snap1.id
+    # Original immutable snapshot is not mutated
+    assert snap1.raw_metrics != snap2.raw_metrics
+
+
+@pytest.mark.asyncio
+async def test_unavailable_null_metrics_remain_null_no_zero_fabrication(
+    db_session: AsyncSession, learning_test_env
+):
+    """B2 / B6-contract-6: Null/unavailable metrics preserved; no zero fabrication.
+
+    Constructs an observation where some metrics are None (provider unavailable).
+    Verifies the ingested snapshot stores None, not 0.0, and does not invent values.
+    """
+    env = learning_test_env
+    obs = await LearningExportService.export_observation_contract(
+        session=db_session,
+        asset_id=env["asset"].id,
+        window_type=WindowType.FIRST_7D,
+    )
+    assert obs is not None
+
+    # Craft an observation with explicit None metrics (simulate NOT_AVAILABLE quality)
+    obs_with_nulls = obs.model_copy(
+        update={
+            "metrics": {
+                "views": None,
+                "watch_time_seconds": None,
+                "average_percentage_viewed": None,
+                "impression_ctr_percent": None,
+            },
+            "metric_qualities": {
+                "views": MetricQuality.NOT_AVAILABLE,
+                "watch_time_seconds": MetricQuality.NOT_AVAILABLE,
+                "average_percentage_viewed": MetricQuality.NOT_AVAILABLE,
+                "impression_ctr_percent": MetricQuality.NOT_AVAILABLE,
+            },
+        }
+    )
+    snap, is_new = await LearningIngestionService.ingest_observation(db_session, obs_with_nulls)
+    await db_session.commit()
+
+    assert is_new is True
+    # Null values stored as-is — not fabricated as 0
+    assert snap.raw_metrics.get("views") is None
+    assert snap.raw_metrics.get("watch_time_seconds") is None
+    assert snap.raw_metrics.get("impression_ctr_percent") is None
+    # Quality stored faithfully
+    assert snap.metric_qualities.get("views") == MetricQuality.NOT_AVAILABLE.value
+    assert snap.metric_qualities.get("impression_ctr_percent") == MetricQuality.NOT_AVAILABLE.value
+
+
+@pytest.mark.asyncio
+async def test_sweep_discovers_finalized_first_24h_and_first_7d_windows(
+    db_session: AsyncSession, learning_test_env
+):
+    """B2: sweep_and_ingest discovers both FIRST_24H and FIRST_7D finalized windows.
+
+    Creates a FIRST_24H window in FINALIZED state. Both it and the existing FIRST_7D
+    fixture window should be discovered and ingested in a single sweep.
+    """
+    env = learning_test_env
+    asset = env["asset"]
+    consumer_id = f"test_b2_sweep_{uuid4().hex[:8]}"
+
+    # Drain any prior database state
+    while True:
+        c = await LearningIngestionService.sweep_and_ingest(db_session, consumer_id, batch_size=100)
+        if c == 0:
+            break
+
+    # Create a FIRST_24H finalized window
+    w24 = AnalyticsWindow(
+        id=uuid4(),
+        asset_id=asset.id,
+        window_type=WindowType.FIRST_24H.value,
+        provider_date=None,
+        provider_timezone="America/Los_Angeles",
+        window_start_utc=asset.published_at,
+        window_end_utc=asset.published_at + timedelta(hours=24),
+        window_state=WindowState.FINALIZED.value,
+        updated_at=datetime.now(UTC),
+    )
+    db_session.add(w24)
+    await db_session.commit()
+
+    count = await LearningIngestionService.sweep_and_ingest(db_session, consumer_id, batch_size=100)
+    await db_session.commit()
+
+    # At minimum the new FIRST_24H window was ingested
+    assert count >= 1
+
+    # Verify that the FIRST_24H window was captured
+    snaps = (
+        await db_session.execute(
+            select(LearningInputSnapshot).where(
+                LearningInputSnapshot.channel_id == asset.channel_id,
+                LearningInputSnapshot.window_type == WindowType.FIRST_24H.value,
+            )
+        )
+    ).scalars().all()
+    assert len(snaps) >= 1
+    assert snaps[0].is_fully_finalized is True

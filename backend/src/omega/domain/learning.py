@@ -125,12 +125,12 @@ OMEGA_EFFECT_POLICY_V1: dict[str, dict[str, float | None]] = {
         "min_relative_delta_percent": 15.0,
         "min_absolute_delta": 300.0,
     },
-    "average_view_percentage": {
+    "average_percentage_viewed": {
         "min_cliffs_delta": 0.28,
         "min_relative_delta_percent": None,
         "min_absolute_delta": 5.0,
     },
-    "ctr_percent": {
+    "impression_ctr_percent": {
         "min_cliffs_delta": 0.20,
         "min_relative_delta_percent": None,
         "min_absolute_delta": 1.0,
