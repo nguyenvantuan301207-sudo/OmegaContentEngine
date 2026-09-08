@@ -77,6 +77,62 @@ def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
             canonical_inputs["research_brief_id"], "research_brief_id"
         )
 
+    normalized_publish = None
+    if "publish" in canonical_inputs:
+        publish_raw = canonical_inputs["publish"]
+        if not isinstance(publish_raw, dict):
+            raise ValueError("Canonical publish input must be an object.")
+
+        if "platform_account_id" not in publish_raw:
+            raise ValueError("Canonical publish input requires platform_account_id.")
+        norm_platform_account_id = _normalize_canonical_uuid(
+            publish_raw["platform_account_id"], "platform_account_id"
+        )
+
+        if "title" not in publish_raw:
+            raise ValueError("Canonical publish input requires title.")
+        raw_title = publish_raw["title"]
+        if not isinstance(raw_title, str) or not raw_title.strip():
+            raise ValueError("Canonical publish title must be a non-empty string.")
+        norm_title = raw_title.strip()
+
+        if "made_for_kids" not in publish_raw:
+            raise ValueError("Canonical publish input requires made_for_kids.")
+        raw_made_for_kids = publish_raw["made_for_kids"]
+        if not isinstance(raw_made_for_kids, bool):
+            raise ValueError("Canonical publish made_for_kids must be a boolean.")
+
+        norm_description = publish_raw.get("description", "")
+        if not isinstance(norm_description, str):
+            raise ValueError("Canonical publish description must be a string.")
+
+        norm_tags = publish_raw.get("tags", [])
+        if not isinstance(norm_tags, list):
+            raise ValueError("Canonical publish tags must be a list.")
+
+        norm_privacy = publish_raw.get("requested_privacy_status", "PRIVATE")
+        if not isinstance(norm_privacy, str):
+            raise ValueError("Canonical publish requested_privacy_status must be a string.")
+
+        norm_category_id = publish_raw.get("category_id", "28")
+        if not isinstance(norm_category_id, str):
+            raise ValueError("Canonical publish category_id must be a string.")
+
+        norm_custom_options = publish_raw.get("platform_custom_options", {})
+        if not isinstance(norm_custom_options, dict):
+            raise ValueError("Canonical publish platform_custom_options must be an object.")
+
+        normalized_publish = {
+            "platform_account_id": norm_platform_account_id,
+            "title": norm_title,
+            "made_for_kids": raw_made_for_kids,
+            "description": norm_description,
+            "tags": norm_tags,
+            "requested_privacy_status": norm_privacy,
+            "category_id": norm_category_id,
+            "platform_custom_options": norm_custom_options,
+        }
+
     for planned_task in plan.tasks:
         task_create = planned_task.task_create
         if task_create.task_type == "topic_discovery" and normalized_topic_id:
@@ -91,6 +147,11 @@ def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
                     "topic_candidate_id": normalized_topic_id,
                     "research_brief_id": normalized_brief_id,
                 },
+            }
+        elif task_create.task_type == "publish" and normalized_publish is not None:
+            task_create.input = {
+                **(task_create.input or {}),
+                "canonical_publish": normalized_publish,
             }
 
 

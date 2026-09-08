@@ -156,3 +156,186 @@ def test_unrelated_metadata_locations_are_not_scanned() -> None:
     _enrich_canonical_content_seed(plan, metadata)
 
     assert task_inputs(plan)["content_generation"] == {}
+
+
+def test_absent_publish_preserves_canonical_task_inputs() -> None:
+    plan = make_plan()
+    original_inputs = deepcopy(task_inputs(plan))
+
+    _enrich_canonical_content_seed(
+        plan,
+        {
+            "canonical_inputs": {
+                "topic_candidate_id": str(uuid4()),
+            }
+        },
+    )
+
+    inputs = task_inputs(plan)
+    assert inputs["publish"] == original_inputs["publish"]
+    assert inputs["publish"] == {}
+
+
+def test_valid_publish_config_is_normalized_and_propagated() -> None:
+    account_id = uuid4()
+    metadata = {
+        "canonical_inputs": {
+            "publish": {
+                "platform_account_id": account_id.hex.upper(),
+                "title": "  Mission Launch Video  ",
+                "made_for_kids": False,
+                "description": "Video description text",
+                "tags": ["space", "launch"],
+                "requested_privacy_status": "PUBLIC",
+                "category_id": "22",
+                "platform_custom_options": {"notify_subscribers": True},
+            }
+        },
+        "unrelated": {"key": "must-not-propagate"},
+    }
+    original_metadata = deepcopy(metadata)
+    plan = make_plan()
+    original_inputs = deepcopy(task_inputs(plan))
+
+    _enrich_canonical_content_seed(plan, metadata)
+
+    inputs = task_inputs(plan)
+    assert inputs["publish"] == {
+        "canonical_publish": {
+            "platform_account_id": str(account_id),
+            "title": "Mission Launch Video",
+            "made_for_kids": False,
+            "description": "Video description text",
+            "tags": ["space", "launch"],
+            "requested_privacy_status": "PUBLIC",
+            "category_id": "22",
+            "platform_custom_options": {"notify_subscribers": True},
+        }
+    }
+    assert UUID(inputs["publish"]["canonical_publish"]["platform_account_id"])
+    assert "unrelated" not in inputs["publish"]
+    assert metadata == original_metadata
+    assert metadata["canonical_inputs"]["publish"]["platform_account_id"] == account_id.hex.upper()
+
+    for task_type, task_input in inputs.items():
+        if task_type != "publish":
+            assert task_input == original_inputs[task_type]
+
+
+def test_valid_publish_config_defaults_optional_fields() -> None:
+    account_id = uuid4()
+    metadata = {
+        "canonical_inputs": {
+            "publish": {
+                "platform_account_id": str(account_id),
+                "title": "Minimal Publish",
+                "made_for_kids": True,
+            }
+        }
+    }
+    plan = make_plan()
+
+    _enrich_canonical_content_seed(plan, metadata)
+
+    inputs = task_inputs(plan)
+    assert inputs["publish"]["canonical_publish"] == {
+        "platform_account_id": str(account_id),
+        "title": "Minimal Publish",
+        "made_for_kids": True,
+        "description": "",
+        "tags": [],
+        "requested_privacy_status": "PRIVATE",
+        "category_id": "28",
+        "platform_custom_options": {},
+    }
+
+
+def test_publish_not_an_object_fails_closed() -> None:
+    plan = make_plan()
+    with pytest.raises(ValueError, match="Canonical publish input must be an object"):
+        _enrich_canonical_content_seed(
+            plan,
+            {"canonical_inputs": {"publish": "not-a-dict"}},
+        )
+    assert task_inputs(plan)["publish"] == {}
+
+
+@pytest.mark.parametrize(
+    "malformed_account_id",
+    [None, "", "   ", "not-a-uuid", 12345],
+)
+def test_malformed_platform_account_id_fails_closed(malformed_account_id) -> None:
+    plan = make_plan()
+    with pytest.raises(ValueError, match="platform_account_id"):
+        _enrich_canonical_content_seed(
+            plan,
+            {
+                "canonical_inputs": {
+                    "publish": {
+                        "platform_account_id": malformed_account_id,
+                        "title": "Valid Title",
+                        "made_for_kids": False,
+                    }
+                }
+            },
+        )
+    assert task_inputs(plan)["publish"] == {}
+
+
+def test_missing_platform_account_id_fails_closed() -> None:
+    plan = make_plan()
+    with pytest.raises(ValueError, match="platform_account_id"):
+        _enrich_canonical_content_seed(
+            plan,
+            {
+                "canonical_inputs": {
+                    "publish": {
+                        "title": "Valid Title",
+                        "made_for_kids": False,
+                    }
+                }
+            },
+        )
+    assert task_inputs(plan)["publish"] == {}
+
+
+@pytest.mark.parametrize(
+    "bad_title",
+    [None, "", "   ", 123, []],
+)
+def test_missing_or_blank_title_fails_closed(bad_title) -> None:
+    plan = make_plan()
+    publish_payload: dict = {
+        "platform_account_id": str(uuid4()),
+        "made_for_kids": False,
+    }
+    if bad_title is not None:
+        publish_payload["title"] = bad_title
+
+    with pytest.raises(ValueError, match="title"):
+        _enrich_canonical_content_seed(
+            plan,
+            {"canonical_inputs": {"publish": publish_payload}},
+        )
+    assert task_inputs(plan)["publish"] == {}
+
+
+@pytest.mark.parametrize(
+    "bad_made_for_kids",
+    [None, "false", "true", 0, 1, []],
+)
+def test_missing_or_non_bool_made_for_kids_fails_closed(bad_made_for_kids) -> None:
+    plan = make_plan()
+    publish_payload: dict = {
+        "platform_account_id": str(uuid4()),
+        "title": "Valid Title",
+    }
+    if bad_made_for_kids is not None:
+        publish_payload["made_for_kids"] = bad_made_for_kids
+
+    with pytest.raises(ValueError, match="made_for_kids"):
+        _enrich_canonical_content_seed(
+            plan,
+            {"canonical_inputs": {"publish": publish_payload}},
+        )
+    assert task_inputs(plan)["publish"] == {}

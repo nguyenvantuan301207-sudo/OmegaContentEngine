@@ -617,6 +617,9 @@ async def test_dispatch_sweep_and_outbox_relay_pipeline(
     outbox_item = outbox_res.scalar_one_or_none()
     assert outbox_item is not None
     assert outbox_item.status == DispatchOutboxStatus.PENDING.value
+    assert outbox_item.celery_task_name == "omega.publisher.execute_publish"
+    assert outbox_item.celery_args == {"args": [str(task.id)]}
+    assert outbox_item.task_id == task.id
 
     # 2. Run outbox relay: processes item and marks SENT
     relay_stats = await OutboxRelayService.process_outbox_batch(db_session, now=now)
@@ -626,6 +629,165 @@ async def test_dispatch_sweep_and_outbox_relay_pipeline(
     await db_session.refresh(outbox_item)
     assert outbox_item.status == DispatchOutboxStatus.SENT.value
     assert outbox_item.sent_at is not None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sweep_routes_non_external_publish_to_omega_tasks_execute(
+    db_session: AsyncSession, default_policy_config: dict
+):
+    """Verify non-EXTERNAL_PUBLISH reservations route to omega.tasks.execute."""
+    cat = "AI_GENERATION"
+    policy = await SchedulePolicyService.create_policy(
+        db_session,
+        workload_category=cat,
+        version=f"1.0.0-{uuid4().hex[:6]}",
+        policy_config=default_policy_config,
+        activate=True,
+    )
+    policy_cfg = SchedulePolicyConfig(**policy.policy_config)
+
+    mission = Mission(
+        id=uuid4(),
+        title="Generic Sweep Mission",
+        objective="Generic Sweep Test",
+        state="RUNNING",
+        guardian_epoch=1,
+        priority=1,
+    )
+    db_session.add(mission)
+
+    task = Task(
+        id=uuid4(),
+        mission_id=mission.id,
+        task_type="content_generation",
+        title="Content Task",
+        state="READY",
+    )
+    db_session.add(task)
+    await db_session.commit()
+
+    now = datetime.now(UTC)
+    dec, res = await SlotAllocator.allocate_slot(
+        db_session,
+        policy=policy,
+        policy_config=policy_cfg,
+        mission_id=mission.id,
+        task_id=task.id,
+        target_type="TASK_EXECUTION",
+        target_id=task.id,
+        workload_category=cat,
+        channel_id=None,
+        channel_dna_revision_id=None,
+        guardian_epoch=1,
+        candidate_start=now - timedelta(seconds=5),
+        candidate_end=now + timedelta(minutes=10),
+        priority=1,
+        estimated_duration_seconds=300,
+        deadline_at=None,
+        earliest_start_at=now,
+        latest_start_at=None,
+        caller_key="sweep-test-generic-1",
+        priority_score=100.0,
+    )
+    assert res is not None
+    await db_session.commit()
+
+    sweep_stats = await SchedulerSweepService.run_dispatch_sweep(db_session, now=now)
+    assert sweep_stats["claimed"] >= 1
+    assert sweep_stats["dispatched"] >= 1
+
+    outbox_res = await db_session.execute(
+        select(SchedulerDispatchOutbox).where(SchedulerDispatchOutbox.reservation_id == res.id)
+    )
+    outbox_item = outbox_res.scalar_one_or_none()
+    assert outbox_item is not None
+    assert outbox_item.celery_task_name == "omega.tasks.execute"
+    assert outbox_item.celery_args == {"args": [str(task.id)]}
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sweep_external_publish_missing_task_id_fails_closed(
+    db_session: AsyncSession, default_policy_config: dict
+):
+    """Verify EXTERNAL_PUBLISH without task_id fails closed and does not create outbox item."""
+    cat = "EXTERNAL_PUBLISH"
+    policy = await SchedulePolicyService.create_policy(
+        db_session,
+        workload_category=cat,
+        version=f"1.0.0-{uuid4().hex[:6]}",
+        policy_config=default_policy_config,
+        activate=True,
+    )
+
+    mission = Mission(
+        id=uuid4(),
+        title="Fail-Closed Mission",
+        objective="Fail Closed Test",
+        state="RUNNING",
+        guardian_epoch=1,
+        priority=1,
+    )
+    db_session.add(mission)
+    await db_session.commit()
+
+    now = datetime.now(UTC)
+    # Decision with task_id=None
+    target_intent_id = uuid4()
+    decision = ScheduleDecision(
+        id=uuid4(),
+        mission_id=mission.id,
+        task_id=None,
+        target_type="PUBLISH_INTENT",
+        target_id=target_intent_id,
+        workload_category=cat,
+        action="SCHEDULE",
+        reason="Allocated test",
+        policy_id=policy.id,
+        policy_version=policy.version,
+        policy_checksum=policy.checksum,
+        guardian_epoch=1,
+        idempotency_key=f"{uuid4().hex}{uuid4().hex}",
+        evaluated_at=now,
+        created_at=now,
+    )
+    db_session.add(decision)
+
+    reservation = ScheduleReservation(
+        id=uuid4(),
+        decision_id=decision.id,
+        mission_id=mission.id,
+        target_type="PUBLISH_INTENT",
+        target_id=target_intent_id,
+        workload_category=cat,
+        scheduled_start_at=now - timedelta(seconds=5),
+        scheduled_end_at=now + timedelta(minutes=10),
+        state=ReservationState.ACTIVE.value,
+        priority_score=100.0,
+        policy_id=policy.id,
+        policy_version=policy.version,
+        policy_checksum=policy.checksum,
+        guardian_epoch=1,
+        created_at=now,
+        updated_at=now,
+    )
+    db_session.add(reservation)
+    await db_session.commit()
+
+    sweep_stats = await SchedulerSweepService.run_dispatch_sweep(db_session, now=now)
+    assert sweep_stats["claimed"] >= 1
+    assert sweep_stats["rejected"] >= 1
+
+    # Outbox item must NOT be created
+    outbox_res = await db_session.execute(
+        select(SchedulerDispatchOutbox).where(
+            SchedulerDispatchOutbox.reservation_id == reservation.id
+        )
+    )
+    assert outbox_res.scalar_one_or_none() is None
+
+    await db_session.refresh(reservation)
+    assert reservation.state == ReservationState.ACTIVE.value
+    assert reservation.dispatching_at is None
 
 
 # ── 6. Stale Dispatching Recovery Test ──

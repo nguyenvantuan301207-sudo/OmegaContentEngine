@@ -20,6 +20,7 @@ from omega.domain.scheduler import (
     DispatchFenceResult,
     DispatchOutboxStatus,
     ReservationState,
+    ScheduleWorkloadCategory,
 )
 from omega.domain.task import TaskState
 from omega.infrastructure.models import (
@@ -80,17 +81,32 @@ class SchedulerSweepService:
                 )
                 continue
 
+            is_external_publish = (
+                reservation.workload_category
+                == ScheduleWorkloadCategory.EXTERNAL_PUBLISH.value
+            )
+
+            task_id = (
+                reservation.target_id
+                if reservation.target_type == "TASK_EXECUTION"
+                else reservation.decision.task_id
+            )
+
+            if is_external_publish and not task_id:
+                logger.error(
+                    "external_publish_missing_task_id",
+                    reservation_id=str(reservation.id),
+                    target_id=str(reservation.target_id),
+                )
+                rejected_count += 1
+                continue
+
             # 2. Transition reservation: ACTIVE -> DISPATCHING
             reservation.state = ReservationState.DISPATCHING.value
             reservation.dispatching_at = now
             reservation.updated_at = now
 
             # 3. Transition Task to QUEUED if applicable
-            task_id = (
-                reservation.target_id
-                if reservation.target_type == "TASK_EXECUTION"
-                else reservation.decision.task_id
-            )
             if task_id:
                 task_res = await session.execute(
                     select(Task).where(Task.id == task_id).with_for_update()
@@ -116,13 +132,19 @@ class SchedulerSweepService:
 
             # 5. Insert SchedulerDispatchOutbox PENDING row
             # Format task name and args
-            celery_task_name = "omega.tasks.execute"
-            celery_args = {"args": [str(task_id)] if task_id else [str(reservation.target_id)]}
+            if is_external_publish:
+                celery_task_name = "omega.publisher.execute_publish"
+                celery_args = {"args": [str(task_id)]}
+                outbox_task_id = task_id
+            else:
+                celery_task_name = "omega.tasks.execute"
+                celery_args = {"args": [str(task_id)] if task_id else [str(reservation.target_id)]}
+                outbox_task_id = task_id or reservation.target_id
 
             outbox_item = SchedulerDispatchOutbox(
                 id=uuid4(),
                 reservation_id=reservation.id,
-                task_id=task_id or reservation.target_id,
+                task_id=outbox_task_id,
                 mission_id=reservation.mission_id,
                 celery_task_name=celery_task_name,
                 celery_args=celery_args,
