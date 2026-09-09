@@ -32,6 +32,25 @@ class LocalMediaStorageProvider:
         self._assert_safe_path(path)
         return path
 
+    def get_brand_dir(self, channel_id: UUID) -> Path:
+        """Resolve the channel-scoped reusable brand asset directory."""
+        path = (self.get_channel_dir(channel_id) / "brand").resolve()
+        self._assert_safe_path(path)
+        return path
+
+    def resolve_brand_reference(self, channel_id: UUID, reference: str) -> Path:
+        """Resolve a canonical brand URI without accepting arbitrary filesystem paths."""
+        prefix = "brand://channel/"
+        if not reference.startswith(prefix):
+            raise StorageSecurityError("Brand asset reference must use the canonical brand scheme.")
+        storage_key = reference.removeprefix(prefix)
+        if not storage_key or any(part in ("", ".", "..") for part in storage_key.split("/")):
+            raise StorageSecurityError("Brand asset reference contains an unsafe storage key.")
+        brand_dir = self.get_brand_dir(channel_id)
+        resolved = (brand_dir / Path(storage_key)).resolve()
+        self._assert_within_root(resolved, brand_dir)
+        return resolved
+
     def get_production_dir(self, channel_id: UUID, request_id: UUID) -> Path:
         """Resolve the production request root directory."""
         path = (self.get_channel_dir(channel_id) / "production" / str(request_id)).resolve()

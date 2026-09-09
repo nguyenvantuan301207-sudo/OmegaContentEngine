@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from omega.application.brand_asset_resolver import BrandMediaKind, ResolvedBrandAsset
 from omega.application.storyboard_engine import (
     StoryboardPlan,
     StoryboardScene,
@@ -1097,6 +1098,46 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
     orch = make_mock_orchestrator(tmp_path)
     m_exec = lineage_data["mission_execution"]
     req = lineage_data["content_request"]
+    intro_path = tmp_path / "intro.mp4"
+    outro_path = tmp_path / "outro.mp4"
+    intro_path.write_bytes(VALID_MP4_HEADER + b"intro")
+    outro_path.write_bytes(VALID_MP4_HEADER + b"outro")
+    m_exec.channel_dna_revision.snapshot = {
+        "brand_package": {
+            "intro_asset": {
+                "reference": "brand://channel/intro.mp4",
+                "content_hash": "a" * 64,
+                "mime_type": "video/mp4",
+            },
+            "outro_asset": {
+                "reference": "brand://channel/outro.mp4",
+                "content_hash": "b" * 64,
+                "mime_type": "video/mp4",
+            },
+            "long_form": {
+                "micro_intro_enabled": True,
+                "branded_outro_enabled": True,
+            },
+        }
+    }
+    brand_resolver = MagicMock()
+    brand_resolver.resolve_optional.side_effect = [
+        None,
+        ResolvedBrandAsset(
+            local_path=intro_path,
+            content_hash="a" * 64,
+            media_kind=BrandMediaKind.VIDEO,
+            mime_type="video/mp4",
+            reference="brand://channel/intro.mp4",
+        ),
+        ResolvedBrandAsset(
+            local_path=outro_path,
+            content_hash="b" * 64,
+            media_kind=BrandMediaKind.VIDEO,
+            mime_type="video/mp4",
+            reference="brand://channel/outro.mp4",
+        ),
+    ]
     session = make_mock_session(m_exec=m_exec, req=req)
 
     mock_narration_provider = AsyncMock()
@@ -1130,7 +1171,7 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
         asset_orchestrator=orch, output_root=tmp_path / "renders",
         browser_runtime_factory=MagicMock(), video_renderer=mock_video_renderer,
         ffmpeg_renderer=mock_ffmpeg, narration_provider=mock_narration_provider,
-        narration_storage=mock_storage,
+        narration_storage=mock_storage, brand_asset_resolver=brand_resolver,
     )
 
     def fake_storyboard(_):
@@ -1144,8 +1185,14 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
         )
     svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
 
+    orchestration_events = []
+
     async def fake_concat(*args, **kwargs):
-        Path(kwargs["output_path"]).write_bytes(VALID_MP4_HEADER + b"concat")
+        output_path = Path(kwargs["output_path"])
+        event = "brand_concat" if output_path.name == "final_branded.mp4" else "generated_concat"
+        orchestration_events.append((event, list(kwargs["clip_paths"]), output_path))
+        payload = b"branded" if event == "brand_concat" else b"concat"
+        output_path.write_bytes(VALID_MP4_HEADER + payload)
     mock_ffmpeg.concatenate_clips.side_effect = fake_concat
 
     async def fake_mux(*args, **kwargs):
@@ -1153,6 +1200,9 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
     mock_ffmpeg.mux_video_audio.side_effect = fake_mux
 
     async def fake_mix(*args, **kwargs):
+        orchestration_events.append(
+            ("master_audio_mix", kwargs["video_path"], kwargs["output_path"])
+        )
         Path(kwargs["output_path"]).write_bytes(VALID_MP4_HEADER + b"mixed")
     mock_ffmpeg.mix_master_audio.side_effect = fake_mix
 
@@ -1176,9 +1226,19 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
         background_music=bgm, sfx_inputs=[sfx2, sfx1], subtitle_enabled=False
     )
 
-    # Verify mix_master_audio called with normalized arguments
+    # Verify generated content -> master mix -> intro/mixed content/outro orchestration.
     mock_ffmpeg.mix_master_audio.assert_called_once()
     mix_args = mock_ffmpeg.mix_master_audio.call_args[1]
+    generated_event, mix_event, brand_event = orchestration_events
+    assert [generated_event[0], mix_event[0], brand_event[0]] == [
+        "generated_concat", "master_audio_mix", "brand_concat"
+    ]
+    assert generated_event[2].name == "generated_content.mp4"
+    assert mix_args["video_path"] == generated_event[2]
+    assert mix_args["output_path"].name == "mixed_content.mp4"
+    assert brand_event[1] == [intro_path, mix_args["output_path"], outro_path]
+    assert brand_event[1].count(intro_path) == 1
+    assert brand_event[1].count(outro_path) == 1
 
     assert mix_args["target_duration_ms"] == 3500
     assert mix_args["background_music_path"] == bgm_path
@@ -1189,9 +1249,10 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
     assert sfx_inputs[0].start_ms == 500
     assert sfx_inputs[1].start_ms == 1000
 
-    # Output should be the mixed file hash
-    mixed_sha = hashlib.sha256(VALID_MP4_HEADER + b"mixed").hexdigest()
-    assert res.content_sha256 == mixed_sha
+    # The mixed artifact is intermediate; the branded concat artifact is final.
+    branded_sha = hashlib.sha256(VALID_MP4_HEADER + b"branded").hexdigest()
+    assert res.content_sha256 == branded_sha
+    assert res.output_path.read_bytes() == VALID_MP4_HEADER + b"branded"
 
     # Check manifest
     manifest_path = res.output_path.parent / "manifest.json"

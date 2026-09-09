@@ -1,6 +1,7 @@
 import os
 from typing import Any
 
+from omega.application.brand_asset_resolver import BrandAssetResolver
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.narration_provider import get_narration_provider
 from omega.application.render_service import ProductionRenderService
@@ -47,6 +48,7 @@ class ProductionVisualV2Adapter:
             output_root=self.storage.base_root / "visual_v2",
             narration_provider=narration_provider,
             narration_storage=self.storage,
+            brand_asset_resolver=BrandAssetResolver(self.storage),
         )
 
         try:

@@ -40,6 +40,36 @@ def test_escape_ffmpeg_filter_string_length_bound():
 
 
 @pytest.mark.asyncio
+async def test_overlay_logo_command_is_deterministic(tmp_path):
+    renderer = FFmpegRenderer()
+    video = tmp_path / "input.mp4"
+    logo = tmp_path / "logo.png"
+    output = tmp_path / "output.mp4"
+    video.write_bytes(b"video")
+    logo.write_bytes(b"logo")
+    proc = AsyncMock()
+    proc.communicate.return_value = (b"", b"")
+    proc.returncode = 0
+
+    async def create_subprocess(*args, **kwargs):
+        output.write_bytes(b"branded")
+        return proc
+
+    with patch("asyncio.create_subprocess_exec", side_effect=create_subprocess) as mock_exec:
+        await renderer.overlay_logo(video, logo, output)
+
+    command = mock_exec.call_args.args
+    assert command[:2] == ("ffmpeg", "-y")
+    assert str(video.resolve()) in command
+    assert str(logo.resolve()) in command
+    filters = command[command.index("-filter_complex") + 1]
+    assert "scale2ref=w=main_w*0.1:h=-1[logo_scaled][base]" in filters
+    assert "colorchannelmixer=aa=0.7" in filters
+    assert "overlay=x=W-w-W*0.03:y=H*0.03" in filters
+    assert command[-1] == str(output.resolve())
+
+
+@pytest.mark.asyncio
 async def test_mux_video_audio_command_construction():
     renderer = FFmpegRenderer()
 

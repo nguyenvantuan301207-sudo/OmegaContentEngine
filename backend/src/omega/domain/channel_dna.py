@@ -99,7 +99,19 @@ class BrandAssetReference(BaseModel):
     duration_seconds: float | None = Field(default=None, gt=0)
     variant_name: str | None = Field(default=None, min_length=1, max_length=100)
 
-    @field_validator("reference", "mime_type")
+    @field_validator("reference")
+    @classmethod
+    def validate_storage_reference(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("Brand asset reference fields must not be blank.")
+        if not re.fullmatch(r"brand://channel/[A-Za-z0-9][A-Za-z0-9._/-]*", clean):
+            raise ValueError("Brand asset reference must use the brand://channel/<storage-key> scheme.")
+        if any(part in ("", ".", "..") for part in clean.removeprefix("brand://channel/").split("/")):
+            raise ValueError("Brand asset reference contains an unsafe storage key.")
+        return clean
+
+    @field_validator("mime_type")
     @classmethod
     def strip_required_text(cls, value: str) -> str:
         clean = value.strip()
@@ -291,7 +303,7 @@ def resolve_production_brand_spec(
         logo_asset=package.logo_asset,
         logo_variant=package.logo_variant,
         intro_asset=package.intro_asset if is_long_form and policy.micro_intro_enabled else None,
-        outro_asset=package.outro_asset,
+        outro_asset=package.outro_asset if is_long_form and policy.branded_outro_enabled else None,
         channel_bug=package.channel_bug if is_long_form and policy.channel_bug_enabled else None,
         tagline=package.tagline,
         sonic_logo=package.sonic_logo,

@@ -207,6 +207,67 @@ class FFmpegRenderer:
                 f"FFmpeg concatenation failed (code {proc.returncode}): {err_msg}"
             )
 
+    async def overlay_logo(
+        self,
+        video_path: Path | str,
+        logo_path: Path | str,
+        output_path: Path | str,
+        *,
+        scale: float = 0.1,
+        opacity: float = 0.7,
+        position: str = "TOP_RIGHT",
+        safe_margin_x: float = 0.03,
+        safe_margin_y: float = 0.03,
+        timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
+    ) -> None:
+        """Overlay a verified local logo using deterministic scale and positioning rules."""
+        video = Path(video_path).resolve()
+        logo = Path(logo_path).resolve()
+        output = Path(output_path).resolve()
+        if not video.is_file() or video.stat().st_size == 0:
+            raise ValueError("Input video missing or empty")
+        if not logo.is_file() or logo.stat().st_size == 0:
+            raise ValueError("Logo image missing or empty")
+        if video == output:
+            raise ValueError("Input and output video paths cannot be the same")
+        if position not in {"TOP_LEFT", "TOP_RIGHT", "BOTTOM_LEFT", "BOTTOM_RIGHT"}:
+            raise ValueError("Unsupported logo position")
+
+        x = "W*{margin}" if position.endswith("LEFT") else "W-w-W*{margin}"
+        y = "H*{margin}" if position.startswith("TOP") else "H-h-H*{margin}"
+        overlay = f"overlay=x={x.format(margin=safe_margin_x)}:y={y.format(margin=safe_margin_y)}"
+        # scale2ref is required to reference the main video width (main_w) from the logo
+        # stream. It outputs: [logo_scaled] (logo scaled to main_w*scale) and [base]
+        # (reference passthrough of [0:v] unchanged). [base] is then used as the
+        # composite base so the main video is never re-encoded unnecessarily.
+        filters = (
+            f"[1:v][0:v]scale2ref=w=main_w*{scale}:h=-1[logo_scaled][base];"
+            f"[logo_scaled]format=rgba,colorchannelmixer=aa={opacity}[logo_alpha];"
+            f"[base][logo_alpha]{overlay}[vout]"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "ffmpeg", "-y", "-i", str(video), "-i", str(logo),
+            "-filter_complex", filters,
+            "-map", "[vout]", "-map", "0:a?",
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "copy",
+            str(output),
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            raise FFmpegExecutionError("FFmpeg logo overlay timed out.") from exc
+        if proc.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
+            raise FFmpegExecutionError(f"FFmpeg logo overlay failed (code {proc.returncode}): {detail}")
+        if not output.is_file() or output.stat().st_size == 0:
+            raise FFmpegExecutionError("FFmpeg logo overlay succeeded but output is missing or empty")
+
     async def mux_video_audio(
         self,
         video_path: Path | str,

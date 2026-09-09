@@ -20,6 +20,12 @@ from omega.application.audio_mix_policy import (
     build_background_music_plan,
     build_sfx_event_plan,
 )
+from omega.application.brand_asset_resolver import (
+    BrandAssetResolutionError,
+    BrandAssetResolver,
+    BrandMediaKind,
+    ResolvedBrandAsset,
+)
 from omega.application.ffmpeg_renderer import FFmpegRenderer
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.narration_provider import NarrationProvider
@@ -235,6 +241,7 @@ class VisualProductionV2Service:
         ffmpeg_renderer: FFmpegRenderer | None = None,
         narration_provider: NarrationProvider | None = None,
         narration_storage: LocalMediaStorageProvider | None = None,
+        brand_asset_resolver: BrandAssetResolver | None = None,
     ):
         self._orchestrator = asset_orchestrator
         self._output_root = output_root
@@ -248,6 +255,7 @@ class VisualProductionV2Service:
         self._storyboard_engine = StoryboardEngine()
         self._narration_provider = narration_provider
         self._narration_storage = narration_storage
+        self._brand_asset_resolver = brand_asset_resolver
         if self._narration_provider and not self._narration_storage:
             raise ValueError("narration_storage is required when narration_provider is supplied")
 
@@ -301,6 +309,15 @@ class VisualProductionV2Service:
             channel_dna_revision_id=pinned_dna_revision.id,
             production_format=BrandFormat.LONG_FORM,
         )
+        try:
+            resolved_logo, resolved_intro, resolved_outro = self._resolve_visual_brand_assets(
+                mission.channel_id,
+                resolved_brand.logo_asset,
+                resolved_brand.intro_asset,
+                resolved_brand.outro_asset,
+            )
+        except BrandAssetResolutionError as exc:
+            raise VerticalSliceError(f"Brand asset resolution failed: {self._sanitize_error(exc)}") from exc
 
         req_stmt = (
             select(ContentGenerationRequest)
@@ -380,6 +397,13 @@ class VisualProductionV2Service:
         )
         if resolved_brand.identity is not None:
             fingerprint_input += f":brand-spec-v1:{resolved_brand.identity}"
+        resolved_brand_identity = self._resolved_brand_asset_identity(
+            resolved_logo,
+            resolved_intro,
+            resolved_outro,
+        )
+        if resolved_brand_identity is not None:
+            fingerprint_input += f":brand-render-assets-v1:{resolved_brand_identity}"
         if self._narration_provider:
             fingerprint_input += ":narrated"
             provider_cls = self._narration_provider.__class__.__name__
@@ -824,27 +848,48 @@ class VisualProductionV2Service:
                 runtime_narration_segments = []
                 runtime_subtitle_cues = []
 
-            # 8. Final Concatenation
-            final_temp_mp4 = work_dir / "final_temp.mp4"
+            # 8. Deterministic brand composition and final concatenation
+            branded_content_paths = ordered_scene_paths
+            if resolved_logo is not None and resolved_brand.channel_bug is not None:
+                logo_policy = resolved_brand.channel_bug
+                branded_content_paths = []
+                for scene_path in ordered_scene_paths:
+                    branded_path = work_dir / f"{scene_path.stem}_branded.mp4"
+                    try:
+                        await self._ffmpeg_renderer.overlay_logo(
+                            video_path=scene_path,
+                            logo_path=resolved_logo.local_path,
+                            output_path=branded_path,
+                            scale=logo_policy.scale,
+                            opacity=logo_policy.opacity,
+                            position=logo_policy.position.value,
+                            safe_margin_x=logo_policy.safe_margin_x,
+                            safe_margin_y=logo_policy.safe_margin_y,
+                        )
+                    except Exception as e:
+                        raise VerticalSliceError(f"Logo overlay failed: {self._sanitize_error(e)}") from e
+                    branded_content_paths.append(branded_path)
+
+            generated_content_mp4 = work_dir / "generated_content.mp4"
             try:
                 await self._ffmpeg_renderer.concatenate_clips(
-                    clip_paths=ordered_scene_paths,
-                    output_path=final_temp_mp4,
+                    clip_paths=branded_content_paths,
+                    output_path=generated_content_mp4,
                     srt_path=None,
                 )
             except Exception as e:
-                raise VerticalSliceError(f"Final video concatenation failed: {self._sanitize_error(e)}") from e
+                raise VerticalSliceError(f"Generated content concatenation failed: {self._sanitize_error(e)}") from e
 
-            if not final_temp_mp4.is_file() or final_temp_mp4.stat().st_size <= 0:
-                raise VerticalSliceError("Final concatenated MP4 is missing or empty")
+            if not generated_content_mp4.is_file() or generated_content_mp4.stat().st_size <= 0:
+                raise VerticalSliceError("Generated content MP4 is missing or empty")
 
-            with open(final_temp_mp4, "rb") as f:
+            with open(generated_content_mp4, "rb") as f:
                 hdr = f.read(4096)
                 if b"ftyp" not in hdr:
-                    raise VerticalSliceError("Final concatenated MP4 missing ftyp header")
+                    raise VerticalSliceError("Generated content MP4 missing ftyp header")
 
             # 8.5 Master Audio Mix
-            working_final_mp4 = final_temp_mp4
+            working_content_mp4 = generated_content_mp4
             audio_mix_manifest = {
                 "audio_mix_enabled": False,
                 "background_music_enabled": False,
@@ -921,11 +966,11 @@ class VisualProductionV2Service:
                         )
                     )
 
-                final_mixed_mp4 = work_dir / "final_mixed.mp4"
+                mixed_content_mp4 = work_dir / "mixed_content.mp4"
                 try:
                     await self._ffmpeg_renderer.mix_master_audio(
-                        video_path=final_temp_mp4,
-                        output_path=final_mixed_mp4,
+                        video_path=generated_content_mp4,
+                        output_path=mixed_content_mp4,
                         target_duration_ms=audio_mix_target_duration_ms,
                         background_music_path=bgm_path,
                         background_music_gain_db=bgm_gain,
@@ -937,15 +982,15 @@ class VisualProductionV2Service:
                 except Exception as e:
                     raise VerticalSliceError(f"Master audio mix failed: {self._sanitize_error(e)}") from e
 
-                if not final_mixed_mp4.is_file() or final_mixed_mp4.stat().st_size <= 0:
+                if not mixed_content_mp4.is_file() or mixed_content_mp4.stat().st_size <= 0:
                     raise VerticalSliceError("Mixed MP4 missing or empty")
 
-                with open(final_mixed_mp4, "rb") as f:
+                with open(mixed_content_mp4, "rb") as f:
                     hdr = f.read(4096)
                     if b"ftyp" not in hdr:
                         raise VerticalSliceError("Mixed MP4 missing ftyp header")
 
-                working_final_mp4 = final_mixed_mp4
+                working_content_mp4 = mixed_content_mp4
 
                 audio_mix_manifest = {
                     "audio_mix_enabled": True,
@@ -955,6 +1000,27 @@ class VisualProductionV2Service:
                     "sfx_attribution_required_count": sum(1 for e in mix_plan.sfx_events if e.attribution_required),
                     "audio_mix_target_duration_ms": audio_mix_target_duration_ms,
                 }
+
+            if resolved_intro is not None or resolved_outro is not None:
+                final_clip_paths = self._brand_clip_paths(
+                    [working_content_mp4],
+                    resolved_intro,
+                    resolved_outro,
+                )
+                final_branded_mp4 = work_dir / "final_branded.mp4"
+                try:
+                    await self._ffmpeg_renderer.concatenate_clips(
+                        clip_paths=final_clip_paths,
+                        output_path=final_branded_mp4,
+                        srt_path=None,
+                    )
+                except Exception as e:
+                    raise VerticalSliceError(f"Final brand concatenation failed: {self._sanitize_error(e)}") from e
+                if not final_branded_mp4.is_file() or final_branded_mp4.stat().st_size <= 0:
+                    raise VerticalSliceError("Final branded MP4 is missing or empty")
+                working_final_mp4 = final_branded_mp4
+            else:
+                working_final_mp4 = working_content_mp4
 
             final_sha = self._compute_streaming_sha(working_final_mp4)
             working_final_mp4.replace(final_mp4_path)
@@ -987,6 +1053,7 @@ class VisualProductionV2Service:
                 "scene_artifacts_version": "v1",
                 "resolved_brand_spec": resolved_brand.model_dump(mode="json"),
                 "resolved_brand_identity": resolved_brand.identity,
+                "resolved_brand_asset_identity": resolved_brand_identity,
                 "mission_id": str(mission.id),
                 "mission_execution_id": str(mission_execution_id),
                 "content_request_id": str(content_request_id),
@@ -1373,6 +1440,59 @@ class VisualProductionV2Service:
         finally:
             if work_dir.exists():
                 shutil.rmtree(work_dir, ignore_errors=True)
+
+    def _resolve_visual_brand_assets(
+        self,
+        channel_id: UUID,
+        logo_asset: Any,
+        intro_asset: Any,
+        outro_asset: Any,
+    ) -> tuple[ResolvedBrandAsset | None, ResolvedBrandAsset | None, ResolvedBrandAsset | None]:
+        if logo_asset is None and intro_asset is None and outro_asset is None:
+            return None, None, None
+        if self._brand_asset_resolver is None:
+            raise BrandAssetResolutionError("Brand asset resolver is required for configured visual brand assets.")
+        resolved = (
+            self._brand_asset_resolver.resolve_optional(channel_id, logo_asset, BrandMediaKind.IMAGE),
+            self._brand_asset_resolver.resolve_optional(channel_id, intro_asset, BrandMediaKind.VIDEO),
+            self._brand_asset_resolver.resolve_optional(channel_id, outro_asset, BrandMediaKind.VIDEO),
+        )
+        expected = (BrandMediaKind.IMAGE, BrandMediaKind.VIDEO, BrandMediaKind.VIDEO)
+        if any(asset is not None and asset.media_kind != kind for asset, kind in zip(resolved, expected, strict=True)):
+            raise BrandAssetResolutionError("Resolved brand asset media kind mismatch.")
+        return resolved
+
+    @staticmethod
+    def _brand_clip_paths(
+        content_paths: list[Path],
+        intro: ResolvedBrandAsset | None,
+        outro: ResolvedBrandAsset | None,
+    ) -> list[Path]:
+        return [
+            *([intro.local_path] if intro is not None else []),
+            *content_paths,
+            *([outro.local_path] if outro is not None else []),
+        ]
+
+    @staticmethod
+    def _resolved_brand_asset_identity(
+        logo: ResolvedBrandAsset | None,
+        intro: ResolvedBrandAsset | None,
+        outro: ResolvedBrandAsset | None,
+    ) -> str | None:
+        values = {
+            role: {
+                "reference": asset.reference,
+                "media_kind": asset.media_kind.value,
+                "content_sha256": asset.content_hash,
+            }
+            for role, asset in (("logo", logo), ("intro", intro), ("outro", outro))
+            if asset is not None
+        }
+        if not values:
+            return None
+        canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def _apply_v0_compatibility(self, scene: StoryboardScene) -> StoryboardScene:
         strat = scene.visual_strategy

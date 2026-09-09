@@ -263,6 +263,45 @@ def test_pinned_brand_resolution_is_value_like_and_deterministic() -> None:
         first.logo_variant = "mutable"
 
 
+def test_outro_policy_controls_effective_spec_and_identity() -> None:
+    from uuid import uuid4
+
+    outro = {
+        "reference": "brand://channel/outro",
+        "content_hash": "c" * 64,
+        "mime_type": "video/mp4",
+        "duration_seconds": 6.0,
+    }
+    disabled = resolve_production_brand_spec(
+        channel_dna_snapshot={"brand_package": {"outro_asset": outro}},
+        channel_dna_revision_id=uuid4(),
+        production_format=BrandFormat.LONG_FORM,
+    )
+    dormant_changed = resolve_production_brand_spec(
+        channel_dna_snapshot={
+            "brand_package": {"outro_asset": {**outro, "content_hash": "d" * 64}}
+        },
+        channel_dna_revision_id=uuid4(),
+        production_format=BrandFormat.LONG_FORM,
+    )
+    enabled = resolve_production_brand_spec(
+        channel_dna_snapshot={
+            "brand_package": {
+                "outro_asset": outro,
+                "long_form": {"branded_outro_enabled": True},
+            }
+        },
+        channel_dna_revision_id=uuid4(),
+        production_format=BrandFormat.LONG_FORM,
+    )
+
+    assert disabled.outro_asset is None
+    assert disabled.identity == dormant_changed.identity
+    assert enabled.outro_asset is not None
+    assert enabled.outro_asset.content_hash == "c" * 64
+    assert enabled.identity != disabled.identity
+
+
 def test_no_brand_resolution_has_no_external_substitution() -> None:
     from uuid import uuid4
 
