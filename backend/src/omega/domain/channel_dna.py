@@ -8,7 +8,11 @@ This is the domain layer — zero infrastructure dependencies.
 from __future__ import annotations
 
 import enum
+import hashlib
+import json
 import re
+from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -80,6 +84,220 @@ class VisualStyle(BaseModel):
     editing_style: str = Field(default="DYNAMIC_JUMP_CUT", min_length=1, max_length=100)
     b_roll_style: str = Field(default="TECH_SCREENCAST", min_length=1, max_length=100)
     caption_style: str = Field(default="ANIMATED_WORD", min_length=1, max_length=100)
+
+
+class BrandAssetReference(BaseModel):
+    """Stable reusable brand asset identity stored in a Channel DNA snapshot."""
+
+    model_config = ConfigDict(frozen=True)
+
+    reference: str = Field(min_length=1, max_length=2048)
+    content_hash: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
+    mime_type: str = Field(min_length=3, max_length=255)
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
+    duration_seconds: float | None = Field(default=None, gt=0)
+    variant_name: str | None = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("reference", "mime_type")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise ValueError("Brand asset reference fields must not be blank.")
+        return clean
+
+    @field_validator("content_hash")
+    @classmethod
+    def normalize_hash(cls, value: str) -> str:
+        return value.lower()
+
+
+class ChannelBugPosition(enum.StrEnum):
+    TOP_LEFT = "TOP_LEFT"
+    TOP_RIGHT = "TOP_RIGHT"
+    BOTTOM_LEFT = "BOTTOM_LEFT"
+    BOTTOM_RIGHT = "BOTTOM_RIGHT"
+
+
+class ChannelBugTimingPolicy(enum.StrEnum):
+    ALWAYS = "ALWAYS"
+    AFTER_INTRO = "AFTER_INTRO"
+    MAIN_CONTENT_ONLY = "MAIN_CONTENT_ONLY"
+
+
+class ChannelBugPolicy(BaseModel):
+    """Normalized renderer-independent channel logo overlay intent."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    logo_variant: str | None = Field(default=None, min_length=1, max_length=100)
+    position: ChannelBugPosition = ChannelBugPosition.TOP_RIGHT
+    safe_margin_x: float = Field(default=0.03, ge=0.0, le=0.25)
+    safe_margin_y: float = Field(default=0.03, ge=0.0, le=0.25)
+    scale: float = Field(default=0.1, gt=0.0, le=1.0)
+    opacity: float = Field(default=0.7, ge=0.0, le=1.0)
+    timing_policy: ChannelBugTimingPolicy = ChannelBugTimingPolicy.MAIN_CONTENT_ONLY
+    subtitle_safe: bool = True
+
+
+class EndScreenLayoutType(enum.StrEnum):
+    LOGO_ONLY = "LOGO_ONLY"
+    SUBSCRIBE = "SUBSCRIBE"
+    NEXT_VIDEO = "NEXT_VIDEO"
+    SUBSCRIBE_AND_NEXT_VIDEO = "SUBSCRIBE_AND_NEXT_VIDEO"
+
+
+class EndScreenLayout(BaseModel):
+    """Generic deterministic end-screen layout intent."""
+
+    model_config = ConfigDict(frozen=True)
+
+    enabled: bool = False
+    layout: EndScreenLayoutType = EndScreenLayoutType.LOGO_ONLY
+    show_tagline: bool = False
+    show_subscribe: bool = False
+    next_video_slots: int = Field(default=0, ge=0, le=4)
+
+
+class BrandFormat(enum.StrEnum):
+    LONG_FORM = "LONG_FORM"
+    SHORT_FORM = "SHORT_FORM"
+
+
+class LongFormBrandPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    hook_before_intro: Literal[True] = True
+    micro_intro_enabled: bool = False
+    channel_bug_enabled: bool = False
+    branded_outro_enabled: bool = False
+    end_screen_enabled: bool = False
+
+
+class ShortFormBrandPolicy(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    inherit_long_form_micro_intro: Literal[False] = False
+    lightweight_logo_motif_enabled: bool = False
+    short_ending_enabled: bool = False
+
+
+class BrandPackage(BaseModel):
+    """Optional reusable channel brand package and format-specific policy."""
+
+    model_config = ConfigDict(frozen=True)
+
+    logo_asset: BrandAssetReference | None = None
+    logo_variant: str | None = Field(default=None, min_length=1, max_length=100)
+    intro_asset: BrandAssetReference | None = None
+    outro_asset: BrandAssetReference | None = None
+    channel_bug: ChannelBugPolicy = Field(default_factory=ChannelBugPolicy)
+    tagline: str | None = Field(default=None, min_length=1, max_length=300)
+    sonic_logo: BrandAssetReference | None = None
+    end_screen_layout: EndScreenLayout = Field(default_factory=EndScreenLayout)
+    long_form: LongFormBrandPolicy = Field(default_factory=LongFormBrandPolicy)
+    short_form: ShortFormBrandPolicy = Field(default_factory=ShortFormBrandPolicy)
+
+    @model_validator(mode="after")
+    def validate_asset_roles_and_dependencies(self) -> BrandPackage:
+        expected_types = (
+            ("logo_asset", self.logo_asset, "image/"),
+            ("intro_asset", self.intro_asset, "video/"),
+            ("outro_asset", self.outro_asset, "video/"),
+            ("sonic_logo", self.sonic_logo, "audio/"),
+        )
+        for field_name, asset, mime_prefix in expected_types:
+            if asset is not None and not asset.mime_type.lower().startswith(mime_prefix):
+                raise ValueError(f"{field_name} must use a {mime_prefix[:-1]} MIME type.")
+        if self.intro_asset and self.intro_asset.duration_seconds is not None and not 1.5 <= self.intro_asset.duration_seconds <= 3.0:
+            raise ValueError("intro_asset duration must be between 1.5 and 3 seconds.")
+        if self.outro_asset and self.outro_asset.duration_seconds is not None and not 5.0 <= self.outro_asset.duration_seconds <= 8.0:
+            raise ValueError("outro_asset duration must be between 5 and 8 seconds.")
+        if self.channel_bug.enabled and self.logo_asset is None:
+            raise ValueError("Enabled channel_bug requires logo_asset.")
+        return self
+
+
+class ResolvedProductionBrandSpec(BaseModel):
+    """Immutable render-relevant brand values resolved from one pinned DNA revision."""
+
+    model_config = ConfigDict(frozen=True)
+
+    format: BrandFormat
+    source_channel_dna_revision_id: UUID
+    logo_asset: BrandAssetReference | None = None
+    logo_variant: str | None = None
+    intro_asset: BrandAssetReference | None = None
+    outro_asset: BrandAssetReference | None = None
+    channel_bug: ChannelBugPolicy | None = None
+    tagline: str | None = None
+    sonic_logo: BrandAssetReference | None = None
+    end_screen_layout: EndScreenLayout | None = None
+    sequencing_policy: LongFormBrandPolicy | ShortFormBrandPolicy
+
+    @property
+    def has_render_effect(self) -> bool:
+        return any((
+            self.logo_asset is not None,
+            self.intro_asset is not None,
+            self.outro_asset is not None,
+            self.sonic_logo is not None,
+            self.channel_bug is not None and self.channel_bug.enabled,
+            self.end_screen_layout is not None and self.end_screen_layout.enabled,
+            self.tagline is not None,
+        ))
+
+    def canonical_json(self) -> str:
+        render_values = self.model_dump(
+            mode="json",
+            exclude={"source_channel_dna_revision_id"},
+        )
+        return json.dumps(render_values, sort_keys=True, separators=(",", ":"))
+
+    @property
+    def identity(self) -> str | None:
+        if not self.has_render_effect:
+            return None
+        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+
+
+def resolve_production_brand_spec(
+    *,
+    channel_dna_snapshot: dict,
+    channel_dna_revision_id: UUID,
+    production_format: BrandFormat,
+) -> ResolvedProductionBrandSpec:
+    """Resolve deterministic brand input exclusively from a pinned DNA snapshot."""
+    dna = ChannelDNA.model_validate(channel_dna_snapshot)
+    package = dna.brand_package
+    if package is None:
+        return ResolvedProductionBrandSpec(
+            format=production_format,
+            source_channel_dna_revision_id=channel_dna_revision_id,
+            sequencing_policy=(
+                LongFormBrandPolicy()
+                if production_format == BrandFormat.LONG_FORM
+                else ShortFormBrandPolicy()
+            ),
+        )
+
+    is_long_form = production_format == BrandFormat.LONG_FORM
+    policy = package.long_form if is_long_form else package.short_form
+    return ResolvedProductionBrandSpec(
+        format=production_format,
+        source_channel_dna_revision_id=channel_dna_revision_id,
+        logo_asset=package.logo_asset,
+        logo_variant=package.logo_variant,
+        intro_asset=package.intro_asset if is_long_form and policy.micro_intro_enabled else None,
+        outro_asset=package.outro_asset,
+        channel_bug=package.channel_bug if is_long_form and policy.channel_bug_enabled else None,
+        tagline=package.tagline,
+        sonic_logo=package.sonic_logo,
+        end_screen_layout=package.end_screen_layout,
+        sequencing_policy=policy,
+    )
 
 
 class LongFormRuntimeProfile(BaseModel):
@@ -299,6 +517,7 @@ class ChannelDNA(BaseModel):
     audience: AudienceProfile = Field(default_factory=AudienceProfile)
     brand_voice: BrandVoice = Field(default_factory=BrandVoice)
     visual_style: VisualStyle = Field(default_factory=VisualStyle)
+    brand_package: BrandPackage | None = None
     content_strategy: ContentStrategy = Field(default_factory=ContentStrategy)
     publishing_preferences: PublishingPreferences = Field(default_factory=PublishingPreferences)
     goals_and_kpis: GoalsAndKPIs = Field(default_factory=GoalsAndKPIs)

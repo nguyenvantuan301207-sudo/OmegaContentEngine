@@ -27,6 +27,7 @@ from omega.application.visual_production_v2_service import (
     VisualProductionV2Service,
 )
 from omega.infrastructure.models import (
+    ChannelDNARevision,
     ContentCitation,
     ContentGenerationRequest,
     Mission,
@@ -205,12 +206,20 @@ def lineage_data():
     req_id = uuid.uuid4()
 
     mission = Mission(id=mission_id, channel_id=chan_id, title="Test Mission")
+    dna_revision = ChannelDNARevision(
+        id=dna_id,
+        channel_id=chan_id,
+        version=1,
+        snapshot={},
+        change_reason="test",
+    )
     m_exec = MissionExecution(
         id=exec_id,
         mission_id=mission_id,
         channel_dna_revision_id=dna_id,
     )
     m_exec.mission = mission
+    m_exec.channel_dna_revision = dna_revision
 
     script = make_orm_script_version()
     req = ContentGenerationRequest(
@@ -224,6 +233,7 @@ def lineage_data():
     return {
         "channel_id": chan_id,
         "dna_id": dna_id,
+        "dna_revision": dna_revision,
         "mission_id": mission_id,
         "execution_id": exec_id,
         "request_id": req_id,

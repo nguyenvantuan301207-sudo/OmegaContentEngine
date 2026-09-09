@@ -39,8 +39,10 @@ from omega.application.visual_asset_engine import VisualAssetEngine, VisualAsset
 from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import VisualAssetKind, VisualDirector
 from omega.application.visual_template_renderer import VisualTemplateRenderer
+from omega.domain.channel_dna import BrandFormat, resolve_production_brand_spec
 from omega.infrastructure.browser_capture_runtime import BrowserCaptureRuntime
 from omega.infrastructure.models import (
+    ChannelDNARevision,
     ContentGenerationRequest,
     MissionExecution,
     ScriptSection,
@@ -275,7 +277,10 @@ class VisualProductionV2Service:
         exec_stmt = (
             select(MissionExecution)
             .where(MissionExecution.id == mission_execution_id)
-            .options(selectinload(MissionExecution.mission))
+            .options(
+                selectinload(MissionExecution.mission),
+                selectinload(MissionExecution.channel_dna_revision),
+            )
         )
         exec_res = await session.execute(exec_stmt)
         mission_exec = exec_res.scalar_one_or_none()
@@ -288,6 +293,14 @@ class VisualProductionV2Service:
 
         if not mission.channel_id:
             raise VerticalSliceError(f"Mission '{mission.id}' has no channel_id")
+        pinned_dna_revision: ChannelDNARevision | None = mission_exec.channel_dna_revision
+        if pinned_dna_revision is None:
+            raise VerticalSliceError("MissionExecution is missing pinned ChannelDNARevision")
+        resolved_brand = resolve_production_brand_spec(
+            channel_dna_snapshot=pinned_dna_revision.snapshot,
+            channel_dna_revision_id=pinned_dna_revision.id,
+            production_format=BrandFormat.LONG_FORM,
+        )
 
         req_stmt = (
             select(ContentGenerationRequest)
@@ -365,6 +378,8 @@ class VisualProductionV2Service:
             f"{content_request_id}:{script_version.id}:{fps}:"
             f"visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2"
         )
+        if resolved_brand.identity is not None:
+            fingerprint_input += f":brand-spec-v1:{resolved_brand.identity}"
         if self._narration_provider:
             fingerprint_input += ":narrated"
             provider_cls = self._narration_provider.__class__.__name__
@@ -970,6 +985,8 @@ class VisualProductionV2Service:
             manifest_content = {
                 "run_fingerprint": run_fingerprint,
                 "scene_artifacts_version": "v1",
+                "resolved_brand_spec": resolved_brand.model_dump(mode="json"),
+                "resolved_brand_identity": resolved_brand.identity,
                 "mission_id": str(mission.id),
                 "mission_execution_id": str(mission_execution_id),
                 "content_request_id": str(content_request_id),
