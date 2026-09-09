@@ -82,6 +82,32 @@ class VisualStyle(BaseModel):
     caption_style: str = Field(default="ANIMATED_WORD", min_length=1, max_length=100)
 
 
+class LongFormRuntimeProfile(BaseModel):
+    """Validated runtime bounds and recommendation for long-form productions."""
+
+    minimum_seconds: int = Field(default=480, ge=30, le=3600)
+    preferred_minimum_seconds: int = Field(default=720, ge=30, le=3600)
+    default_recommendation_seconds: int = Field(default=840, ge=30, le=3600)
+    preferred_maximum_seconds: int = Field(default=960, ge=30, le=3600)
+    maximum_seconds: int = Field(default=1320, ge=30, le=3600)
+
+    @model_validator(mode="after")
+    def validate_ordered_bounds(self) -> LongFormRuntimeProfile:
+        bounds = (
+            self.minimum_seconds,
+            self.preferred_minimum_seconds,
+            self.default_recommendation_seconds,
+            self.preferred_maximum_seconds,
+            self.maximum_seconds,
+        )
+        if bounds != tuple(sorted(bounds)):
+            raise ValueError(
+                "Long-form runtime bounds must be ordered: minimum <= preferred minimum "
+                "<= default recommendation <= preferred maximum <= maximum."
+            )
+        return self
+
+
 class ContentStrategy(BaseModel):
     """Defines content niche, ordered pillars, and duration targets."""
 
@@ -102,6 +128,7 @@ class ContentStrategy(BaseModel):
     )
     default_duration_min_seconds: int = Field(default=300, ge=10, le=86400)
     default_duration_max_seconds: int = Field(default=900, ge=10, le=86400)
+    long_form_runtime: LongFormRuntimeProfile = Field(default_factory=LongFormRuntimeProfile)
     evergreen_ratio: float = Field(default=0.7, ge=0.0, le=1.0)
 
     @field_validator("subniches", "content_pillars")

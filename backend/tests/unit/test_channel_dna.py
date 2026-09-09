@@ -10,6 +10,7 @@ from omega.domain.channel_dna import (
     FrequencyPeriod,
     KPIMetricType,
     KPITarget,
+    LongFormRuntimeProfile,
     PublishingFrequency,
     PublishingPreferences,
 )
@@ -104,6 +105,25 @@ def test_content_strategy_duration_and_pillars() -> None:
         content_pillars=["News", "Tutorials", "news", "TUTORIALS"],
     )
     assert strat_dedup.content_pillars == ["News", "Tutorials"]
+
+
+def test_long_form_runtime_profile_defaults_and_ordering() -> None:
+    profile = LongFormRuntimeProfile()
+    assert (
+        profile.minimum_seconds,
+        profile.preferred_minimum_seconds,
+        profile.default_recommendation_seconds,
+        profile.preferred_maximum_seconds,
+        profile.maximum_seconds,
+    ) == (480, 720, 840, 960, 1320)
+
+    with pytest.raises(ValueError, match="must be ordered"):
+        LongFormRuntimeProfile(default_recommendation_seconds=1000)
+
+
+def test_existing_content_strategy_snapshot_gets_runtime_defaults() -> None:
+    strategy = ContentStrategy.model_validate({"niche": "Existing channel"})
+    assert strategy.long_form_runtime == LongFormRuntimeProfile()
 
 
 def test_channel_dna_default_builder() -> None:

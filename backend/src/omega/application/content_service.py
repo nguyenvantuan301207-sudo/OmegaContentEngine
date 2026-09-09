@@ -21,6 +21,7 @@ from omega.application.content_provider import ContentGenerationProvider, Templa
 from omega.application.content_qa import run_content_qa_checks
 from omega.application.statement_validator import validate_and_classify_statement
 from omega.domain.channel import ChannelState
+from omega.domain.channel_dna import ChannelDNA
 from omega.domain.content import (
     ContentCitationResponse,
     ContentGenerationMode,
@@ -33,6 +34,7 @@ from omega.domain.content import (
     ContentQAResultResponse,
     ContentRequestStatus,
     ContentRunPayload,
+    ContentType,
     OutlineSectionSchema,
     QAFindingSchema,
     ScriptQAStatus,
@@ -159,6 +161,18 @@ async def create_request(
             raise ValueError("Channel has no ChannelDNARevision snapshots available.")
         channel_dna_revision_id = latest_rev.id
 
+    pinned_revision = await session.get(ChannelDNARevision, channel_dna_revision_id)
+    if pinned_revision is None:
+        raise ValueError("Pinned ChannelDNARevision does not exist.")
+    dna = ChannelDNA.model_validate(pinned_revision.snapshot)
+    target_duration_seconds = request_in.target_duration_seconds
+    if target_duration_seconds is None:
+        target_duration_seconds = (
+            dna.content_strategy.long_form_runtime.default_recommendation_seconds
+            if request_in.content_type == ContentType.YOUTUBE_LONGFORM
+            else 480
+        )
+
     content_req = ContentGenerationRequest(
         id=uuid.uuid4(),
         channel_id=channel_id,
@@ -170,7 +184,7 @@ async def create_request(
         mode=mode.value,
         status=ContentRequestStatus.DRAFT.value,
         content_type=request_in.content_type.value,
-        target_duration_seconds=request_in.target_duration_seconds,
+        target_duration_seconds=target_duration_seconds,
         target_word_count=request_in.target_word_count,
         language=request_in.language,
         region=request_in.region,

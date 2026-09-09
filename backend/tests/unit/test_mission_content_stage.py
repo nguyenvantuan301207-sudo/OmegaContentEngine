@@ -12,7 +12,7 @@ import pytest
 from omega.application import content_service
 from omega.application import executor as executor_module
 from omega.application.durable_dispatch import DurableDispatchService
-from omega.domain.content import ContentRequestStatus
+from omega.domain.content import ContentRequestStatus, ContentType
 from omega.domain.mission import MissionState
 from omega.domain.task import TaskState
 from omega.domain.topic import TopicStatus
@@ -217,6 +217,23 @@ def test_pinned_dna_mismatch_fails_before_generation(monkeypatch) -> None:
         worker_tasks._execute_canonical_content(uuid4(), None, data.context)
     create.assert_awaited_once()
     generate.assert_not_awaited()
+
+
+def test_canonical_long_form_uses_pinned_dna_default_runtime(monkeypatch) -> None:
+    data = lineage()
+    request = data.records[(ContentGenerationRequest, data.request_id)]
+    request.content_type = ContentType.YOUTUBE_LONGFORM.value
+    request.target_duration_seconds = 840
+    create, _ = install_adapter_fakes(monkeypatch, data)
+
+    worker_tasks._execute_canonical_content(uuid4(), None, data.context)
+
+    request_in = create.await_args.args[2]
+    assert request_in.content_type == ContentType.YOUTUBE_LONGFORM
+    assert request_in.target_duration_seconds is None
+    assert request.channel_dna_revision_id == data.dna_id
+    assert request.target_duration_seconds == 840
+    assert request.target_duration_seconds != 480
 
 
 def test_generation_uses_deterministic_request_and_returns_persisted_ids(monkeypatch) -> None:

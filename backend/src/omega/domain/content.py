@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ContentGenerationMode(enum.StrEnum):
@@ -338,11 +338,21 @@ class ContentGenerationRequestCreate(BaseModel):
     research_brief_id: UUID
     mission_execution_id: UUID | None = None
     content_type: ContentType = ContentType.YOUTUBE_LONGFORM
-    target_duration_seconds: int = Field(default=480, ge=30, le=3600)
+    target_duration_seconds: int | None = Field(default=None, ge=30, le=3600)
     target_word_count: int | None = Field(default=None, ge=50, le=10000)
     language: str = Field(default="en", max_length=20)
     region: str = Field(default="US", max_length=10)
     creative_direction: str | None = Field(default=None, max_length=2000)
+
+    @model_validator(mode="after")
+    def validate_format_runtime(self) -> ContentGenerationRequestCreate:
+        if (
+            self.content_type == ContentType.YOUTUBE_LONGFORM
+            and self.target_duration_seconds is not None
+            and not 480 <= self.target_duration_seconds <= 1320
+        ):
+            raise ValueError("Long-form target duration must be between 480 and 1320 seconds.")
+        return self
 
     @field_validator("creative_direction")
     @classmethod

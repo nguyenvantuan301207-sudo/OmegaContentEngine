@@ -7,6 +7,7 @@ from typing import Any, Protocol
 from omega.application.content_pacing import (
     DEFAULT_PACE,
     estimate_duration_seconds,
+    estimate_target_word_count,
     plan_retention_beats,
 )
 from omega.domain.content import ContentStatementType, HookType
@@ -230,8 +231,8 @@ class TemplateContentProvider:
                 },
             ]
         else:
-            # Long-form 2D explainer structure (~7-10 min / 420-600s)
-            num_sections = 6
+            # Scale meaningful chapter depth with the requested long-form runtime.
+            num_sections = min(7, max(3, 3 + (target_duration_seconds - 480) // 240))
             sec_duration = target_duration_seconds // num_sections
             sections = [
                 {
@@ -319,6 +320,7 @@ class TemplateContentProvider:
                     "retention_goal": "High satisfaction, clear next actions, and subscription prompt.",
                 },
             ]
+            sections = sections[:num_sections]
 
         return {
             "opening_description": f"Introduction establishing viewer promise: {intent_dict.get('viewer_promise', '')}",
@@ -390,7 +392,7 @@ class TemplateContentProvider:
                     }
                 )
         else:
-            # Long-form 2D explainer script (~1000-1150 meaningful words, 420-480s)
+            # Long-form script whose evidence and explanation depth scales with runtime.
             longform_data = [
                 # Section 1: Hook & Setup (~180 words)
                 [
@@ -471,9 +473,52 @@ class TemplateContentProvider:
                 ],
             ]
 
+            target_words = estimate_target_word_count(target_duration_seconds, pace)
+            words_per_section = max(1, target_words // num_sections)
+            depth_lenses = (
+                "operational prerequisites and boundary conditions",
+                "a concrete implementation example and its design rationale",
+                "observable evidence engineers should collect before deciding",
+                "failure scenarios and the safeguards that contain them",
+                "trade-offs between throughput, reliability, and maintainability",
+                "an alternative architecture and the conditions that favor it",
+                "deployment sequencing, rollback criteria, and ownership",
+                "capacity assumptions and the measurements needed to validate them",
+                "security implications and trust boundaries",
+                "a decision checklist connecting evidence to action",
+            )
+
             for idx, outline_sec in enumerate(outline_sections):
                 heading = outline_sec.get("title", f"Section {idx + 1}")
-                raw_stmts = longform_data[idx] if idx < len(longform_data) else longform_data[-1]
+                raw_stmts = (
+                    list(longform_data[idx])
+                    if idx < len(longform_data)
+                    else [
+                        (
+                            f"This chapter extends the analysis of {topic_title} through {heading.lower()}, "
+                            "connecting the accumulated evidence to a distinct production decision.",
+                            ContentStatementType.INTERPRETIVE,
+                            None,
+                            [],
+                        )
+                    ]
+                )
+                key_points = outline_sec.get("key_points") or [heading]
+                current_words = sum(len(text.split()) for text, *_ in raw_stmts)
+                lens_index = 0
+                while current_words < words_per_section and lens_index < len(depth_lenses):
+                    key_point = key_points[lens_index % len(key_points)]
+                    lens = depth_lenses[lens_index]
+                    text = (
+                        f"For {key_point}, this chapter examines {lens}. "
+                        f"The analysis connects the specific behavior of {topic_title} to measurable "
+                        "engineering decisions, identifies what would disprove the working assumption, "
+                        "and explains how a team can apply the finding without treating it as a universal rule."
+                    )
+                    raw_stmts.append((text, ContentStatementType.INTERPRETIVE, None, []))
+                    current_words += len(text.split())
+                    lens_index += 1
+
                 statements = []
                 for s_idx, (text, s_type, q_note, cits) in enumerate(raw_stmts):
                     statements.append(
