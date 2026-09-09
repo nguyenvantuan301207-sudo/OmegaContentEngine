@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import { useOperatorContext } from "@/lib/operator-context";
 
 interface Props {
-  currentTab?: "dna" | "topics" | "research" | "content" | "production" | "schedule" | "publisher" | "analytics" | "learning";
+  currentTab?: "dna" | "branding" | "topics" | "research" | "content" | "production" | "schedule" | "publisher" | "analytics" | "learning";
 }
 
 export function ChannelContextBar({ currentTab }: Props) {
@@ -32,6 +32,7 @@ export function ChannelContextBar({ currentTab }: Props) {
 
   const navItems = [
     { key: "dna", label: "🧬 DNA", href: `/channels/${channelId}` },
+    { key: "branding", label: "◆ Branding", href: `/channels/${channelId}/branding` },
     { key: "topics", label: "💡 Topics", href: `/channels/${channelId}/topics` },
     { key: "research", label: "🔬 Research", href: `/channels/${channelId}/research` },
     { key: "content", label: "✍️ Content", href: `/channels/${channelId}/content` },

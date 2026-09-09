@@ -71,6 +71,105 @@ export type KPIMetricType =
   | "ENGAGEMENT_RATE"
   | "REVENUE";
 export type FrequencyPeriod = "DAY" | "WEEK" | "MONTH";
+export type BrandAssetRole = "logo" | "intro" | "outro";
+export type ChannelBugPosition =
+  | "TOP_LEFT"
+  | "TOP_RIGHT"
+  | "BOTTOM_LEFT"
+  | "BOTTOM_RIGHT";
+export type ChannelBugTimingPolicy =
+  | "ALWAYS"
+  | "AFTER_INTRO"
+  | "MAIN_CONTENT_ONLY";
+export type EndScreenLayoutType =
+  | "LOGO_ONLY"
+  | "SUBSCRIBE"
+  | "NEXT_VIDEO"
+  | "SUBSCRIBE_AND_NEXT_VIDEO";
+
+export interface BrandAssetReference {
+  reference: string;
+  content_hash: string;
+  mime_type: string;
+  width: number | null;
+  height: number | null;
+  duration_seconds: number | null;
+  variant_name: string | null;
+}
+
+export interface ChannelBugPolicy {
+  enabled: boolean;
+  logo_variant: string | null;
+  position: ChannelBugPosition;
+  safe_margin_x: number;
+  safe_margin_y: number;
+  scale: number;
+  opacity: number;
+  timing_policy: ChannelBugTimingPolicy;
+  subtitle_safe: boolean;
+}
+
+export interface EndScreenLayout {
+  enabled: boolean;
+  layout: EndScreenLayoutType;
+  show_tagline: boolean;
+  show_subscribe: boolean;
+  next_video_slots: number;
+}
+
+export interface LongFormBrandPolicy {
+  hook_before_intro: true;
+  micro_intro_enabled: boolean;
+  channel_bug_enabled: boolean;
+  branded_outro_enabled: boolean;
+  end_screen_enabled: boolean;
+}
+
+export interface ShortFormBrandPolicy {
+  inherit_long_form_micro_intro: false;
+  lightweight_logo_motif_enabled: boolean;
+  short_ending_enabled: boolean;
+}
+
+export interface BrandPackage {
+  logo_asset: BrandAssetReference | null;
+  logo_variant: string | null;
+  intro_asset: BrandAssetReference | null;
+  outro_asset: BrandAssetReference | null;
+  channel_bug: ChannelBugPolicy;
+  tagline: string | null;
+  sonic_logo: BrandAssetReference | null;
+  end_screen_layout: EndScreenLayout;
+  long_form: LongFormBrandPolicy;
+  short_form: ShortFormBrandPolicy;
+  [field: string]: unknown;
+}
+
+export interface BrandAssetProbe {
+  file_size_bytes: number;
+  duration_ms: number;
+  format_name: string;
+  has_video: boolean;
+  has_audio: boolean;
+  width: number | null;
+  height: number | null;
+  video_codec: string | null;
+  audio_codec: string | null;
+  fps: number | null;
+  bit_rate: number | null;
+  streams_count: number;
+  subtitle_streams_count: number;
+  mean_volume_db?: number | null;
+  max_volume_db?: number | null;
+  [field: string]: unknown;
+}
+
+export interface BrandAssetUploadResult {
+  role: BrandAssetRole;
+  storage_key: string;
+  asset: BrandAssetReference;
+  probe: BrandAssetProbe;
+}
 
 export interface KPITarget {
   metric: KPIMetricType;
@@ -153,6 +252,8 @@ export interface ChannelDNA {
   publishing_preferences: PublishingPreferences;
   goals_and_kpis: GoalsAndKPIs;
   constraints: Constraints;
+  brand_package: BrandPackage | null;
+  [field: string]: unknown;
 }
 
 export interface Channel {
@@ -425,26 +526,83 @@ export interface DecisionLog {
 
 // ── Generic Fetch Helper ──
 
+export type BrandAssetErrorCode =
+  | "UNSUPPORTED_ROLE"
+  | "EMPTY_UPLOAD"
+  | "INVALID_MEDIA_TYPE"
+  | "INVALID_DURATION"
+  | "UNPROBEABLE_MEDIA"
+  | "STORAGE_FAILURE"
+  | "MISSING_CHANNEL"
+  | "MISSING_ASSET"
+  | "ASSET_IN_USE"
+  | "MALFORMED_CANONICAL_REFERENCE"
+  | "VALIDATION_ERROR"
+  | "SERVER_ERROR";
+
+export interface ApiErrorDetail {
+  code?: string;
+  message?: string;
+  [field: string]: unknown;
+}
+
+export class ApiError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly detail: string | ApiErrorDetail,
+  ) {
+    const message = typeof detail === "string" ? detail : detail.message || JSON.stringify(detail);
+    super(`API error (${status}): ${message}`);
+    this.name = "ApiError";
+  }
+
+  get code(): string | undefined {
+    return typeof this.detail === "string" ? undefined : this.detail.code;
+  }
+}
+
+export class BrandAssetApiError extends ApiError {
+  declare readonly detail: ApiErrorDetail;
+
+  constructor(status: number, detail: ApiErrorDetail) {
+    super(status, detail);
+    this.name = "BrandAssetApiError";
+  }
+
+  get brandCode(): BrandAssetErrorCode {
+    const code = this.detail.code;
+    if (code) return code as BrandAssetErrorCode;
+    if (this.status === 422) return "VALIDATION_ERROR";
+    return "SERVER_ERROR";
+  }
+}
+
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  const isFormData = init?.body instanceof FormData;
+  const headers = new Headers(init?.headers);
+  if (!isFormData && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
   const res = await fetch(`${API_BASE_URL}${path}`, {
-    headers: { "Content-Type": "application/json", ...init?.headers },
     ...init,
+    headers,
   });
   if (!res.ok) {
-    let errorDetail = res.statusText;
+    let errorDetail: string | ApiErrorDetail = res.statusText;
     try {
       const errJson = await res.json();
       if (errJson && errJson.detail) {
-        errorDetail = typeof errJson.detail === "string" ? errJson.detail : JSON.stringify(errJson.detail);
+        errorDetail = errJson.detail;
       }
     } catch {
-      // ignore json parse error
+      // Preserve the HTTP status text when the response has no JSON error body.
     }
-    throw new Error(`API error (${res.status}): ${errorDetail}`);
+    throw new ApiError(res.status, errorDetail);
   }
+  if (res.status === 204) return undefined as T;
   return res.json();
 }
 
@@ -557,6 +715,56 @@ export async function getChannelDNARevisions(channelId: string): Promise<Channel
 
 export async function getChannelContext(channelId: string): Promise<ChannelContext> {
   return apiFetch(`/api/v1/channels/${channelId}/context`);
+}
+
+function brandAssetPath(channelId: string, role: BrandAssetRole, assetName?: string): string {
+  const base = `/api/v1/channels/${encodeURIComponent(channelId)}/brand-assets/${role}`;
+  return assetName ? `${base}/${encodeURIComponent(assetName)}` : base;
+}
+
+export async function uploadBrandAsset(
+  channelId: string,
+  role: BrandAssetRole,
+  file: File,
+): Promise<BrandAssetUploadResult> {
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    return await apiFetch(brandAssetPath(channelId, role), {
+      method: "POST",
+      body: formData,
+    });
+  } catch (error) {
+    if (error instanceof ApiError && typeof error.detail !== "string") {
+      throw new BrandAssetApiError(error.status, error.detail);
+    }
+    throw error;
+  }
+}
+
+export function getBrandAssetPreviewUrl(
+  channelId: string,
+  role: BrandAssetRole,
+  assetName: string,
+): string {
+  return `${API_BASE_URL}${brandAssetPath(channelId, role, assetName)}`;
+}
+
+export async function deleteBrandAsset(
+  channelId: string,
+  role: BrandAssetRole,
+  assetName: string,
+): Promise<void> {
+  try {
+    await apiFetch<void>(brandAssetPath(channelId, role, assetName), {
+      method: "DELETE",
+    });
+  } catch (error) {
+    if (error instanceof ApiError && typeof error.detail !== "string") {
+      throw new BrandAssetApiError(error.status, error.detail);
+    }
+    throw error;
+  }
 }
 
 // ── Topic Intelligence API Functions (OMEGA-004) ──

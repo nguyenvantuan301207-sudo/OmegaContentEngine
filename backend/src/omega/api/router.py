@@ -17,6 +17,7 @@ from fastapi import APIRouter
 
 from omega.api.analytics import router as analytics_router
 from omega.api.autonomy import router as autonomy_router
+from omega.api.brand_assets import router as brand_assets_router
 from omega.api.channels import router as channels_router
 from omega.api.content import router as content_router
 from omega.api.guardian import router as guardian_router
@@ -40,6 +41,7 @@ api_router.include_router(jobs_router)
 api_router.include_router(missions_router)
 api_router.include_router(tasks_router)
 api_router.include_router(channels_router)
+api_router.include_router(brand_assets_router)
 api_router.include_router(topics_router)
 api_router.include_router(research_router)
 api_router.include_router(content_router)
