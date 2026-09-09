@@ -2,7 +2,7 @@
 
 import { use, useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Channel, BrandPackage, getChannel, updateChannelDNA } from "@/lib/api";
+import { BrandAssetReference, BrandAssetRole, Channel, BrandPackage, getChannel, updateChannelDNA } from "@/lib/api";
 import { ChannelContextBar } from "@/components/ChannelContextBar";
 import {
     BrandAssetCard,
@@ -114,6 +114,26 @@ export default function BrandManagementPage({ params }: { params: Promise<{ id: 
         setSaveSuccess(null);
     };
 
+    const handleAssetChange = (role: BrandAssetRole, asset: BrandAssetReference | null) => {
+        if (!draftPackage) return;
+        const next = cloneBrandPackage(draftPackage);
+        if (role === "logo") {
+            next.logo_asset = asset;
+            if (!asset) {
+                next.logo_variant = null;
+                next.channel_bug.enabled = false;
+                next.long_form.channel_bug_enabled = false;
+            }
+        } else if (role === "intro") {
+            next.intro_asset = asset;
+            if (!asset) next.long_form.micro_intro_enabled = false;
+        } else {
+            next.outro_asset = asset;
+            if (!asset) next.long_form.branded_outro_enabled = false;
+        }
+        handleDraftChange(next);
+    };
+
     const handleReset = () => {
         if (!savedPackage) return;
         setDraftPackage(cloneBrandPackage(savedPackage));
@@ -187,14 +207,14 @@ export default function BrandManagementPage({ params }: { params: Promise<{ id: 
             <div className="section-header">
                 <div>
                     <h2 className="section-title">Brand Assets</h2>
-                    <p className="branding-section-copy">Validated media already registered with this channel.</p>
+                    <p className="branding-section-copy">Upload validated candidates, then save Channel DNA separately to activate them.</p>
                 </div>
-                <span className="badge badge-canary">Read-only in Phase 2C</span>
+                <span className="badge badge-running">Mutation workflow</span>
             </div>
             <div className="branding-assets-grid">
-                <BrandAssetCard channelId={channelId} role="logo" title="Logo" description="Primary visual identity and bug source." asset={draftPackage.logo_asset} />
-                <BrandAssetCard channelId={channelId} role="intro" title="Intro" description="Short branded sequence after the hook." asset={draftPackage.intro_asset} />
-                <BrandAssetCard channelId={channelId} role="outro" title="Outro" description="Branded closing sequence for long form." asset={draftPackage.outro_asset} />
+                <BrandAssetCard channelId={channelId} role="logo" title="Logo" description="Primary visual identity and bug source." asset={draftPackage.logo_asset} savedAsset={savedPackage?.logo_asset || null} onAssetChange={(asset) => handleAssetChange("logo", asset)} />
+                <BrandAssetCard channelId={channelId} role="intro" title="Intro" description="Short branded sequence after the hook." asset={draftPackage.intro_asset} savedAsset={savedPackage?.intro_asset || null} onAssetChange={(asset) => handleAssetChange("intro", asset)} />
+                <BrandAssetCard channelId={channelId} role="outro" title="Outro" description="Branded closing sequence for long form." asset={draftPackage.outro_asset} savedAsset={savedPackage?.outro_asset || null} onAssetChange={(asset) => handleAssetChange("outro", asset)} />
             </div>
 
             <div className="branding-policy-grid">

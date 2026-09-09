@@ -1209,6 +1209,77 @@ textarea {
 
 .branding-asset-actions {
   gap: 0.75rem;
+  align-items: flex-start;
+  flex-direction: column;
+}
+
+.branding-upload-panel {
+  display: grid;
+  gap: 0.65rem;
+  padding: 1rem 1.25rem;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-secondary);
+}
+
+.branding-upload-panel input[type="file"] {
+  width: 100%;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.branding-upload-panel input[type="file"]::file-selector-button {
+  margin-right: 0.65rem;
+  padding: 0.45rem 0.7rem;
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  cursor: pointer;
+}
+
+.branding-upload-panel small,
+.branding-selected-file span {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.branding-selected-file {
+  display: grid;
+  gap: 0.2rem;
+  min-width: 0;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+}
+
+.branding-selected-file strong {
+  overflow: hidden;
+  color: var(--text-primary);
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branding-inline-message,
+.branding-asset-error {
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.73rem;
+  line-height: 1.45;
+}
+
+.branding-inline-message {
+  color: var(--status-success);
+  border: 1px solid var(--status-success-border);
+  background: var(--status-success-bg);
+}
+
+.branding-asset-error {
+  color: var(--status-danger);
+  border: 1px solid var(--status-danger-border);
+  background: var(--status-danger-bg);
 }
 
 .branding-policy-grid {

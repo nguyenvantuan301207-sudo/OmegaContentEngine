@@ -1,12 +1,15 @@
 "use client";
 
-import { useState } from "react";
+import { ChangeEvent, useRef, useState } from "react";
 import {
+    BrandAssetApiError,
     BrandAssetReference,
     BrandAssetRole,
     BrandPackage,
     ChannelBugPolicy,
+    deleteBrandAsset,
     getBrandAssetPreviewUrl,
+    uploadBrandAsset,
 } from "@/lib/api";
 
 interface StatusItem {
@@ -57,6 +60,33 @@ function displayAssetName(reference: string): string {
     return normalized.split("/").filter(Boolean).pop() || "Managed asset";
 }
 
+function formatFileSize(bytes: number): string {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function brandAssetErrorMessage(error: unknown, action: "upload" | "delete"): string {
+    if (!(error instanceof BrandAssetApiError)) {
+        return action === "upload" ? "Upload failed. Check the server and try again." : "Stored asset could not be deleted.";
+    }
+    const messages: Record<string, string> = {
+        INVALID_MEDIA_TYPE: "This file type is not valid for this asset role. Choose a supported file.",
+        INVALID_DURATION: "The video duration is outside the allowed range for this role.",
+        UNPROBEABLE_MEDIA: "The media could not be inspected. Choose a valid, uncorrupted file.",
+        UNSUPPORTED_ROLE: "This asset role is not supported by the server.",
+        MISSING_ASSET: "The stored asset no longer exists. Refresh the channel before continuing.",
+        ASSET_IN_USE: "This asset is referenced by current or historical branding and cannot be deleted.",
+        EMPTY_UPLOAD: "The selected file is empty. Choose another file.",
+        MALFORMED_CANONICAL_REFERENCE: "The stored asset reference is invalid. Refresh before continuing.",
+        VALIDATION_ERROR: "The server rejected this file. Review the selection and try again.",
+        STORAGE_FAILURE: "The server could not store the asset. Try again later.",
+        SERVER_ERROR: "The server could not complete the asset request. Try again later.",
+        MISSING_CHANNEL: "This channel no longer exists. Return to Channels and refresh.",
+    };
+    return messages[error.brandCode] || error.detail.message || "The asset request failed.";
+}
+
 function BrandMediaPreview({ channelId, role, asset }: { channelId: string; role: BrandAssetRole; asset: BrandAssetReference }) {
     const [failed, setFailed] = useState(false);
     const assetName = displayAssetName(asset.reference);
@@ -91,13 +121,76 @@ export function BrandAssetCard({
     title,
     description,
     asset,
+    savedAsset,
+    onAssetChange,
 }: {
     channelId: string;
     role: BrandAssetRole;
     title: string;
     description: string;
     asset: BrandAssetReference | null;
+    savedAsset: BrandAssetReference | null;
+    onAssetChange: (asset: BrandAssetReference | null) => void;
 }) {
+    const inputRef = useRef<HTMLInputElement>(null);
+    const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const [uploading, setUploading] = useState(false);
+    const [deleting, setDeleting] = useState(false);
+    const [message, setMessage] = useState<string | null>(null);
+    const [error, setError] = useState<string | null>(null);
+    const persisted = Boolean(asset && savedAsset && asset.reference === savedAsset.reference);
+    const pending = Boolean(asset && (!savedAsset || asset.reference !== savedAsset.reference));
+    const safelyDeletable = Boolean(asset && !persisted);
+    const accept = role === "logo" ? "image/*,.png,.jpg,.jpeg,.webp" : "video/*,.mp4,.mov,.webm";
+
+    const handleSelection = (event: ChangeEvent<HTMLInputElement>) => {
+        const file = event.target.files?.[0] || null;
+        setSelectedFile(file);
+        setMessage(file ? "Selected locally. Upload for authoritative server validation." : null);
+        setError(null);
+    };
+
+    const handleUpload = async () => {
+        if (!selectedFile || uploading) return;
+        try {
+            setUploading(true);
+            setError(null);
+            setMessage(null);
+            const result = await uploadBrandAsset(channelId, role, selectedFile);
+            onAssetChange(result.asset);
+            setSelectedFile(null);
+            if (inputRef.current) inputRef.current.value = "";
+            setMessage("Uploaded and stored. Save Branding to activate this asset in Channel DNA.");
+        } catch (uploadError: unknown) {
+            setError(brandAssetErrorMessage(uploadError, "upload"));
+        } finally {
+            setUploading(false);
+        }
+    };
+
+    const handleDetach = () => {
+        onAssetChange(null);
+        setSelectedFile(null);
+        if (inputRef.current) inputRef.current.value = "";
+        setError(null);
+        setMessage("Removed from the current branding draft only. Storage and history are unchanged until explicitly deleted where permitted.");
+    };
+
+    const handleDelete = async () => {
+        if (!asset || !safelyDeletable || deleting) return;
+        try {
+            setDeleting(true);
+            setError(null);
+            await deleteBrandAsset(channelId, role, displayAssetName(asset.reference));
+            onAssetChange(null);
+            setMessage("Unused stored candidate deleted. Channel DNA was not changed or saved.");
+        } catch (deleteError: unknown) {
+            setError(brandAssetErrorMessage(deleteError, "delete"));
+        } finally {
+            setDeleting(false);
+        }
+    };
+
     return (
         <article className="card branding-asset-card">
             <div className="card-header">
@@ -105,14 +198,14 @@ export function BrandAssetCard({
                     <h3 className="card-title">{title}</h3>
                     <p className="branding-section-copy">{description}</p>
                 </div>
-                <span className={`badge ${asset ? "badge-succeeded" : "badge-draft"}`}>
-                    {asset ? "Valid" : "Not configured"}
+                <span className={`badge ${pending ? "badge-running" : asset ? "badge-succeeded" : "badge-draft"}`}>
+                    {pending ? "Pending unsaved change" : persisted ? "Active in current DNA" : asset ? "Stored" : savedAsset ? "Pending detach" : "Not configured"}
                 </span>
             </div>
 
             {asset ? (
                 <div className="card-body">
-                    <BrandMediaPreview channelId={channelId} role={role} asset={asset} />
+                    <BrandMediaPreview key={asset.reference} channelId={channelId} role={role} asset={asset} />
                     <dl className="branding-metadata">
                         <div><dt>Managed asset</dt><dd title={displayAssetName(asset.reference)}>{displayAssetName(asset.reference)}</dd></div>
                         <div><dt>MIME</dt><dd>{asset.mime_type}</dd></div>
@@ -125,16 +218,26 @@ export function BrandAssetCard({
             ) : (
                 <div className="empty-state branding-asset-empty">
                     <div className="empty-state-icon" aria-hidden="true">{role === "logo" ? "◇" : "▷"}</div>
-                    <h3>No {title.toLowerCase()} configured</h3>
-                    <p>Add a validated managed asset in the upcoming asset workflow.</p>
+                    <h3>No {title.toLowerCase()} active in this draft</h3>
+                    <p>Select a file below. The backend remains authoritative for media validation.</p>
                 </div>
             )}
 
+            <div className="branding-upload-panel">
+                <label className="form-label" htmlFor={`brand-${role}-file`}>{asset ? `Select replacement ${title.toLowerCase()}` : `Select ${title.toLowerCase()} file`}</label>
+                <input ref={inputRef} id={`brand-${role}-file`} type="file" accept={accept} onChange={handleSelection} disabled={uploading || deleting} />
+                {selectedFile && <div className="branding-selected-file"><strong>{selectedFile.name}</strong><span>{formatFileSize(selectedFile.size)} · {selectedFile.type || "type not reported"}</span></div>}
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => void handleUpload()} disabled={!selectedFile || uploading || deleting}>{uploading ? "Uploading…" : "Upload for validation"}</button>
+                <small>Uploading stores a candidate only. It does not save Channel DNA.</small>
+                {message && <div className="branding-inline-message" role="status">{message}</div>}
+                {error && <div className="branding-asset-error" role="alert">{error}</div>}
+            </div>
+
             <div className="card-footer branding-asset-actions">
-                <span className="form-helper">Asset mutations arrive in Phase 2D.</span>
+                <span className="form-helper">Detach changes current branding only; historical assets remain protected.</span>
                 <div className="flex-row gap-2">
-                    <button className="btn btn-secondary btn-sm" disabled title="Available in Phase 2D">Replace</button>
-                    <button className="btn btn-danger btn-sm" disabled title="Available in Phase 2D">Remove</button>
+                    {asset && <button type="button" className="btn btn-secondary btn-sm" onClick={handleDetach} disabled={uploading || deleting}>Remove from branding</button>}
+                    {safelyDeletable && <button type="button" className="btn btn-danger btn-sm" onClick={() => void handleDelete()} disabled={uploading || deleting}>{deleting ? "Deleting…" : "Delete unused candidate"}</button>}
                 </div>
             </div>
         </article>
