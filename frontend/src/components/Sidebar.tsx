@@ -13,7 +13,7 @@ interface NavItemDef {
   badge?: string;
 }
 
-export function Sidebar() {
+export function Sidebar({ open = false, onClose }: { open?: boolean; onClose?: () => void }) {
   const pathname = usePathname();
   const { selectedChannelId, canaryChannelId } = useOperatorContext();
   const targetChannelId = selectedChannelId || canaryChannelId || CANARY_CHANNEL_ID;
@@ -95,13 +95,16 @@ export function Sidebar() {
   };
 
   return (
-    <aside className="app-sidebar">
+    <aside className={`app-sidebar${open ? " open" : ""}`} aria-label="Primary navigation">
       <div className="sidebar-header">
-        <div className="sidebar-logo-icon">Ω</div>
+        <div className="sidebar-logo-icon" aria-hidden="true">Ω</div>
         <div className="sidebar-brand">
           <h2>OMEGA</h2>
-          <p>Operator Console</p>
+          <p>Content operating system</p>
         </div>
+        <button type="button" className="sidebar-close" onClick={onClose} aria-label="Close navigation">
+          ×
+        </button>
       </div>
 
       <nav className="sidebar-nav">
@@ -122,7 +125,7 @@ export function Sidebar() {
       </nav>
 
       <div className="sidebar-footer">
-        <span>Canary: DmYTB</span>
+        <span className="sidebar-environment"><span className="status-dot healthy" /> Canary · DmYTB</span>
         <span className="badge badge-ready">v0.1.0</span>
       </div>
     </aside>

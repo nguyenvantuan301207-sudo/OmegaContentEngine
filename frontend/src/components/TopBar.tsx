@@ -5,9 +5,9 @@ import { usePathname } from "next/navigation";
 import { getHealth } from "@/lib/api";
 import { useOperatorContext } from "@/lib/operator-context";
 
-export function TopBar() {
+export function TopBar({ onNavigationToggle, navigationOpen }: { onNavigationToggle?: () => void; navigationOpen?: boolean }) {
   const pathname = usePathname();
-  const { mode, toggleMode, canaryChannelName } = useOperatorContext();
+  const { mode, toggleMode, canaryChannelName, selectedChannel } = useOperatorContext();
   const [healthStatus, setHealthStatus] = useState<string>("loading");
 
   useEffect(() => {
@@ -47,6 +47,16 @@ export function TopBar() {
   return (
     <header className="app-topbar">
       <div className="topbar-left">
+        <button
+          type="button"
+          className="mobile-menu-button"
+          onClick={onNavigationToggle}
+          aria-label={navigationOpen ? "Close navigation" : "Open navigation"}
+          aria-expanded={navigationOpen}
+        >
+          <span aria-hidden="true">{navigationOpen ? "×" : "☰"}</span>
+        </button>
+        <div className="topbar-workspace-mark" aria-hidden="true">OC</div>
         <div className="topbar-breadcrumb">
           <span className="topbar-breadcrumb-item">{breadcrumb.section}</span>
           <span className="text-muted">/</span>
@@ -55,6 +65,13 @@ export function TopBar() {
       </div>
 
       <div className="topbar-right">
+        {selectedChannel && (
+          <div className="topbar-pill topbar-channel" title={`Selected channel: ${selectedChannel.name}`}>
+            <span className="text-muted">CHANNEL</span>
+            <span>{selectedChannel.name}</span>
+          </div>
+        )}
+
         {/* System Health Heartbeat */}
         <div className="topbar-pill" title={`System status: ${healthStatus}`}>
           <span className={`pulse-dot ${healthStatus}`} />
@@ -64,15 +81,15 @@ export function TopBar() {
         </div>
 
         {/* Autonomy Mode */}
-        <div className="topbar-pill">
-          <span className="text-muted">MODE:</span>
-          <span style={{ color: "var(--accent-secondary)" }}>SUPERVISED</span>
+        <div className="topbar-pill topbar-supervision">
+          <span className="text-muted">MODE</span>
+          <span className="topbar-accent-text">SUPERVISED</span>
         </div>
 
         {/* Approvals Counter */}
-        <div className="topbar-pill" title="Pending Guardian & Editorial Approvals">
-          <span className="text-muted">APPROVALS:</span>
-          <span style={{ color: "var(--status-success)" }}>0 READY</span>
+        <div className="topbar-pill topbar-approvals" title="Pending Guardian & Editorial Approvals">
+          <span className="text-muted">APPROVALS</span>
+          <span className="topbar-success-text">0 READY</span>
         </div>
 
         {/* Operator vs Development Mode Toggle */}
@@ -86,7 +103,7 @@ export function TopBar() {
               : "Currently displaying all development and test fixtures. Click to return to clean Operator Mode."
           }
         >
-          <span>{mode === "OPERATOR" ? "🛡️ Operator View" : "🛠️ Dev Data Active"}</span>
+          <span>{mode === "OPERATOR" ? "Operator" : "Dev data"}</span>
         </button>
       </div>
     </header>
