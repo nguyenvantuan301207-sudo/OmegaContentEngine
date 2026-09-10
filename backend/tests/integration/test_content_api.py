@@ -145,7 +145,14 @@ async def test_content_api_lifecycle(db_session: AsyncSession) -> None:
         script_v1 = gen_res.json()
         assert script_v1["version"] == 1
         assert script_v1["is_current"] is True
-        assert len(script_v1["sections"]) == 4
+        assert script_v1["sections"]
+        assert all(
+            section["section_order"] == index
+            and section["heading"]
+            and section["narration_text"]
+            and section["statements"]
+            for index, section in enumerate(script_v1["sections"], start=1)
+        )
 
         # 7. Check Intent
         intent_res = await client.get(
@@ -175,7 +182,9 @@ async def test_content_api_lifecycle(db_session: AsyncSession) -> None:
             f"/api/v1/channels/{channel_id}/content/{content_req_id}/outline"
         )
         assert outline_res.status_code == 200
-        assert len(outline_res.json()["sections"]) == 4
+        outline_sections = outline_res.json()["sections"]
+        assert len(outline_sections) == len(script_v1["sections"])
+        assert len(outline_sections) == max(3, 3 + (content_req["target_duration_seconds"] - 480) // 240)
 
         # 10. Check Script Version & QA
         qa_res = await client.get(

@@ -5,6 +5,7 @@ from uuid import uuid4
 import pytest
 
 from omega.api import production
+from omega.application.brand_asset_resolver import BrandAssetResolver
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.production_render_factory import (
     ProductionVisualV2Adapter,
@@ -107,12 +108,15 @@ async def test_lazy_adapter_successful_wiring(monkeypatch, tmp_path):
     )
 
     # V2 service
-    mock_v2_cls.assert_called_once_with(
-        asset_orchestrator=mock_orchestrator_cls.return_value,
-        output_root=storage.base_root / "visual_v2",
-        narration_provider=mock_get_narration.return_value,
-        narration_storage=storage,
-    )
+    mock_v2_cls.assert_called_once()
+    v2_kwargs = mock_v2_cls.call_args.kwargs
+    assert v2_kwargs["asset_orchestrator"] is mock_orchestrator_cls.return_value
+    assert v2_kwargs["output_root"] == storage.base_root / "visual_v2"
+    assert v2_kwargs["narration_provider"] is mock_get_narration.return_value
+    assert v2_kwargs["narration_storage"] is storage
+    brand_resolver = v2_kwargs["brand_asset_resolver"]
+    assert isinstance(brand_resolver, BrandAssetResolver)
+    assert brand_resolver._storage is storage
 
     # Downstream render call
     mock_v2_service.render_mission_execution.assert_called_once_with("arg1", kwarg1="val1")

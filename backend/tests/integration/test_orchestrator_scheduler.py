@@ -25,6 +25,7 @@ from omega.domain.scheduler import ReservationState
 from omega.domain.task import TaskState
 from omega.infrastructure.models import (
     Channel,
+    DurableDispatchIntent,
     Mission,
     ScheduleDecision,
     SchedulePolicy,
@@ -122,8 +123,8 @@ async def test_orchestrator_task_scheduled_no_immediate_celery_dispatch(
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_default_dispatch_when_no_policy(db_session: AsyncSession, monkeypatch):
-    """Verify that when no policy is configured for a category, Orchestrator defaults to immediate dispatch."""
+async def test_orchestrator_default_dispatch_when_no_policy(db_session: AsyncSession):
+    """Verify no-policy tasks are queued through one durable dispatch intent."""
     mission = Mission(
         id=uuid4(),
         title="No Policy Mission",
@@ -145,21 +146,40 @@ async def test_orchestrator_default_dispatch_when_no_policy(db_session: AsyncSes
     db_session.add(task)
     await db_session.commit()
 
-    celery_dispatches = []
-    from omega.worker.tasks import execute_task
-
-    def mock_delay(task_id_arg):
-        celery_dispatches.append(task_id_arg)
-
-    monkeypatch.setattr(execute_task, "delay", mock_delay)
-
-    # Run orchestrator evaluation
     eval_res = await evaluate_mission(db_session, mission.id)
     assert eval_res["status"] == "evaluated"
-
-    # Immediate dispatch occurred
-    assert len(celery_dispatches) == 1
-    assert celery_dispatches[0] == str(task.id)
+    assert eval_res["dispatched_tasks_count"] == 1
 
     await db_session.refresh(task)
     assert task.state == TaskState.QUEUED.value
+
+    intent_res = await db_session.execute(
+        select(DurableDispatchIntent).where(
+            DurableDispatchIntent.mission_task_id == task.id,
+            DurableDispatchIntent.purpose == "MISSION_TASK_DISPATCH",
+        )
+    )
+    intents = list(intent_res.scalars().all())
+    assert len(intents) == 1
+    intent = intents[0]
+    assert intent.state == "PENDING"
+    assert intent.purpose == "MISSION_TASK_DISPATCH"
+    assert intent.task_name == "omega.tasks.execute"
+    assert intent.args == [str(task.id)]
+    assert intent.mission_id == mission.id
+    assert intent.mission_task_id == task.id
+    assert intent.mission_execution_id is None
+    assert intent.idempotency_key == (
+        f"mission-task-dispatch:None:{task.id}"
+        f":{task.retry_count}:{mission.guardian_epoch}"
+    )
+
+    replay_res = await evaluate_mission(db_session, mission.id)
+    assert replay_res["dispatched_tasks_count"] == 0
+    replay_intent_res = await db_session.execute(
+        select(DurableDispatchIntent).where(
+            DurableDispatchIntent.mission_task_id == task.id,
+            DurableDispatchIntent.purpose == "MISSION_TASK_DISPATCH",
+        )
+    )
+    assert len(list(replay_intent_res.scalars().all())) == 1

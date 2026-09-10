@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
@@ -11,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.orchestrator import evaluate_mission
 from omega.domain.task import TaskState
-from omega.infrastructure.models import Mission, MissionExecution, Task
+from omega.infrastructure.models import DurableDispatchIntent, Mission, MissionExecution, Task
 
 
 @pytest.mark.asyncio
@@ -44,21 +43,42 @@ async def test_orchestrator_idempotent_dispatch(db_session: AsyncSession) -> Non
     db_session.add_all([mission, execution, task])
     await db_session.commit()
 
-    dispatched_calls: list[str] = []
+    # 1st evaluation -> transitions READY to QUEUED and enrolls one durable dispatch intent.
+    res1 = await evaluate_mission(db_session, mission_id, exec_id)
+    assert res1["dispatched_tasks_count"] == 1
+    await db_session.refresh(task)
+    assert task.state == TaskState.QUEUED.value
 
-    def mock_delay(task_id_str: str) -> None:
-        dispatched_calls.append(task_id_str)
+    intent_res = await db_session.execute(
+        select(DurableDispatchIntent).where(
+            DurableDispatchIntent.mission_task_id == task.id,
+            DurableDispatchIntent.purpose == "MISSION_TASK_DISPATCH",
+        )
+    )
+    intents = list(intent_res.scalars().all())
+    assert len(intents) == 1
+    intent = intents[0]
+    assert intent.mission_id == mission_id
+    assert intent.mission_execution_id == exec_id
+    assert intent.mission_task_id == task.id
+    assert intent.purpose == "MISSION_TASK_DISPATCH"
+    assert intent.task_name == "omega.tasks.execute"
+    assert intent.args == [str(task.id)]
+    assert intent.idempotency_key == (
+        f"mission-task-dispatch:{exec_id}:{task.id}"
+        f":{task.retry_count}:{mission.guardian_epoch}"
+    )
 
-    with patch("omega.worker.tasks.execute_task.delay", side_effect=mock_delay):
-        # 1st evaluation -> transitions READY to QUEUED, dispatches 1 task
-        res1 = await evaluate_mission(db_session, mission_id, exec_id)
-        assert res1["dispatched_tasks_count"] == 1
-        assert len(dispatched_calls) == 1
-
-        # 2nd evaluation (duplicate trigger) -> task is already QUEUED, does not dispatch again!
-        res2 = await evaluate_mission(db_session, mission_id, exec_id)
-        assert res2["dispatched_tasks_count"] == 0
-        assert len(dispatched_calls) == 1
+    # 2nd evaluation observes QUEUED state and must not enroll a duplicate intent.
+    res2 = await evaluate_mission(db_session, mission_id, exec_id)
+    assert res2["dispatched_tasks_count"] == 0
+    replay_res = await db_session.execute(
+        select(DurableDispatchIntent).where(
+            DurableDispatchIntent.mission_task_id == task.id,
+            DurableDispatchIntent.purpose == "MISSION_TASK_DISPATCH",
+        )
+    )
+    assert len(list(replay_res.scalars().all())) == 1
 
 
 @pytest.mark.asyncio
@@ -92,17 +112,24 @@ async def test_dispatch_failure_safety(db_session: AsyncSession) -> None:
     db_session.add_all([mission, execution, task])
     await db_session.commit()
 
-    # Simulate broker connection failure with potential secret in exception
-    def mock_broken_delay(tid: str) -> None:
-        raise ConnectionError("Cannot connect to redis://default:secret_password@redis:6379/0")
+    await evaluate_mission(db_session, mission_id, exec_id)
 
-    with patch("omega.worker.tasks.execute_task.delay", side_effect=mock_broken_delay):
-        await evaluate_mission(db_session, mission_id, exec_id)
-
-    # Task should be marked FAILED, error must be sanitized (no secret password)
+    # Broker delivery is intentionally outside the orchestrator transaction. The task and its
+    # durable intent must commit together so the relay can retry publication without lost work.
     fresh_task_res = await db_session.execute(select(Task).where(Task.id == task_id))
-    failed_task = fresh_task_res.scalar_one()
+    queued_task = fresh_task_res.scalar_one()
+    assert queued_task.state == TaskState.QUEUED.value
+    assert queued_task.error is None
 
-    assert failed_task.state == TaskState.FAILED.value
-    assert "secret_password" not in failed_task.error
-    assert "ConnectionError" in failed_task.error
+    intent_res = await db_session.execute(
+        select(DurableDispatchIntent).where(
+            DurableDispatchIntent.mission_task_id == task_id,
+            DurableDispatchIntent.purpose == "MISSION_TASK_DISPATCH",
+        )
+    )
+    intent = intent_res.scalar_one()
+    assert intent.state == "PENDING"
+    assert intent.task_name == "omega.tasks.execute"
+    assert intent.args == [str(task_id)]
+    assert intent.mission_id == mission_id
+    assert intent.mission_execution_id == exec_id

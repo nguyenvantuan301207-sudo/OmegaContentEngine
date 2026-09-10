@@ -65,6 +65,7 @@ from omega.infrastructure.models import (
     CredentialVault,
     MediaArtifact,
     Mission,
+    MissionExecution,
     NetworkProfile,
     NetworkRoute,
     PlatformAccount,
@@ -218,9 +219,18 @@ async def setup_shadow_fixtures(db_session: AsyncSession, monkeypatch):
     )
     db_session.add(mission)
 
+    execution = MissionExecution(
+        id=uuid4(),
+        mission_id=mission.id,
+        state="RUNNING",
+        trigger_type="MANUAL",
+    )
+    db_session.add(execution)
+
     task = Task(
         id=uuid4(),
         mission_id=mission.id,
+        execution_id=execution.id,
         task_type="PUBLISH_VIDEO",
         title="Shadow Publish Task",
         state=TaskState.READY.value,
@@ -277,6 +287,7 @@ async def setup_shadow_fixtures(db_session: AsyncSession, monkeypatch):
     return {
         "channel": channel,
         "mission": mission,
+        "execution": execution,
         "task": task,
         "artifact": artifact,
         "account": account,

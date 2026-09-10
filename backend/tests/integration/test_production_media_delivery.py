@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from omega.application.media_storage import LocalMediaStorageProvider
+from omega.infrastructure.models import MediaArtifact
 from omega.main import app
 from tests.integration.test_production_lineage_pinning import _create_test_script
 
@@ -29,43 +32,54 @@ async def test_media_streaming_and_http_range_support(
         await client.post(f"/api/v1/channels/{ch_id}/activate")
         _, script_id, _ = await _create_test_script(client, ch_id)
 
-        # Create Production Request & Prepare
+        # Create and prepare the production request, but do not invoke asynchronous rendering.
         p_res = await client.post(
             f"/api/v1/channels/{ch_id}/production", json={"script_version_id": script_id}
         )
         req_id = p_res.json()["id"]
         await client.post(f"/api/v1/channels/{ch_id}/production/{req_id}/prepare")
 
-        # Render artifact
-        r_res = await client.post(
-            f"/api/v1/channels/{ch_id}/production/{req_id}/render",
-            json={"idempotency_key": f"render_{uuid.uuid4().hex}"},
+        channel_uuid = uuid.UUID(ch_id)
+        request_uuid = uuid.UUID(req_id)
+        media_bytes = bytes(range(128))
+        storage = LocalMediaStorageProvider()
+        artifact_path = storage.get_artifacts_dir(channel_uuid, request_uuid) / "range-test.mp4"
+        artifact_path.write_bytes(media_bytes)
+        artifact = MediaArtifact(
+            id=uuid.uuid4(),
+            production_request_id=request_uuid,
+            artifact_type="VIDEO",
+            version=1,
+            is_current=True,
+            storage_uri=storage.to_relative_uri(channel_uuid, request_uuid, artifact_path),
+            file_size_bytes=len(media_bytes),
+            content_hash=hashlib.sha256(media_bytes).hexdigest(),
+            mime_type="video/mp4",
         )
-        assert r_res.status_code == 200
+        db_session.add(artifact)
+        await db_session.commit()
 
-        # List artifacts
         arts_res = await client.get(f"/api/v1/channels/{ch_id}/production/{req_id}/artifacts")
         assert arts_res.status_code == 200
         artifacts = arts_res.json()
-        assert len(artifacts) >= 1
-        art = artifacts[0]
-        art_id = art["id"]
+        assert [item["id"] for item in artifacts] == [str(artifact.id)]
 
-        # 1. Full Stream (200 OK)
         stream_res = await client.get(
-            f"/api/v1/channels/{ch_id}/production/{req_id}/artifacts/{art_id}/media"
+            f"/api/v1/channels/{ch_id}/production/{req_id}/artifacts/{artifact.id}/media"
         )
         assert stream_res.status_code == 200
-        assert stream_res.headers.get("content-type") == "video/mp4"
-        assert stream_res.headers.get("accept-ranges") == "bytes"
-        assert int(stream_res.headers.get("content-length", 0)) > 0
-        total_len = len(stream_res.content)
+        assert stream_res.headers["content-type"] == "video/mp4"
+        assert stream_res.headers["accept-ranges"] == "bytes"
+        assert stream_res.headers["content-length"] == str(len(media_bytes))
+        assert stream_res.content == media_bytes
 
-        # 2. HTTP Range Request (206 Partial Content)
         range_res = await client.get(
-            f"/api/v1/channels/{ch_id}/production/{req_id}/artifacts/{art_id}/media",
+            f"/api/v1/channels/{ch_id}/production/{req_id}/artifacts/{artifact.id}/media",
             headers={"Range": "bytes=0-49"},
         )
         assert range_res.status_code == 206
-        assert len(range_res.content) == 50
-        assert range_res.headers.get("content-range") == f"bytes 0-49/{total_len}"
+        assert range_res.headers["content-type"] == "video/mp4"
+        assert range_res.headers["accept-ranges"] == "bytes"
+        assert range_res.headers["content-length"] == "50"
+        assert range_res.headers["content-range"] == f"bytes 0-49/{len(media_bytes)}"
+        assert range_res.content == media_bytes[:50]
