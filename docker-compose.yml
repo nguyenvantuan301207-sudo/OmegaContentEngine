@@ -57,6 +57,7 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/publisher/accounts/youtube/callback}
       PEXELS_API_KEY: ${PEXELS_API_KEY:-}
+      OMEGA_VISUAL_ASSET_MODE: ${OMEGA_VISUAL_ASSET_MODE:-PEXELS}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       TTS_PROVIDER: ${TTS_PROVIDER:-gemini}
       GEMINI_TTS_MODEL: ${GEMINI_TTS_MODEL:-gemini-3.1-flash-tts-preview}
@@ -97,6 +98,7 @@ services:
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
       GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/v1/publisher/accounts/youtube/callback}
       PEXELS_API_KEY: ${PEXELS_API_KEY:-}
+      OMEGA_VISUAL_ASSET_MODE: ${OMEGA_VISUAL_ASSET_MODE:-PEXELS}
       GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       TTS_PROVIDER: ${TTS_PROVIDER:-gemini}
       GEMINI_TTS_MODEL: ${GEMINI_TTS_MODEL:-gemini-3.1-flash-tts-preview}

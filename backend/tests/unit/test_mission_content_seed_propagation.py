@@ -222,6 +222,54 @@ def test_valid_publish_config_is_normalized_and_propagated() -> None:
             assert task_input == original_inputs[task_type]
 
 
+@pytest.mark.parametrize(
+    "execution_mode",
+    ["EXTERNAL_DISPATCH", "INTERNAL_READINESS_ONLY"],
+)
+def test_publish_execution_mode_is_preserved(execution_mode: str) -> None:
+    account_id = uuid4()
+    plan = make_plan()
+
+    _enrich_canonical_content_seed(
+        plan,
+        {
+            "canonical_inputs": {
+                "publish": {
+                    "platform_account_id": str(account_id),
+                    "title": "Mode Preservation",
+                    "made_for_kids": False,
+                    "execution_mode": execution_mode,
+                }
+            }
+        },
+    )
+
+    assert (
+        task_inputs(plan)["publish"]["canonical_publish"]["execution_mode"]
+        == execution_mode
+    )
+
+
+@pytest.mark.parametrize("execution_mode", [None, 1, "internal", "LOCAL_ONLY"])
+def test_invalid_publish_execution_mode_fails_closed(execution_mode) -> None:
+    plan = make_plan()
+
+    with pytest.raises(ValueError, match="execution_mode"):
+        _enrich_canonical_content_seed(
+            plan,
+            {
+                "canonical_inputs": {
+                    "publish": {
+                        "platform_account_id": str(uuid4()),
+                        "title": "Invalid Mode",
+                        "made_for_kids": False,
+                        "execution_mode": execution_mode,
+                    }
+                }
+            },
+        )
+
+
 def test_valid_publish_config_defaults_optional_fields() -> None:
     account_id = uuid4()
     metadata = {
@@ -238,6 +286,7 @@ def test_valid_publish_config_defaults_optional_fields() -> None:
     _enrich_canonical_content_seed(plan, metadata)
 
     inputs = task_inputs(plan)
+    assert "execution_mode" not in inputs["publish"]["canonical_publish"]
     assert inputs["publish"]["canonical_publish"] == {
         "platform_account_id": str(account_id),
         "title": "Minimal Publish",

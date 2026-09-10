@@ -17,44 +17,53 @@ class ProductionVisualV2Adapter:
 
     def __init__(self, storage: LocalMediaStorageProvider):
         self.storage = storage
+        self.visual_asset_mode = os.environ.get(
+            "OMEGA_VISUAL_ASSET_MODE", "PEXELS"
+        ).strip()
+        if self.visual_asset_mode not in ("PEXELS", "LOCAL_TEMPLATE_ONLY"):
+            raise ValueError(
+                f"Unsupported OMEGA_VISUAL_ASSET_MODE: {self.visual_asset_mode}"
+            )
 
     async def render_mission_execution(
         self,
         *args: Any,
         **kwargs: Any
     ) -> Any:
-        api_key = os.environ.get("PEXELS_API_KEY", "").strip()
-        if not api_key:
-            raise ValueError("PEXELS_API_KEY missing for Visual V2 production")
+        pexels_provider = None
+        orchestrator = None
+        if self.visual_asset_mode == "PEXELS":
+            api_key = os.environ.get("PEXELS_API_KEY", "").strip()
+            if not api_key:
+                raise ValueError("PEXELS_API_KEY missing for Visual V2 production")
 
-        cache_root = self.storage.base_root / "visual_asset_cache"
-        cache = VisualAssetCache(root=cache_root)
-
-        pexels_provider = PexelsAssetProvider(
-            api_key=api_key,
-            cache=cache,
-        )
-
-        engine = VisualAssetEngine()
-        orchestrator = VisualAssetOrchestrator(
-            engine=engine,
-            providers=[pexels_provider],
-        )
+            cache_root = self.storage.base_root / "visual_asset_cache"
+            cache = VisualAssetCache(root=cache_root)
+            pexels_provider = PexelsAssetProvider(
+                api_key=api_key,
+                cache=cache,
+            )
+            engine = VisualAssetEngine()
+            orchestrator = VisualAssetOrchestrator(
+                engine=engine,
+                providers=[pexels_provider],
+            )
 
         narration_provider = get_narration_provider(self.storage)
-
         v2_service = VisualProductionV2Service(
             asset_orchestrator=orchestrator,
             output_root=self.storage.base_root / "visual_v2",
             narration_provider=narration_provider,
             narration_storage=self.storage,
             brand_asset_resolver=BrandAssetResolver(self.storage),
+            visual_asset_mode=self.visual_asset_mode,
         )
 
         try:
             return await v2_service.render_mission_execution(*args, **kwargs)
         finally:
-            await pexels_provider.close()
+            if pexels_provider is not None:
+                await pexels_provider.close()
 
 
 def build_production_render_service(

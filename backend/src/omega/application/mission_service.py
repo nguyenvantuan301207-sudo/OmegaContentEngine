@@ -122,6 +122,18 @@ def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
         if not isinstance(norm_custom_options, dict):
             raise ValueError("Canonical publish platform_custom_options must be an object.")
 
+        norm_execution_mode = None
+        if "execution_mode" in publish_raw:
+            raw_execution_mode = publish_raw["execution_mode"]
+            if not isinstance(raw_execution_mode, str):
+                raise ValueError("Canonical publish execution_mode must be a string.")
+            if raw_execution_mode not in (
+                "EXTERNAL_DISPATCH",
+                "INTERNAL_READINESS_ONLY",
+            ):
+                raise ValueError("Canonical publish execution_mode is unsupported.")
+            norm_execution_mode = raw_execution_mode
+
         normalized_publish = {
             "platform_account_id": norm_platform_account_id,
             "title": norm_title,
@@ -132,6 +144,8 @@ def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
             "category_id": norm_category_id,
             "platform_custom_options": norm_custom_options,
         }
+        if norm_execution_mode is not None:
+            normalized_publish["execution_mode"] = norm_execution_mode
 
     for planned_task in plan.tasks:
         task_create = planned_task.task_create

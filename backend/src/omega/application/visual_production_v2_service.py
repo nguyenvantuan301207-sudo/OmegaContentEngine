@@ -234,7 +234,7 @@ class ScriptStoryboardAdapter:
 class VisualProductionV2Service:
     def __init__(
         self,
-        asset_orchestrator: VisualAssetOrchestrator,
+        asset_orchestrator: VisualAssetOrchestrator | None,
         output_root: Path,
         browser_runtime_factory: Callable[[], Any] | None = None,
         video_renderer: VisualV2VideoRenderer | None = None,
@@ -242,8 +242,14 @@ class VisualProductionV2Service:
         narration_provider: NarrationProvider | None = None,
         narration_storage: LocalMediaStorageProvider | None = None,
         brand_asset_resolver: BrandAssetResolver | None = None,
+        visual_asset_mode: str = "PEXELS",
     ):
+        if visual_asset_mode not in ("PEXELS", "LOCAL_TEMPLATE_ONLY"):
+            raise ValueError(f"Unsupported visual_asset_mode: {visual_asset_mode}")
+        if visual_asset_mode == "PEXELS" and asset_orchestrator is None:
+            raise ValueError("asset_orchestrator is required in PEXELS mode")
         self._orchestrator = asset_orchestrator
+        self._visual_asset_mode = visual_asset_mode
         self._output_root = output_root
         self._browser_runtime_factory = browser_runtime_factory or BrowserCaptureRuntime
         self._video_renderer = video_renderer or VisualV2VideoRenderer()
@@ -393,7 +399,8 @@ class VisualProductionV2Service:
         fingerprint_input = (
             f"omega-vertical-slice-v0:{mission_execution_id}:"
             f"{content_request_id}:{script_version.id}:{fps}:"
-            f"visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2"
+            f"visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:"
+            f"visual-asset-mode:{self._visual_asset_mode}"
         )
         if resolved_brand.identity is not None:
             fingerprint_input += f":brand-spec-v1:{resolved_brand.identity}"
@@ -588,6 +595,7 @@ class VisualProductionV2Service:
 
                     original_strategy = scene.visual_strategy
                     effective_scene = self._apply_v0_compatibility(scene)
+                    effective_scene = self._apply_visual_asset_mode_policy(effective_scene)
                     effective_strategy = effective_scene.visual_strategy
 
                     audio_sha: str | None = None
@@ -701,6 +709,13 @@ class VisualProductionV2Service:
                         self._ensure_meaningful_query(effective_scene)
 
                     direction = self._visual_director.resolve(effective_scene)
+                    if (
+                        self._visual_asset_mode == "LOCAL_TEMPLATE_ONLY"
+                        and direction.asset_requirements
+                    ):
+                        raise VerticalSliceError(
+                            "LOCAL_TEMPLATE_ONLY scene produced an external asset requirement"
+                        )
                     payload = self._template_resolver.resolve(effective_scene, direction)
 
                     assets: tuple[Any, ...] = ()
@@ -711,6 +726,10 @@ class VisualProductionV2Service:
                     asset_query_str: str | None = None
 
                     if direction.asset_requirements:
+                        if self._orchestrator is None:
+                            raise VerticalSliceError(
+                                "Asset resolution requires an asset orchestrator"
+                            )
                         req_spec = direction.asset_requirements[0]
                         asset_kind_str = req_spec.kind.value
                         asset_request: VisualAssetRequest = self._visual_asset_engine.build_request(
@@ -1050,6 +1069,7 @@ class VisualProductionV2Service:
 
             manifest_content = {
                 "run_fingerprint": run_fingerprint,
+                "visual_asset_mode": self._visual_asset_mode,
                 "scene_artifacts_version": "v1",
                 "resolved_brand_spec": resolved_brand.model_dump(mode="json"),
                 "resolved_brand_identity": resolved_brand.identity,
@@ -1260,6 +1280,7 @@ class VisualProductionV2Service:
                 target_scene.asset_query_hint = asset_query_override
 
             target_scene = self._apply_v0_compatibility(target_scene)
+            target_scene = self._apply_visual_asset_mode_policy(target_scene)
             effective_strategy = target_scene.visual_strategy
 
             if effective_strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
@@ -1274,10 +1295,21 @@ class VisualProductionV2Service:
             asset_query_str = None
 
             direction = self._visual_director.resolve(target_scene)
+            if (
+                self._visual_asset_mode == "LOCAL_TEMPLATE_ONLY"
+                and direction.asset_requirements
+            ):
+                raise VerticalSliceError(
+                    "LOCAL_TEMPLATE_ONLY scene produced an external asset requirement"
+                )
             payload = self._template_resolver.resolve(target_scene, direction)
 
             assets = ()
             if direction.asset_requirements:
+                if self._orchestrator is None:
+                    raise VerticalSliceError(
+                        "Asset resolution requires an asset orchestrator"
+                    )
                 req_spec = direction.asset_requirements[0]
                 asset_kind_str = req_spec.kind.value
                 asset_request = self._visual_asset_engine.build_request(
@@ -1493,6 +1525,19 @@ class VisualProductionV2Service:
             return None
         canonical = json.dumps(values, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _apply_visual_asset_mode_policy(
+        self, scene: StoryboardScene
+    ) -> StoryboardScene:
+        if (
+            self._visual_asset_mode == "LOCAL_TEMPLATE_ONLY"
+            and scene.visual_strategy
+            in (VisualStrategy.IMAGE, VisualStrategy.BROLL, VisualStrategy.SCREENSHOT)
+        ):
+            return scene.model_copy(
+                update={"visual_strategy": VisualStrategy.TITLE_MOTION}
+            )
+        return scene
 
     def _apply_v0_compatibility(self, scene: StoryboardScene) -> StoryboardScene:
         strat = scene.visual_strategy

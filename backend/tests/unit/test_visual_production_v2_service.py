@@ -367,6 +367,41 @@ async def test_lineage_request_dna_mismatch(tmp_path: Path, lineage_data):
         await svc.render_mission_execution(session, m_exec.id, req.id)
 
 
+def test_visual_asset_mode_construction_and_strategy_policy(tmp_path: Path):
+    with pytest.raises(ValueError, match="asset_orchestrator is required"):
+        VisualProductionV2Service(asset_orchestrator=None, output_root=tmp_path)
+    with pytest.raises(ValueError, match="Unsupported visual_asset_mode"):
+        VisualProductionV2Service(
+            asset_orchestrator=None,
+            output_root=tmp_path,
+            visual_asset_mode="UNKNOWN",
+        )
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=None,
+        output_root=tmp_path,
+        visual_asset_mode="LOCAL_TEMPLATE_ONLY",
+    )
+    for strategy in (
+        VisualStrategy.IMAGE,
+        VisualStrategy.BROLL,
+        VisualStrategy.SCREENSHOT,
+    ):
+        scene = StoryboardScene(
+            sequence_index=1,
+            section_id="1",
+            purpose="1",
+            source_statement_references=[],
+            narration_excerpt="1",
+            estimated_duration_seconds=1.0,
+            visual_strategy=strategy,
+            visual_brief="1",
+        )
+        effective = svc._apply_visual_asset_mode_policy(scene)
+        assert effective.visual_strategy == VisualStrategy.TITLE_MOTION
+        assert svc._visual_director.resolve(effective).asset_requirements == []
+
+
 @pytest.mark.asyncio
 async def test_v0_compatibility_conversions(tmp_path: Path):
     orch = make_mock_orchestrator(tmp_path)
@@ -445,9 +480,31 @@ async def test_visual_director_v2_fingerprint(tmp_path: Path, lineage_data):
     svc._browser_runtime_factory = lambda: mock_browser_ctx
 
     res = await svc.render_mission_execution(session, lineage_data["mission_execution"].id, lineage_data["content_request"].id, fps=12)
-    expected_fp = f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2"
+    expected_fp = f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2:visual-asset-mode:PEXELS"
     expected_hash = hashlib.sha256(expected_fp.encode("utf-8")).hexdigest()
     assert res.run_fingerprint == expected_hash
+    with open(res.output_path.parent / "manifest.json", encoding="utf-8") as f:
+        assert json.load(f)["visual_asset_mode"] == "PEXELS"
+
+    local_svc = VisualProductionV2Service(
+        asset_orchestrator=None,
+        output_root=tmp_path,
+        visual_asset_mode="LOCAL_TEMPLATE_ONLY",
+    )
+    local_svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+    local_svc._video_renderer = svc._video_renderer
+    local_svc._ffmpeg_renderer = svc._ffmpeg_renderer
+    local_svc._browser_runtime_factory = svc._browser_runtime_factory
+    local_res = await local_svc.render_mission_execution(
+        session,
+        lineage_data["mission_execution"].id,
+        lineage_data["content_request"].id,
+        fps=12,
+    )
+    assert local_res.run_fingerprint != res.run_fingerprint
+    assert local_res.output_path.parent != res.output_path.parent
+    with open(local_res.output_path.parent / "manifest.json", encoding="utf-8") as f:
+        assert json.load(f)["visual_asset_mode"] == "LOCAL_TEMPLATE_ONLY"
 
 
 def test_asset_query_fallback(tmp_path: Path):
@@ -613,6 +670,7 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
     with open(manifest_file, encoding="utf-8") as f:
         manifest = json.load(f)
     assert manifest["content_sha256"] == res.content_sha256
+    assert manifest["visual_asset_mode"] == "PEXELS"
 
     assert "api_key" not in json.dumps(manifest).lower()
     assert "authorization" not in json.dumps(manifest).lower()
@@ -1004,7 +1062,7 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
     fps = 12
     script_version_id = req.scripts[0].id
     from omega.application.visual_production_v2_service import VISUAL_DIRECTOR_VERSION
-    expected_silent_fp = f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2"
+    expected_silent_fp = f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:visual-asset-mode:PEXELS"
     expected_silent_hash = hashlib.sha256(expected_silent_fp.encode("utf-8")).hexdigest()
     assert res_silent.run_fingerprint == expected_silent_hash
 

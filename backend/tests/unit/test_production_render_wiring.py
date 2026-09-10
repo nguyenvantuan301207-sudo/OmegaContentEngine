@@ -17,6 +17,7 @@ from omega.worker import tasks
 
 
 def test_factory_missing_pexels_api_key(monkeypatch):
+    monkeypatch.delenv("OMEGA_VISUAL_ASSET_MODE", raising=False)
     monkeypatch.delenv("PEXELS_API_KEY", raising=False)
 
     # 1. Factory construction with PEXELS_API_KEY absent
@@ -47,8 +48,16 @@ def test_factory_selection_logic():
     assert service._should_use_v2(req_mission) is True
 
 
+def test_factory_unknown_visual_asset_mode_fails_closed(monkeypatch):
+    monkeypatch.setenv("OMEGA_VISUAL_ASSET_MODE", "UNKNOWN")
+
+    with pytest.raises(ValueError, match="Unsupported OMEGA_VISUAL_ASSET_MODE"):
+        build_production_render_service()
+
+
 @pytest.mark.asyncio
 async def test_lazy_adapter_missing_api_key(monkeypatch):
+    monkeypatch.delenv("OMEGA_VISUAL_ASSET_MODE", raising=False)
     monkeypatch.delenv("PEXELS_API_KEY", raising=False)
     storage = LocalMediaStorageProvider()
     adapter = ProductionVisualV2Adapter(storage=storage)
@@ -60,6 +69,7 @@ async def test_lazy_adapter_missing_api_key(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_lazy_adapter_successful_wiring(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMEGA_VISUAL_ASSET_MODE", "PEXELS")
     monkeypatch.setenv("PEXELS_API_KEY", "test-key")
 
     # Mocks
@@ -111,6 +121,7 @@ async def test_lazy_adapter_successful_wiring(monkeypatch, tmp_path):
     mock_v2_cls.assert_called_once()
     v2_kwargs = mock_v2_cls.call_args.kwargs
     assert v2_kwargs["asset_orchestrator"] is mock_orchestrator_cls.return_value
+    assert v2_kwargs["visual_asset_mode"] == "PEXELS"
     assert v2_kwargs["output_root"] == storage.base_root / "visual_v2"
     assert v2_kwargs["narration_provider"] is mock_get_narration.return_value
     assert v2_kwargs["narration_storage"] is storage
@@ -129,7 +140,47 @@ async def test_lazy_adapter_successful_wiring(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_lazy_adapter_local_template_only_skips_pexels(monkeypatch, tmp_path):
+    monkeypatch.setenv("OMEGA_VISUAL_ASSET_MODE", "LOCAL_TEMPLATE_ONLY")
+    monkeypatch.delenv("PEXELS_API_KEY", raising=False)
+
+    mock_pexels_cls = MagicMock()
+    mock_orchestrator_cls = MagicMock()
+    mock_v2_cls = MagicMock()
+    mock_v2_service = AsyncMock()
+    mock_v2_service.render_mission_execution.return_value = "local_result"
+    mock_v2_cls.return_value = mock_v2_service
+    monkeypatch.setattr(
+        "omega.application.production_render_factory.PexelsAssetProvider",
+        mock_pexels_cls,
+    )
+    monkeypatch.setattr(
+        "omega.application.production_render_factory.VisualAssetOrchestrator",
+        mock_orchestrator_cls,
+    )
+    monkeypatch.setattr(
+        "omega.application.production_render_factory.VisualProductionV2Service",
+        mock_v2_cls,
+    )
+    monkeypatch.setattr(
+        "omega.application.production_render_factory.get_narration_provider",
+        MagicMock(),
+    )
+
+    storage = LocalMediaStorageProvider(base_root=str(tmp_path))
+    result = await ProductionVisualV2Adapter(storage).render_mission_execution()
+
+    assert result == "local_result"
+    mock_pexels_cls.assert_not_called()
+    mock_orchestrator_cls.assert_not_called()
+    v2_kwargs = mock_v2_cls.call_args.kwargs
+    assert v2_kwargs["asset_orchestrator"] is None
+    assert v2_kwargs["visual_asset_mode"] == "LOCAL_TEMPLATE_ONLY"
+
+
+@pytest.mark.asyncio
 async def test_lazy_adapter_provider_close_on_exception(monkeypatch):
+    monkeypatch.delenv("OMEGA_VISUAL_ASSET_MODE", raising=False)
     monkeypatch.setenv("PEXELS_API_KEY", "test-key")
 
     mock_pexels_cls = MagicMock()
