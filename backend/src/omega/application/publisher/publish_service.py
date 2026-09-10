@@ -12,7 +12,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID, uuid4
 
 import httpx
@@ -26,6 +28,7 @@ from omega.application.network.preflight import NetworkPreflightService
 from omega.application.publisher.adapters.base import AdapterRegistry
 from omega.config import get_settings
 from omega.domain.guardian import GuardianCheckpoint
+from omega.domain.mission import MissionState
 from omega.domain.network import NetworkEgressPermit, ServiceCategory
 from omega.domain.publisher import (
     HandoffStatus,
@@ -43,7 +46,9 @@ from omega.infrastructure.models import (
     CredentialVault,
     MediaArtifact,
     Mission,
+    MissionExecution,
     PlatformAccount,
+    ProductionRequest,
     PublishAttempt,
     PublishAttemptTransition,
     PublisherSchedulerHandoffOutbox,
@@ -67,6 +72,151 @@ class PublishExecutionError(Exception):
 
 class PublishExecutionService:
     """Executes external publication for an approved PublishIntent."""
+
+    @classmethod
+    async def validate_internal_publish_readiness(
+        cls,
+        session: AsyncSession,
+        *,
+        guardian_session_factory: Callable[[], AsyncSession],
+        task_id: UUID,
+        mission_id: UUID,
+        execution_id: UUID,
+        artifact_id: UUID,
+        intent_id: UUID,
+    ) -> dict[str, Any]:
+        """Validate provider-free canonical publish readiness without external preflight."""
+        errors: list[str] = []
+        task = await session.get(Task, task_id)
+        mission = await session.get(Mission, mission_id)
+        execution = await session.get(MissionExecution, execution_id)
+        artifact = await session.get(MediaArtifact, artifact_id)
+        intent = await session.get(PublishIntent, intent_id)
+
+        if task is None or task.mission_id != mission_id or task.execution_id != execution_id:
+            errors.append("Task MissionExecution lineage is invalid.")
+        if mission is None or mission.state != MissionState.RUNNING.value:
+            errors.append("Mission is not active/current.")
+        if execution is None or execution.mission_id != mission_id:
+            errors.append("MissionExecution lineage is invalid.")
+        if intent is None or intent.state != PublishIntentState.APPROVED.value:
+            errors.append("PublishIntent is missing or not APPROVED.")
+        if artifact is None:
+            errors.append("MediaArtifact is missing.")
+
+        if (
+            mission is not None
+            and task is not None
+            and artifact is not None
+            and intent is not None
+            and (
+                intent.task_id != task.id
+                or intent.mission_id != mission.id
+                or intent.channel_id != mission.channel_id
+                or intent.media_artifact_id != artifact.id
+            )
+        ):
+            errors.append("PublishIntent task/mission/channel/artifact lineage is incoherent.")
+
+        production_request = None
+        if artifact is not None:
+            production_request = await session.get(ProductionRequest, artifact.production_request_id)
+            if production_request is None:
+                errors.append("MediaArtifact ProductionRequest parent is missing.")
+        if (
+            mission is not None
+            and production_request is not None
+            and (
+                production_request.channel_id != mission.channel_id
+                or production_request.mission_execution_id != execution_id
+            )
+        ):
+            errors.append("ProductionRequest channel/execution lineage is incoherent.")
+        if (
+            intent is not None
+            and artifact is not None
+            and intent.media_artifact_checksum.lower() != artifact.content_hash.lower()
+        ):
+            errors.append("PublishIntent artifact checksum is stale or mismatched.")
+
+        artifact_verified = False
+        if artifact is not None and mission is not None:
+            try:
+                path = LocalMediaStorageProvider().resolve_artifact_path(
+                    mission.channel_id, artifact.production_request_id, artifact.storage_uri
+                )
+                if not path.is_file():
+                    errors.append(f"Media artifact file does not exist on disk: {path}")
+                else:
+                    hasher = hashlib.sha256()
+                    with open(path, "rb") as artifact_file:
+                        while chunk := artifact_file.read(65536):
+                            hasher.update(chunk)
+                    if hasher.hexdigest() != artifact.content_hash:
+                        errors.append("Physical artifact checksum does not match MediaArtifact.")
+                    else:
+                        artifact_verified = True
+            except StorageSecurityError as exc:
+                errors.append(f"Artifact path escape detected: {exc}")
+
+        account_valid = False
+        privacy_valid = False
+        if intent is not None:
+            account = await session.get(PlatformAccount, intent.platform_account_id)
+            account_valid = bool(
+                account
+                and account.status == "ACTIVE"
+                and mission is not None
+                and account.channel_id == mission.channel_id
+            )
+            if not account_valid:
+                errors.append("PlatformAccount is not ACTIVE or channel-coherent.")
+            try:
+                requested_privacy = PrivacyStatus(intent.requested_privacy_status)
+                privacy_valid = requested_privacy == PrivacyStatus.PRIVATE or bool(
+                    intent.platform_custom_options.get("privacy_fallback_allowed", False)
+                )
+                if not privacy_valid:
+                    errors.append("Requested privacy contract is not internally valid.")
+            except ValueError as exc:
+                errors.append(f"Invalid requested privacy status: {exc}")
+
+        guardian_valid = False
+        if artifact is not None and mission is not None and not errors:
+            from omega.domain.guardian import (
+                CheckTriggerType,
+                GuardianCheckCreate,
+                GuardianTargetType,
+            )
+
+            guardian_result = await GuardianEngine(
+                session_factory=guardian_session_factory
+            ).execute_check(
+                GuardianCheckCreate(
+                    mission_id=mission.id,
+                    checkpoint=GuardianCheckpoint.PRE_EXTERNAL_SIDE_EFFECT,
+                    trigger_type=CheckTriggerType.PRE_EXTERNAL_SIDE_EFFECT,
+                    target_type=GuardianTargetType.MEDIA_ARTIFACT,
+                    target_id=str(artifact.id),
+                    target_version=artifact.version,
+                )
+            )
+            guardian_valid = bool(
+                guardian_result.decision
+                and guardian_result.decision.action.value in ("ALLOW", "ALLOW_WITH_WARNING")
+            )
+            if not guardian_valid:
+                errors.append("Guardian PRE_EXTERNAL_SIDE_EFFECT gate did not allow publication.")
+
+        return {
+            "status": "INTERNAL_READY" if not errors else "INTERNAL_NOT_READY",
+            "artifact_verified": artifact_verified,
+            "guardian_valid": guardian_valid,
+            "account_valid": account_valid,
+            "privacy_valid": privacy_valid,
+            "external_ready": False,
+            "validation_errors": errors,
+        }
 
     @classmethod
     async def validate_publish_readiness(

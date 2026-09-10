@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -10,6 +11,8 @@ import pytest
 
 from omega.application import executor as executor_module
 from omega.application.durable_dispatch import DurableDispatchService
+from omega.application.guardian.engine import GuardianEngine
+from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.network.preflight import NetworkPreflightService
 from omega.application.publisher.adapters.base import AdapterRegistry
 from omega.application.publisher.intent_service import PublishIntentService
@@ -23,7 +26,15 @@ from omega.domain.publisher import (
 )
 from omega.domain.task import TaskState
 from omega.infrastructure import database, database_sync
-from omega.infrastructure.models import MediaArtifact, MissionExecution
+from omega.infrastructure.models import (
+    MediaArtifact,
+    Mission,
+    MissionExecution,
+    PlatformAccount,
+    ProductionRequest,
+    PublishIntent,
+    Task,
+)
 from omega.worker import tasks as worker_tasks
 
 
@@ -215,6 +226,273 @@ def test_reused_approved_intent_presents_same_dispatch_idempotency_key(
     ]
 
 
+def test_internal_readiness_only_creates_intent_without_external_dispatch(
+    monkeypatch, publish_lineage
+) -> None:
+    data = publish_lineage
+    data.task_input["canonical_publish"]["execution_mode"] = "INTERNAL_READINESS_ONLY"
+    session, create, enqueue, events = _install_publish(monkeypatch, data)
+    readiness = AsyncMock(
+        return_value={
+            "status": "INTERNAL_READY",
+            "artifact_verified": True,
+            "guardian_valid": True,
+            "account_valid": True,
+            "privacy_valid": True,
+            "external_ready": False,
+            "validation_errors": [],
+        }
+    )
+    network = AsyncMock(side_effect=AssertionError("network preflight called"))
+    external_publish = AsyncMock(side_effect=AssertionError("external publish called"))
+    monkeypatch.setattr(
+        PublishExecutionService, "validate_internal_publish_readiness", readiness
+    )
+    monkeypatch.setattr(NetworkPreflightService, "preflight", network)
+    monkeypatch.setattr(PublishExecutionService, "execute_publish", external_publish)
+
+    result = worker_tasks._execute_canonical_publish(data.task_id, data.task_input, data.context)
+
+    create.assert_awaited_once()
+    readiness.assert_awaited_once_with(
+        session,
+        guardian_session_factory=database.AsyncWorkerSessionLocal,
+        task_id=data.task_id,
+        mission_id=data.mission_id,
+        execution_id=data.execution_id,
+        artifact_id=data.artifact_id,
+        intent_id=data.intent_id,
+    )
+    enqueue.assert_not_awaited()
+    network.assert_not_awaited()
+    external_publish.assert_not_awaited()
+    assert not isinstance(result, worker_tasks._PendingPublishResult)
+    assert result["internal_readiness"]["status"] == "INTERNAL_READY"
+    assert result["internal_readiness"]["external_ready"] is False
+    assert events == ["intent", "commit", "commit"]
+
+
+@pytest.mark.asyncio
+async def test_internal_readiness_rejects_stale_intent_artifact_checksum(
+    monkeypatch, tmp_path
+) -> None:
+    mission_id, execution_id, task_id, channel_id = uuid4(), uuid4(), uuid4(), uuid4()
+    artifact_id, request_id, intent_id, account_id = uuid4(), uuid4(), uuid4(), uuid4()
+    media = tmp_path / "artifact.mp4"
+    media.write_bytes(b"canonical artifact")
+    artifact_hash = __import__("hashlib").sha256(media.read_bytes()).hexdigest()
+    records = {
+        (Task, task_id): SimpleNamespace(
+            id=task_id, mission_id=mission_id, execution_id=execution_id
+        ),
+        (Mission, mission_id): SimpleNamespace(
+            id=mission_id, state=MissionState.RUNNING.value, channel_id=channel_id
+        ),
+        (MissionExecution, execution_id): SimpleNamespace(
+            id=execution_id, mission_id=mission_id
+        ),
+        (MediaArtifact, artifact_id): SimpleNamespace(
+            id=artifact_id,
+            production_request_id=request_id,
+            storage_uri="artifacts/artifact.mp4",
+            content_hash=artifact_hash,
+            version=1,
+        ),
+        (PublishIntent, intent_id): SimpleNamespace(
+            id=intent_id,
+            task_id=task_id,
+            mission_id=mission_id,
+            channel_id=channel_id,
+            media_artifact_id=artifact_id,
+            media_artifact_checksum="0" * 64,
+            platform_account_id=account_id,
+            requested_privacy_status="PRIVATE",
+            platform_custom_options={},
+            state=PublishIntentState.APPROVED.value,
+        ),
+        (ProductionRequest, request_id): SimpleNamespace(
+            channel_id=channel_id, mission_execution_id=execution_id
+        ),
+        (PlatformAccount, account_id): SimpleNamespace(
+            channel_id=channel_id, status="ACTIVE"
+        ),
+    }
+    session = SimpleNamespace(get=AsyncMock(side_effect=lambda model, key: records.get((model, key))))
+    monkeypatch.setattr(
+        LocalMediaStorageProvider, "resolve_artifact_path", MagicMock(return_value=media)
+    )
+    guardian = AsyncMock(side_effect=AssertionError("Guardian must not run after checksum failure"))
+    monkeypatch.setattr(GuardianEngine, "execute_check", guardian)
+    network = AsyncMock(side_effect=AssertionError("network preflight called"))
+    monkeypatch.setattr(NetworkPreflightService, "preflight", network)
+
+    guardian_session_factory = MagicMock()
+    report = await PublishExecutionService.validate_internal_publish_readiness(
+        session,
+        guardian_session_factory=guardian_session_factory,
+        task_id=task_id,
+        mission_id=mission_id,
+        execution_id=execution_id,
+        artifact_id=artifact_id,
+        intent_id=intent_id,
+    )
+
+    assert report["status"] == "INTERNAL_NOT_READY"
+    assert "PublishIntent artifact checksum is stale or mismatched." in report["validation_errors"]
+    guardian.assert_not_awaited()
+    guardian_session_factory.assert_not_called()
+    network.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_real_internal_readiness_happy_path_is_provider_free(monkeypatch, tmp_path) -> None:
+    mission_id, execution_id, task_id, channel_id = uuid4(), uuid4(), uuid4(), uuid4()
+    artifact_id, request_id, intent_id, account_id = uuid4(), uuid4(), uuid4(), uuid4()
+    media = tmp_path / "internal-ready.mp4"
+    media.write_bytes(b"verified internal publish artifact")
+    artifact_hash = hashlib.sha256(media.read_bytes()).hexdigest()
+    records = {
+        (Task, task_id): SimpleNamespace(
+            id=task_id, mission_id=mission_id, execution_id=execution_id
+        ),
+        (Mission, mission_id): SimpleNamespace(
+            id=mission_id, state=MissionState.RUNNING.value, channel_id=channel_id
+        ),
+        (MissionExecution, execution_id): SimpleNamespace(
+            id=execution_id, mission_id=mission_id
+        ),
+        (MediaArtifact, artifact_id): SimpleNamespace(
+            id=artifact_id,
+            production_request_id=request_id,
+            storage_uri="artifacts/internal-ready.mp4",
+            content_hash=artifact_hash,
+            version=1,
+        ),
+        (PublishIntent, intent_id): SimpleNamespace(
+            id=intent_id,
+            task_id=task_id,
+            mission_id=mission_id,
+            channel_id=channel_id,
+            media_artifact_id=artifact_id,
+            media_artifact_checksum=artifact_hash,
+            platform_account_id=account_id,
+            requested_privacy_status="PRIVATE",
+            platform_custom_options={},
+            state=PublishIntentState.APPROVED.value,
+        ),
+        (ProductionRequest, request_id): SimpleNamespace(
+            channel_id=channel_id, mission_execution_id=execution_id
+        ),
+        (PlatformAccount, account_id): SimpleNamespace(
+            channel_id=channel_id, status="ACTIVE"
+        ),
+    }
+    session = SimpleNamespace(get=AsyncMock(side_effect=lambda model, key: records.get((model, key))))
+    monkeypatch.setattr(
+        LocalMediaStorageProvider, "resolve_artifact_path", MagicMock(return_value=media)
+    )
+    guardian = AsyncMock(
+        return_value=SimpleNamespace(
+            decision=SimpleNamespace(action=SimpleNamespace(value="ALLOW"))
+        )
+    )
+    monkeypatch.setattr(GuardianEngine, "execute_check", guardian)
+    network = AsyncMock(side_effect=AssertionError("network preflight called"))
+    external_publish = AsyncMock(side_effect=AssertionError("external publish called"))
+    monkeypatch.setattr(NetworkPreflightService, "preflight", network)
+    monkeypatch.setattr(PublishExecutionService, "execute_publish", external_publish)
+
+    report = await PublishExecutionService.validate_internal_publish_readiness(
+        session,
+        guardian_session_factory=MagicMock(),
+        task_id=task_id,
+        mission_id=mission_id,
+        execution_id=execution_id,
+        artifact_id=artifact_id,
+        intent_id=intent_id,
+    )
+
+    assert report == {
+        "status": "INTERNAL_READY",
+        "artifact_verified": True,
+        "guardian_valid": True,
+        "account_valid": True,
+        "privacy_valid": True,
+        "external_ready": False,
+        "validation_errors": [],
+    }
+    guardian.assert_awaited_once()
+    network.assert_not_awaited()
+    external_publish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_internal_readiness_missing_production_request_fails_closed(
+    monkeypatch, tmp_path
+) -> None:
+    mission_id, execution_id, task_id, channel_id = uuid4(), uuid4(), uuid4(), uuid4()
+    artifact_id, request_id, intent_id, account_id = uuid4(), uuid4(), uuid4(), uuid4()
+    media = tmp_path / "orphaned-artifact.mp4"
+    media.write_bytes(b"orphaned but otherwise valid artifact")
+    artifact_hash = hashlib.sha256(media.read_bytes()).hexdigest()
+    records = {
+        (Task, task_id): SimpleNamespace(
+            id=task_id, mission_id=mission_id, execution_id=execution_id
+        ),
+        (Mission, mission_id): SimpleNamespace(
+            id=mission_id, state=MissionState.RUNNING.value, channel_id=channel_id
+        ),
+        (MissionExecution, execution_id): SimpleNamespace(
+            id=execution_id, mission_id=mission_id
+        ),
+        (MediaArtifact, artifact_id): SimpleNamespace(
+            id=artifact_id,
+            production_request_id=request_id,
+            storage_uri="artifacts/orphaned-artifact.mp4",
+            content_hash=artifact_hash,
+            version=1,
+        ),
+        (PublishIntent, intent_id): SimpleNamespace(
+            id=intent_id,
+            task_id=task_id,
+            mission_id=mission_id,
+            channel_id=channel_id,
+            media_artifact_id=artifact_id,
+            media_artifact_checksum=artifact_hash,
+            platform_account_id=account_id,
+            requested_privacy_status="PRIVATE",
+            platform_custom_options={},
+            state=PublishIntentState.APPROVED.value,
+        ),
+        (PlatformAccount, account_id): SimpleNamespace(
+            channel_id=channel_id, status="ACTIVE"
+        ),
+    }
+    session = SimpleNamespace(get=AsyncMock(side_effect=lambda model, key: records.get((model, key))))
+    monkeypatch.setattr(
+        LocalMediaStorageProvider, "resolve_artifact_path", MagicMock(return_value=media)
+    )
+    guardian = AsyncMock(side_effect=AssertionError("Guardian called for orphaned artifact"))
+    network = AsyncMock(side_effect=AssertionError("network preflight called"))
+    monkeypatch.setattr(GuardianEngine, "execute_check", guardian)
+    monkeypatch.setattr(NetworkPreflightService, "preflight", network)
+
+    report = await PublishExecutionService.validate_internal_publish_readiness(
+        session,
+        guardian_session_factory=MagicMock(),
+        task_id=task_id,
+        mission_id=mission_id,
+        execution_id=execution_id,
+        artifact_id=artifact_id,
+        intent_id=intent_id,
+    )
+
+    assert report["status"] == "INTERNAL_NOT_READY"
+    assert "MediaArtifact ProductionRequest parent is missing." in report["validation_errors"]
+    guardian.assert_not_awaited()
+    network.assert_not_awaited()
+
+
 class Query:
     def __init__(self, record):
         self.record = record
@@ -271,6 +549,54 @@ def test_execute_task_pending_publish_skips_generic_terminal_mutation(monkeypatc
     assert task.output is None
     assert session.commit.call_count == 1
     terminal_enqueue.assert_not_called()
+
+
+def test_execute_task_internal_publish_reaches_succeeded(monkeypatch) -> None:
+    mission_id, execution_id, task_id = uuid4(), uuid4(), uuid4()
+    mission = SimpleNamespace(
+        id=mission_id, state=MissionState.RUNNING.value, guardian_epoch=3
+    )
+    task = SimpleNamespace(
+        id=task_id,
+        mission_id=mission_id,
+        execution_id=execution_id,
+        task_type="publish",
+        title="Publish",
+        state=TaskState.QUEUED.value,
+        dispatched_epoch=3,
+        input={"canonical_publish": {"execution_mode": "INTERNAL_READINESS_ONLY"}},
+        output=None,
+        retry_count=0,
+        max_retries=0,
+        started_at=None,
+        completed_at=None,
+        updated_at=None,
+    )
+    session = MagicMock()
+    session.query.side_effect = [
+        Query(SimpleNamespace(mission_id=mission_id)),
+        Query(mission),
+        Query(task),
+        Query(mission),
+        Query(task),
+    ]
+    monkeypatch.setattr(database_sync, "SyncSessionLocal", lambda: session)
+    monkeypatch.setattr(worker_tasks, "_load_dependency_outputs", MagicMock(return_value={}))
+    monkeypatch.setattr(
+        worker_tasks,
+        "_execute_canonical_publish",
+        MagicMock(return_value={"internal_readiness": {"status": "INTERNAL_READY"}}),
+    )
+    terminal_enqueue = MagicMock()
+    monkeypatch.setattr(DurableDispatchService, "enqueue", terminal_enqueue)
+
+    result = worker_tasks.execute_task.run(str(task_id))
+
+    assert result["status"] == "success"
+    assert task.state == TaskState.SUCCEEDED.value
+    assert task.output["internal_readiness"]["status"] == "INTERNAL_READY"
+    terminal_enqueue.assert_called_once()
+    assert terminal_enqueue.call_args.kwargs["purpose"] == "MISSION_TASK_TERMINAL_EVALUATION"
 
 
 @pytest.mark.asyncio

@@ -409,7 +409,7 @@ def _canonical_publish_artifact_id(context: dict[str, Any]) -> uuid.UUID:
 
 def _execute_canonical_publish(
     task_id: uuid.UUID, task_input: dict[str, Any] | None, context: dict[str, Any]
-) -> _PendingPublishResult:
+) -> dict[str, Any] | _PendingPublishResult:
     """Atomically prepare an approved intent, task correlation, and durable dispatch."""
     if not isinstance(task_input, dict):
         raise ValueError("canonical publish task input must be an object")
@@ -419,6 +419,9 @@ def _execute_canonical_publish(
     required_authority = ("platform_account_id", "title", "made_for_kids")
     if any(key not in canonical_publish for key in required_authority):
         raise ValueError("canonical publish authority is malformed")
+    execution_mode = canonical_publish.get("execution_mode", "EXTERNAL_DISPATCH")
+    if execution_mode not in ("EXTERNAL_DISPATCH", "INTERNAL_READINESS_ONLY"):
+        raise ValueError(f"unsupported canonical publish execution_mode: {execution_mode}")
 
     artifact_id = _canonical_publish_artifact_id(context)
     try:
@@ -427,11 +430,12 @@ def _execute_canonical_publish(
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise ValueError("canonical publish requires valid mission and execution IDs") from exc
 
-    async def run() -> _PendingPublishResult:
+    async def run() -> dict[str, Any] | _PendingPublishResult:
         from sqlalchemy import select
 
         from omega.application.durable_dispatch import DurableDispatchService
         from omega.application.publisher.intent_service import PublishIntentService
+        from omega.application.publisher.publish_service import PublishExecutionService
         from omega.domain.mission import MissionState
         from omega.domain.publisher import PublishIntentCreate, PublishIntentState
         from omega.domain.task import TaskState
@@ -504,6 +508,27 @@ def _execute_canonical_publish(
                 "media_artifact_id": str(artifact.id),
             }
             task.updated_at = datetime.now(UTC)
+            if execution_mode == "INTERNAL_READINESS_ONLY":
+                await async_session.commit()
+                readiness = await PublishExecutionService.validate_internal_publish_readiness(
+                    async_session,
+                    guardian_session_factory=AsyncWorkerSessionLocal,
+                    task_id=task.id,
+                    mission_id=mission.id,
+                    execution_id=execution.id,
+                    artifact_id=artifact.id,
+                    intent_id=intent.id,
+                )
+                task.output["internal_readiness"] = readiness
+                if readiness["status"] != "INTERNAL_READY":
+                    await async_session.commit()
+                    raise ValueError(
+                        "canonical internal publish readiness failed: "
+                        + "; ".join(readiness["validation_errors"])
+                    )
+                await async_session.commit()
+                return task.output
+
             await DurableDispatchService.enqueue_async(
                 async_session,
                 idempotency_key=f"publish-dispatch:{intent.id}",
