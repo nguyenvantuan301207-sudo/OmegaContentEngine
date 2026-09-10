@@ -21,7 +21,12 @@ from omega.domain.guardian import (
     GuardianFindingData,
 )
 from omega.domain.production import AssetType
-from omega.infrastructure.models import MediaArtifact, ProductionRequest, ProductionScene, ScriptVersion
+from omega.infrastructure.models import (
+    MediaArtifact,
+    ProductionRequest,
+    ProductionScene,
+    ScriptVersion,
+)
 
 
 class MediaIntegrityDetector(BaseDetector):
