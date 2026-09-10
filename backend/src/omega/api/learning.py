@@ -16,6 +16,7 @@ from omega.application.learning.job_service import LearningJobService
 from omega.infrastructure.models import (
     Channel,
     LearningBaseline,
+    LearningCohort,
     LearningHypothesis,
     LearningHypothesisEvaluation,
     LearningHypothesisLatestPointer,
@@ -298,10 +299,15 @@ async def get_channel_baselines(
     session: Annotated[AsyncSession, Depends(get_db)],
 ) -> list[BaselineResponse]:
     """Retrieve latest performance baselines across cohorts for a channel."""
-    stmt = select(LearningBaseline).order_by(
-        LearningBaseline.cohort_id,
-        LearningBaseline.outcome_metric,
-        LearningBaseline.baseline_version.desc(),
+    stmt = (
+        select(LearningBaseline)
+        .join(LearningCohort, LearningCohort.id == LearningBaseline.cohort_id)
+        .where(LearningCohort.channel_id == channel_id)
+        .order_by(
+            LearningBaseline.cohort_id,
+            LearningBaseline.outcome_metric,
+            LearningBaseline.baseline_version.desc(),
+        )
     )
     baselines = (await session.execute(stmt)).scalars().all()
     # Deduplicate in Python to return latest version per (cohort, metric, window)

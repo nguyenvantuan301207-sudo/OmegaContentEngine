@@ -1506,6 +1506,71 @@ async def test_get_channel_knowledge(db_session: AsyncSession, learning_env: dic
 
 
 @pytest.mark.asyncio
+async def test_get_channel_baselines_is_channel_isolated(
+    db_session: AsyncSession, learning_env: dict[str, Any]
+):
+    """Verify channel baseline reads never include another channel's cohort."""
+    channel_a: Channel = learning_env["channel"]
+    channel_b = Channel(
+        id=uuid4(),
+        slug=f"chan-{uuid4().hex[:8]}",
+        name="Other Baseline Channel",
+        platform="YOUTUBE",
+    )
+    db_session.add(channel_b)
+    await db_session.flush()
+
+    cohort_a = await CohortService.get_or_create_default_cohort(
+        db_session, channel_a.id, ContentFormat.LONG_FORM
+    )
+    cohort_b = await CohortService.get_or_create_default_cohort(
+        db_session, channel_b.id, ContentFormat.LONG_FORM
+    )
+    now = datetime.now(UTC)
+    baseline_a = LearningBaseline(
+        cohort_id=cohort_a.id,
+        outcome_metric="views",
+        evaluation_window=WindowType.FIRST_7D.value,
+        baseline_version=1,
+        member_count=10,
+        metric_median=100.0,
+        metric_mean=100.0,
+        metric_stddev=0.0,
+        metric_iqr=0.0,
+        metric_mad=0.0,
+        member_ids_checksum="a" * 64,
+        evaluation_as_of_utc=now,
+        baseline_key=f"baseline_{uuid4().hex}",
+    )
+    baseline_b = LearningBaseline(
+        cohort_id=cohort_b.id,
+        outcome_metric="views",
+        evaluation_window=WindowType.FIRST_7D.value,
+        baseline_version=1,
+        member_count=10,
+        metric_median=200.0,
+        metric_mean=200.0,
+        metric_stddev=0.0,
+        metric_iqr=0.0,
+        metric_mad=0.0,
+        member_ids_checksum="b" * 64,
+        evaluation_as_of_utc=now,
+        baseline_key=f"baseline_{uuid4().hex}",
+    )
+    db_session.add_all([baseline_a, baseline_b])
+    await db_session.commit()
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response_a = await client.get(f"/api/v1/learning/channels/{channel_a.id}/baselines")
+        response_b = await client.get(f"/api/v1/learning/channels/{channel_b.id}/baselines")
+
+    assert response_a.status_code == 200
+    assert response_b.status_code == 200
+    assert {item["baseline_id"] for item in response_a.json()} == {str(baseline_a.id)}
+    assert {item["baseline_id"] for item in response_b.json()} == {str(baseline_b.id)}
+
+
+@pytest.mark.asyncio
 async def test_get_hypothesis_history(db_session: AsyncSession, learning_env: dict[str, Any]):
     """Verify GET /api/v1/learning/channels/{channel_id}/hypotheses returns active hypothesis summaries."""
     chan: Channel = learning_env["channel"]
