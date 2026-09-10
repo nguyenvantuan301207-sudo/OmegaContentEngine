@@ -1323,6 +1323,15 @@ textarea {
   accent-color: var(--accent-primary);
 }
 
+.branding-toggle-row.disabled {
+  cursor: not-allowed;
+  opacity: 0.72;
+}
+
+.branding-toggle-row .branding-disabled-reason {
+  color: var(--status-warning);
+}
+
 .branding-info-callout,
 .branding-error-banner {
   display: flex;
@@ -1374,6 +1383,16 @@ textarea {
   color: var(--accent-secondary);
   font-family: var(--font-mono);
   font-size: 0.78rem;
+}
+
+.branding-range-output small,
+.branding-range-helper {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.branding-range-helper {
+  line-height: 1.4;
 }
 
 .branding-range-inputs {

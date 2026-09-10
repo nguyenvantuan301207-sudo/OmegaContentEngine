@@ -63,7 +63,10 @@ function validateBrandPackage(brandPackage: BrandPackage): Record<string, string
     if (!Number.isFinite(bug.opacity) || bug.opacity < 0 || bug.opacity > 1) errors.opacity = "Opacity must be between 0 and 1.";
     if (!Number.isFinite(bug.safe_margin_x) || bug.safe_margin_x < 0 || bug.safe_margin_x > 0.25) errors.safe_margin_x = "Safe margin X must be between 0 and 0.25.";
     if (!Number.isFinite(bug.safe_margin_y) || bug.safe_margin_y < 0 || bug.safe_margin_y > 0.25) errors.safe_margin_y = "Safe margin Y must be between 0 and 0.25.";
-    if (bug.enabled && !brandPackage.logo_asset) errors.channel_bug = "Placement enablement requires a configured logo asset.";
+    if (brandPackage.long_form.micro_intro_enabled && !brandPackage.intro_asset) errors.micro_intro = "Micro Intro requires a configured intro asset.";
+    if (brandPackage.long_form.branded_outro_enabled && !brandPackage.outro_asset) errors.branded_outro = "Branded Outro requires a configured outro asset.";
+    if (brandPackage.long_form.channel_bug_enabled && !brandPackage.logo_asset) errors.channel_bug_runtime = "Channel Bug Runtime Policy requires a configured logo asset.";
+    if (bug.enabled && !brandPackage.logo_asset) errors.channel_bug = "Channel Bug Placement Enablement requires a configured logo asset.";
     return errors;
 }
 
@@ -219,10 +222,18 @@ export default function BrandManagementPage({ params }: { params: Promise<{ id: 
 
             <div className="branding-policy-grid">
                 <RuntimeBrandingCard brandPackage={draftPackage} onChange={handleDraftChange} />
-                <LogoPlacementCard policy={draftPackage.channel_bug} errors={validationErrors} onChange={(channelBug) => handleDraftChange({ ...draftPackage, channel_bug: channelBug })} />
+                <LogoPlacementCard policy={draftPackage.channel_bug} hasLogo={Boolean(draftPackage.logo_asset)} errors={validationErrors} onChange={(channelBug) => handleDraftChange({ ...draftPackage, channel_bug: channelBug })} />
             </div>
 
-            {validationErrors.channel_bug && <div className="branding-error-banner" role="alert">{validationErrors.channel_bug}</div>}
+            {(validationErrors.micro_intro || validationErrors.branded_outro || validationErrors.channel_bug_runtime || validationErrors.channel_bug) && (
+                <div className="branding-error-banner" role="alert">
+                    <strong>Resolve branding dependencies before saving.</strong>
+                    {validationErrors.micro_intro && <span>{validationErrors.micro_intro}</span>}
+                    {validationErrors.branded_outro && <span>{validationErrors.branded_outro}</span>}
+                    {validationErrors.channel_bug_runtime && <span>{validationErrors.channel_bug_runtime}</span>}
+                    {validationErrors.channel_bug && <span>{validationErrors.channel_bug}</span>}
+                </div>
+            )}
 
             <BrandingSaveBar dirty={dirty} saving={saving} changeReason={changeReason} invalid={invalid} success={saveSuccess} error={saveError} onReasonChange={setChangeReason} onReset={handleReset} onSave={() => void handleSave()} />
         </div>

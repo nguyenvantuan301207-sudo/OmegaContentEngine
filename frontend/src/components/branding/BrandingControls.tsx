@@ -182,8 +182,10 @@ export function BrandAssetCard({
             setDeleting(true);
             setError(null);
             await deleteBrandAsset(channelId, role, displayAssetName(asset.reference));
-            onAssetChange(null);
-            setMessage("Unused stored candidate deleted. Channel DNA was not changed or saved.");
+            onAssetChange(savedAsset ?? null);
+            setMessage(savedAsset
+                ? "Unused candidate deleted. The persisted branding asset has been restored to this draft."
+                : "Unused candidate deleted. This branding role remains unconfigured.");
         } catch (deleteError: unknown) {
             setError(brandAssetErrorMessage(deleteError, "delete"));
         } finally {
@@ -244,12 +246,13 @@ export function BrandAssetCard({
     );
 }
 
-function ToggleControl({ label, description, checked, onChange, disabled }: { label: string; description: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
+function ToggleControl({ label, description, checked, onChange, disabled, disabledReason }: { label: string; description: string; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; disabledReason?: string }) {
     return (
-        <label className="branding-toggle-row">
+        <label className={`branding-toggle-row${disabled ? " disabled" : ""}`}>
             <span>
                 <strong>{label}</strong>
                 <small>{description}</small>
+                {disabled && disabledReason && <small className="branding-disabled-reason">{disabledReason}</small>}
             </span>
             <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} disabled={disabled} />
         </label>
@@ -271,9 +274,9 @@ export function RuntimeBrandingCard({ brandPackage, onChange }: { brandPackage: 
                 <span className="badge badge-ready">Long Form</span>
             </div>
             <div className="card-body">
-                <ToggleControl label="Micro Intro" description="Allow the configured intro after the opening hook." checked={brandPackage.long_form.micro_intro_enabled} onChange={(value) => updateLongForm("micro_intro_enabled", value)} disabled={!brandPackage.intro_asset} />
-                <ToggleControl label="Channel Bug Runtime Policy" description="Allow long-form production to include a channel bug. Placement-level enablement below must also be on." checked={brandPackage.long_form.channel_bug_enabled} onChange={(value) => updateLongForm("channel_bug_enabled", value)} disabled={!brandPackage.logo_asset} />
-                <ToggleControl label="Branded Outro" description="Allow the configured outro at the end of long-form content." checked={brandPackage.long_form.branded_outro_enabled} onChange={(value) => updateLongForm("branded_outro_enabled", value)} disabled={!brandPackage.outro_asset} />
+                <ToggleControl label="Micro Intro" description="Permit long-form production to schedule the configured intro after the opening hook." checked={brandPackage.long_form.micro_intro_enabled} onChange={(value) => updateLongForm("micro_intro_enabled", value)} disabled={!brandPackage.intro_asset} disabledReason="Upload or restore an intro asset to enable this runtime permission." />
+                <ToggleControl label="Channel Bug Runtime Policy" description="Permit long-form production to use a channel bug. This does not activate the overlay placement." checked={brandPackage.long_form.channel_bug_enabled} onChange={(value) => updateLongForm("channel_bug_enabled", value)} disabled={!brandPackage.logo_asset} disabledReason="Upload or restore a logo asset to enable this runtime permission." />
+                <ToggleControl label="Branded Outro" description="Permit long-form production to schedule the configured branded outro." checked={brandPackage.long_form.branded_outro_enabled} onChange={(value) => updateLongForm("branded_outro_enabled", value)} disabled={!brandPackage.outro_asset} disabledReason="Upload or restore an outro asset to enable this runtime permission." />
                 <div className="branding-info-callout">
                     <strong>Two independent channel bug gates</strong>
                     <span><b>Runtime policy</b> decides whether long-form production may use the bug. <b>Placement enablement</b> activates the configured overlay itself. Both must be enabled for rendering.</span>
@@ -283,23 +286,31 @@ export function RuntimeBrandingCard({ brandPackage, onChange }: { brandPackage: 
     );
 }
 
-function RangeField({ label, value, min, max, step, suffix, error, onChange }: { label: string; value: number; min: number; max: number; step: number; suffix: string; error?: string; onChange: (value: number) => void }) {
+function RangeField({ label, helper, value, min, max, step, suffix, error, onChange }: { label: string; helper: string; value: number; min: number; max: number; step: number; suffix: string; error?: string; onChange: (value: number) => void }) {
+    const update = (raw: string) => {
+        const parsed = Number(raw);
+        if (!Number.isFinite(parsed)) return;
+        const decimals = String(step).split(".")[1]?.length || 0;
+        const clamped = Math.min(max, Math.max(min, parsed));
+        onChange(Number(clamped.toFixed(decimals)));
+    };
     return (
         <div className="branding-range-field">
             <div className="flex-between">
                 <label className="form-label">{label}</label>
-                <output className="branding-range-output">{Math.round(value * 100)}{suffix}</output>
+                <output className="branding-range-output">{Math.round(value * 100)}{suffix} <small>({value.toFixed(2)})</small></output>
             </div>
+            <small className="branding-range-helper">{helper} Domain: {min.toFixed(2)}–{max.toFixed(2)}.</small>
             <div className="branding-range-inputs">
-                <input type="range" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} />
-                <input type="number" min={min} max={max} step={step} value={value} onChange={(event) => onChange(Number(event.target.value))} aria-label={`${label} numeric value`} />
+                <input type="range" min={min} max={max} step={step} value={value} onChange={(event) => update(event.target.value)} aria-label={`${label} slider`} />
+                <input type="number" min={min} max={max} step={step} value={value} onChange={(event) => update(event.target.value)} aria-label={`${label} numeric value`} />
             </div>
             {error && <span className="branding-field-error">{error}</span>}
         </div>
     );
 }
 
-export function LogoPlacementCard({ policy, onChange, errors }: { policy: ChannelBugPolicy; onChange: (next: ChannelBugPolicy) => void; errors: Record<string, string> }) {
+export function LogoPlacementCard({ policy, hasLogo, onChange, errors }: { policy: ChannelBugPolicy; hasLogo: boolean; onChange: (next: ChannelBugPolicy) => void; errors: Record<string, string> }) {
     const update = <K extends keyof ChannelBugPolicy>(field: K, value: ChannelBugPolicy[K]) => onChange({ ...policy, [field]: value });
 
     return (
@@ -312,30 +323,32 @@ export function LogoPlacementCard({ policy, onChange, errors }: { policy: Channe
                 <span className={`badge ${policy.enabled ? "badge-succeeded" : "badge-draft"}`}>{policy.enabled ? "Placement enabled" : "Placement disabled"}</span>
             </div>
             <div className="card-body">
-                <ToggleControl label="Placement Enablement" description="Enable this overlay configuration. This is separate from long-form runtime policy." checked={policy.enabled} onChange={(value) => update("enabled", value)} />
+                <ToggleControl label="Channel Bug Placement Enablement" description="Activate this configured overlay placement. Runtime permission above remains an independent gate." checked={policy.enabled} onChange={(value) => update("enabled", value)} disabled={!hasLogo} disabledReason="Upload or restore a logo asset before activating overlay placement." />
                 <div className="branding-control-grid">
                     <div className="form-group">
-                        <label className="form-label" htmlFor="bug-position">Position</label>
+                        <label className="form-label" htmlFor="bug-position">Overlay position</label>
                         <select id="bug-position" value={policy.position} onChange={(event) => update("position", event.target.value as ChannelBugPolicy["position"])}>
                             <option value="TOP_LEFT">Top left</option>
                             <option value="TOP_RIGHT">Top right</option>
                             <option value="BOTTOM_LEFT">Bottom left</option>
                             <option value="BOTTOM_RIGHT">Bottom right</option>
                         </select>
+                        <span className="form-helper">Anchor the logo within the video frame.</span>
                     </div>
                     <div className="form-group">
-                        <label className="form-label" htmlFor="bug-timing">Timing policy</label>
+                        <label className="form-label" htmlFor="bug-timing">Display timing policy</label>
                         <select id="bug-timing" value={policy.timing_policy} onChange={(event) => update("timing_policy", event.target.value as ChannelBugPolicy["timing_policy"])}>
                             <option value="ALWAYS">Always</option>
                             <option value="AFTER_INTRO">After intro</option>
                             <option value="MAIN_CONTENT_ONLY">Main content only</option>
                         </select>
+                        <span className="form-helper">Always, after the intro, or only during main content.</span>
                     </div>
                 </div>
-                <RangeField label="Scale" value={policy.scale} min={0.01} max={1} step={0.01} suffix="%" error={errors.scale} onChange={(value) => update("scale", value)} />
-                <RangeField label="Opacity" value={policy.opacity} min={0} max={1} step={0.01} suffix="%" error={errors.opacity} onChange={(value) => update("opacity", value)} />
-                <RangeField label="Safe Margin X" value={policy.safe_margin_x} min={0} max={0.25} step={0.01} suffix="%" error={errors.safe_margin_x} onChange={(value) => update("safe_margin_x", value)} />
-                <RangeField label="Safe Margin Y" value={policy.safe_margin_y} min={0} max={0.25} step={0.01} suffix="%" error={errors.safe_margin_y} onChange={(value) => update("safe_margin_y", value)} />
+                <RangeField label="Logo scale" helper="Fraction of the output frame used by the overlay." value={policy.scale} min={0.01} max={1} step={0.01} suffix="%" error={errors.scale} onChange={(value) => update("scale", value)} />
+                <RangeField label="Logo opacity" helper="Overlay visibility from transparent to fully opaque." value={policy.opacity} min={0} max={1} step={0.01} suffix="%" error={errors.opacity} onChange={(value) => update("opacity", value)} />
+                <RangeField label="Horizontal safe margin" helper="Inset from the selected left or right edge." value={policy.safe_margin_x} min={0} max={0.25} step={0.01} suffix="%" error={errors.safe_margin_x} onChange={(value) => update("safe_margin_x", value)} />
+                <RangeField label="Vertical safe margin" helper="Inset from the selected top or bottom edge." value={policy.safe_margin_y} min={0} max={0.25} step={0.01} suffix="%" error={errors.safe_margin_y} onChange={(value) => update("safe_margin_y", value)} />
                 <ToggleControl label="Subtitle-safe placement" description="Keep logo placement clear of subtitle-safe rendering regions." checked={policy.subtitle_safe} onChange={(value) => update("subtitle_safe", value)} />
             </div>
         </section>
