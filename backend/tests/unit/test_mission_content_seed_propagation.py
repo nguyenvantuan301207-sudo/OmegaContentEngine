@@ -104,6 +104,88 @@ def test_topic_candidate_id_alone_is_valid_authority() -> None:
     assert inputs["content_generation"] == {}
 
 
+def test_explicit_offline_research_sources_are_normalized_deterministically() -> None:
+    metadata = {
+        "canonical_inputs": {
+            "research": {
+                "sources": [
+                    {
+                        "source_type": "MANUAL",
+                        "title": "Small factual source",
+                        "publisher": "Local editorial desk",
+                        "content_excerpt": "A bounded, explicitly supplied factual excerpt.",
+                    }
+                ]
+            }
+        }
+    }
+    original = deepcopy(metadata)
+    first, second = make_plan(), make_plan()
+
+    _enrich_canonical_content_seed(first, metadata)
+    _enrich_canonical_content_seed(second, metadata)
+
+    first_input = task_inputs(first)["research"]
+    assert first_input == task_inputs(second)["research"]
+    source = first_input["canonical_research"]["sources"][0]
+    assert source["source_type"] == "MANUAL"
+    assert source["title"] == "Small factual source"
+    assert source["content_excerpt"].startswith("A bounded")
+    assert metadata == original
+
+
+def test_explicit_short_content_duration_is_propagated() -> None:
+    plan = make_plan()
+
+    _enrich_canonical_content_seed(
+        plan,
+        {
+            "canonical_inputs": {
+                "content": {
+                    "content_type": "YOUTUBE_SHORT",
+                    "target_duration_seconds": 45,
+                }
+            }
+        },
+    )
+
+    assert task_inputs(plan)["content_generation"] == {
+        "canonical_content": {
+            "content_type": "YOUTUBE_SHORT",
+            "target_duration_seconds": 45,
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        {"content_type": "YOUTUBE_LONGFORM", "target_duration_seconds": 45},
+        {"content_type": "UNKNOWN", "target_duration_seconds": 45},
+        {"content_type": "YOUTUBE_SHORT", "target_duration_seconds": True},
+        {"content_type": "YOUTUBE_SHORT", "unexpected": "value"},
+    ],
+)
+def test_invalid_canonical_content_authority_fails_closed(content) -> None:
+    plan = make_plan()
+
+    with pytest.raises(ValueError):
+        _enrich_canonical_content_seed(
+            plan,
+            {"canonical_inputs": {"content": content}},
+        )
+
+
+def test_empty_offline_research_authority_fails_closed() -> None:
+    plan = make_plan()
+
+    with pytest.raises(ValueError):
+        _enrich_canonical_content_seed(
+            plan,
+            {"canonical_inputs": {"research": {"sources": []}}},
+        )
+
+
 @pytest.mark.parametrize("malformed_topic_id", ["not-a-uuid", "", "   ", 123, None])
 def test_malformed_topic_candidate_id_fails_closed(malformed_topic_id) -> None:
     plan = make_plan()

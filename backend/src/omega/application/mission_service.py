@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.planner import StaticMissionPlanner
 from omega.domain.channel import ChannelState
+from omega.domain.content import ContentType
 from omega.domain.decision import Actor, DecisionLogResponse, DecisionType
 from omega.domain.mission import (
     ExecutionState,
@@ -24,6 +25,7 @@ from omega.domain.mission import (
     MissionUpdate,
     validate_mission_transition,
 )
+from omega.domain.research import ResearchSourceBatchCreate
 from omega.domain.task import TaskResponse, TaskState
 from omega.infrastructure.models import (
     Channel,
@@ -76,6 +78,49 @@ def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
         normalized_brief_id = _normalize_canonical_uuid(
             canonical_inputs["research_brief_id"], "research_brief_id"
         )
+
+    normalized_research = None
+    if "research" in canonical_inputs:
+        research_raw = canonical_inputs["research"]
+        if not isinstance(research_raw, dict):
+            raise ValueError("Canonical research input must be an object.")
+        normalized_research = ResearchSourceBatchCreate.model_validate(
+            research_raw
+        ).model_dump(mode="json")
+
+    normalized_content = None
+    if "content" in canonical_inputs:
+        content_raw = canonical_inputs["content"]
+        if not isinstance(content_raw, dict):
+            raise ValueError("Canonical content input must be an object.")
+        unsupported = set(content_raw) - {"content_type", "target_duration_seconds"}
+        if unsupported:
+            raise ValueError(
+                "Canonical content input contains unsupported fields: "
+                + ", ".join(sorted(unsupported))
+            )
+        try:
+            content_type = ContentType(
+                content_raw.get("content_type", ContentType.YOUTUBE_LONGFORM.value)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Canonical content content_type is unsupported.") from exc
+        normalized_content = {"content_type": content_type.value}
+        if "target_duration_seconds" in content_raw:
+            duration = content_raw["target_duration_seconds"]
+            if isinstance(duration, bool) or not isinstance(duration, int):
+                raise ValueError(
+                    "Canonical content target_duration_seconds must be an integer."
+                )
+            if not 30 <= duration <= 3600:
+                raise ValueError(
+                    "Canonical content target_duration_seconds must be between 30 and 3600."
+                )
+            if content_type == ContentType.YOUTUBE_LONGFORM and not 480 <= duration <= 1320:
+                raise ValueError(
+                    "Canonical long-form target duration must be between 480 and 1320 seconds."
+                )
+            normalized_content["target_duration_seconds"] = duration
 
     normalized_publish = None
     if "publish" in canonical_inputs:
@@ -154,14 +199,25 @@ def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
                 **(task_create.input or {}),
                 "topic_candidate_id": normalized_topic_id,
             }
-        elif task_create.task_type == "content_generation" and normalized_brief_id:
+        elif task_create.task_type == "research" and normalized_research is not None:
             task_create.input = {
                 **(task_create.input or {}),
-                "canonical_seed": {
-                    "topic_candidate_id": normalized_topic_id,
-                    "research_brief_id": normalized_brief_id,
-                },
+                "canonical_research": normalized_research,
             }
+        elif task_create.task_type == "content_generation":
+            if normalized_brief_id:
+                task_create.input = {
+                    **(task_create.input or {}),
+                    "canonical_seed": {
+                        "topic_candidate_id": normalized_topic_id,
+                        "research_brief_id": normalized_brief_id,
+                    },
+                }
+            if normalized_content is not None:
+                task_create.input = {
+                    **(task_create.input or {}),
+                    "canonical_content": normalized_content,
+                }
         elif task_create.task_type == "publish" and normalized_publish is not None:
             task_create.input = {
                 **(task_create.input or {}),

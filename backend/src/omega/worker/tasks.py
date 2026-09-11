@@ -36,6 +36,85 @@ def _sanitize_task_error(error: Exception) -> str:
     return f"{error_type}: {message}"
 
 
+async def _record_render_bootstrap_failure(
+    session: Any,
+    request_id: str,
+    job_id: str,
+    sanitized_error: str,
+) -> bool:
+    """Fail one exactly-correlated render job and durably wake Mission evaluation."""
+    from sqlalchemy import select
+
+    from omega.application.durable_dispatch import DurableDispatchService
+    from omega.domain.production import RenderErrorCode, RenderJobState
+    from omega.infrastructure.models import MissionExecution, ProductionRenderJob, ProductionRequest
+
+    try:
+        parsed_request_id = uuid.UUID(str(request_id))
+        parsed_job_id = uuid.UUID(str(job_id))
+    except (TypeError, ValueError, AttributeError):
+        await session.rollback()
+        return False
+
+    job = (
+        await session.execute(
+            select(ProductionRenderJob)
+            .where(
+                ProductionRenderJob.id == parsed_job_id,
+                ProductionRenderJob.production_request_id == parsed_request_id,
+            )
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if job is None:
+        await session.rollback()
+        return False
+    if job.state == RenderJobState.FAILED.value:
+        await session.rollback()
+        return True
+    if job.state not in (
+        RenderJobState.PENDING.value,
+        RenderJobState.QUEUED.value,
+        RenderJobState.RETRY.value,
+    ):
+        await session.rollback()
+        return False
+
+    request = await session.get(ProductionRequest, parsed_request_id)
+    if request is None or request.id != job.production_request_id:
+        await session.rollback()
+        return False
+
+    job.state = RenderJobState.FAILED.value
+    job.error_code = RenderErrorCode.UNKNOWN.value
+    job.sanitized_error = sanitized_error[:1000]
+    job.completed_at = datetime.now(UTC)
+
+    execution_id = request.mission_execution_id
+    if execution_id is not None:
+        mission_id = (
+            await session.execute(
+                select(MissionExecution.mission_id).where(MissionExecution.id == execution_id)
+            )
+        ).scalar_one_or_none()
+        if mission_id is not None:
+            await DurableDispatchService.enqueue_async(
+                session,
+                idempotency_key=(
+                    f"render-terminal-evaluation:{parsed_request_id}:{parsed_job_id}"
+                ),
+                task_name="omega.orchestrator.evaluate",
+                args=[str(mission_id), str(execution_id)],
+                purpose="RENDER_TERMINAL_EVALUATION",
+                mission_id=mission_id,
+                mission_execution_id=execution_id,
+                production_request_id=parsed_request_id,
+                render_job_id=parsed_job_id,
+            )
+    await session.commit()
+    return True
+
+
 def _load_dependency_outputs(session: Any, task: Any) -> dict[str, dict]:
     """Load and validate canonical outputs from a task's direct dependencies."""
     from omega.domain.task import TaskState
@@ -126,7 +205,11 @@ def _execute_canonical_production(
 
     async def run() -> dict[str, str]:
         from omega.application.production_service import ProductionService
-        from omega.domain.content import ContentRequestStatus
+        from omega.domain.content import (
+            ContentOutcome,
+            ContentRequestStatus,
+            ScriptQAStatus,
+        )
         from omega.domain.production import (
             MediaArtifactType,
             ProductionMode,
@@ -173,7 +256,13 @@ def _execute_canonical_production(
                 raise ValueError("ContentGenerationRequest pinned DNA lineage is invalid")
             if (
                 content_request.status != ContentRequestStatus.SUCCEEDED.value
+                or content_request.outcome != ContentOutcome.GENERATED.value
                 or not script.is_current
+                or script.qa_status
+                not in (
+                    ScriptQAStatus.PASSED.value,
+                    ScriptQAStatus.PASSED_WITH_WARNINGS.value,
+                )
             ):
                 raise ValueError("ScriptVersion is not accepted under content request semantics")
 
@@ -625,7 +714,11 @@ def _execute_canonical_topic(
     return asyncio.run(run())
 
 
-def _execute_canonical_research(task_id: uuid.UUID, context: dict[str, Any]) -> dict[str, str]:
+def _execute_canonical_research(
+    task_id: uuid.UUID,
+    task_input: dict[str, Any] | None,
+    context: dict[str, Any],
+) -> dict[str, str]:
     """Create/reuse and run canonical research through the persisted ResearchService lifecycle."""
     topic_id = _canonical_research_topic_id(context)
     try:
@@ -638,7 +731,12 @@ def _execute_canonical_research(task_id: uuid.UUID, context: dict[str, Any]) -> 
         from sqlalchemy import select
 
         from omega.application import research_service
-        from omega.domain.research import ResearchRequestCreate, ResearchRequestStatus
+        from omega.domain.research import (
+            ResearchOutcome,
+            ResearchRequestCreate,
+            ResearchRequestStatus,
+            ResearchSourceBatchCreate,
+        )
         from omega.domain.topic import TopicStatus
         from omega.infrastructure.database import AsyncWorkerSessionLocal
         from omega.infrastructure.models import (
@@ -651,6 +749,18 @@ def _execute_canonical_research(task_id: uuid.UUID, context: dict[str, Any]) -> 
         )
 
         async with AsyncWorkerSessionLocal() as async_session:
+            if task_input is not None and not isinstance(task_input, dict):
+                raise ValueError("canonical research task input must be an object")
+            research_authority = (
+                task_input.get("canonical_research")
+                if isinstance(task_input, dict)
+                else None
+            )
+            source_batch = (
+                ResearchSourceBatchCreate.model_validate(research_authority)
+                if research_authority is not None
+                else None
+            )
             task = await async_session.get(Task, task_id)
             execution = await async_session.get(MissionExecution, execution_id)
             mission = await async_session.get(Mission, mission_id)
@@ -721,6 +831,12 @@ def _execute_canonical_research(task_id: uuid.UUID, context: dict[str, Any]) -> 
             ):
                 raise ValueError(f"ResearchRequest cannot run from state '{request.status}'")
             else:
+                if source_batch is not None:
+                    await research_service.batch_add_sources(
+                        async_session,
+                        request.id,
+                        source_batch,
+                    )
                 generated = await research_service.run_research(async_session, request.id)
                 brief = await async_session.get(ResearchBrief, generated.id)
 
@@ -731,6 +847,12 @@ def _execute_canonical_research(task_id: uuid.UUID, context: dict[str, Any]) -> 
                 or brief.channel_id != mission.channel_id
             ):
                 raise ValueError("ResearchBrief canonical lineage is invalid")
+            if (
+                request.status != ResearchRequestStatus.SUCCEEDED.value
+                or request.outcome != ResearchOutcome.SUFFICIENT.value
+                or brief.outcome != ResearchOutcome.SUFFICIENT.value
+            ):
+                raise ValueError("canonical research did not produce SUFFICIENT authority")
             return {
                 "topic_candidate_id": str(topic_id),
                 "research_request_id": str(request.id),
@@ -804,7 +926,13 @@ def _execute_canonical_content(
         from sqlalchemy import select
 
         from omega.application import content_service
-        from omega.domain.content import ContentGenerationRequestCreate, ContentRequestStatus
+        from omega.domain.content import (
+            ContentGenerationRequestCreate,
+            ContentOutcome,
+            ContentRequestStatus,
+            ScriptQAStatus,
+        )
+        from omega.domain.research import ResearchOutcome, ResearchRequestStatus
         from omega.domain.topic import TopicStatus
         from omega.infrastructure.database import AsyncWorkerSessionLocal
         from omega.infrastructure.models import (
@@ -850,6 +978,22 @@ def _execute_canonical_content(
                 or research_request.mission_execution_id != execution_id
             ):
                 raise ValueError("ResearchBrief parent request MissionExecution lineage is invalid")
+            if (
+                research_request.status != ResearchRequestStatus.SUCCEEDED.value
+                or research_request.outcome != ResearchOutcome.SUFFICIENT.value
+                or brief.outcome != ResearchOutcome.SUFFICIENT.value
+            ):
+                raise ValueError("ResearchBrief is not SUFFICIENT canonical authority")
+
+            if task_input is not None and not isinstance(task_input, dict):
+                raise ValueError("task_input must be an object")
+            content_authority = (
+                task_input.get("canonical_content")
+                if isinstance(task_input, dict)
+                else None
+            )
+            if content_authority is not None and not isinstance(content_authority, dict):
+                raise ValueError("canonical_content must be an object")
 
             idempotency_key = hashlib.sha256(
                 f"mission-content:{execution_id}:{task_id}".encode()
@@ -858,6 +1002,7 @@ def _execute_canonical_content(
                 topic_candidate_id=topic_id,
                 research_brief_id=brief_id,
                 mission_execution_id=execution_id,
+                **(content_authority or {}),
             )
             request = await content_service.create_request(
                 async_session, mission.channel_id, request_in, idempotency_key=idempotency_key
@@ -898,6 +1043,15 @@ def _execute_canonical_content(
 
             if script is None or script.content_request_id != persisted_request.id:
                 raise ValueError("ScriptVersion does not belong to ContentGenerationRequest")
+            if (
+                persisted_request.outcome != ContentOutcome.GENERATED.value
+                or script.qa_status
+                not in (
+                    ScriptQAStatus.PASSED.value,
+                    ScriptQAStatus.PASSED_WITH_WARNINGS.value,
+                )
+            ):
+                raise ValueError("canonical content did not produce an accepted script")
             return {
                 "content_request_id": str(persisted_request.id),
                 "script_version_id": str(script.id),
@@ -1071,7 +1225,7 @@ def execute_task(self, task_id: str) -> dict:
         if task.task_type == "topic_discovery":
             result_output = _execute_canonical_topic(task.id, task.input, context)
         elif task.task_type == "research":
-            result_output = _execute_canonical_research(task.id, context)
+            result_output = _execute_canonical_research(task.id, task.input, context)
         elif task.task_type == "content_generation":
             result_output = _execute_canonical_content(task.id, task.input, context)
         elif task.task_type == "production":
@@ -1307,12 +1461,35 @@ def execute_production_render_task(
 
     async def _run():
         async with AsyncWorkerSessionLocal() as session:
-            from omega.application.production_render_factory import build_production_render_service
+            try:
+                r_id = uuid.UUID(str(request_id))
+                j_id = uuid.UUID(str(job_id))
+                c_id = uuid.UUID(str(channel_id))
+                from omega.application.production_render_factory import (
+                    build_production_render_service,
+                )
 
-            service = build_production_render_service()
-            c_id = uuid.UUID(str(channel_id))
-            r_id = uuid.UUID(str(request_id))
-            j_id = uuid.UUID(str(job_id))
+                service = build_production_render_service()
+            except Exception as exc:
+                sanitized_error = _sanitize_task_error(exc)
+                logger.error(
+                    "Background render bootstrap failed",
+                    job_id=job_id,
+                    error=sanitized_error,
+                    exc_info=True,
+                )
+                persisted = await _record_render_bootstrap_failure(
+                    session,
+                    request_id,
+                    job_id,
+                    sanitized_error,
+                )
+                return {
+                    "status": "failed",
+                    "error": sanitized_error,
+                    "failure_persisted": persisted,
+                }
+
             try:
                 art, qa_status = await service.execute_render_job(session, c_id, r_id, j_id)
                 return {

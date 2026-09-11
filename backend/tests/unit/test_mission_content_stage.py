@@ -12,8 +12,14 @@ import pytest
 from omega.application import content_service
 from omega.application import executor as executor_module
 from omega.application.durable_dispatch import DurableDispatchService
-from omega.domain.content import ContentRequestStatus, ContentType
+from omega.domain.content import (
+    ContentOutcome,
+    ContentRequestStatus,
+    ContentType,
+    ScriptQAStatus,
+)
 from omega.domain.mission import MissionState
+from omega.domain.research import ResearchOutcome, ResearchRequestStatus
 from omega.domain.task import TaskState
 from omega.domain.topic import TopicStatus
 from omega.infrastructure import database, database_sync
@@ -131,12 +137,15 @@ def lineage(*, topic_status=TopicStatus.SELECTED.value):
             topic_candidate_id=topic_id,
             channel_id=channel_id,
             research_request_id=research_id,
+            outcome=ResearchOutcome.SUFFICIENT.value,
         ),
         (ResearchRequest, research_id): SimpleNamespace(
             id=research_id,
             topic_candidate_id=topic_id,
             channel_id=channel_id,
             mission_execution_id=execution_id,
+            status=ResearchRequestStatus.SUCCEEDED.value,
+            outcome=ResearchOutcome.SUFFICIENT.value,
         ),
         (ContentGenerationRequest, request_id): SimpleNamespace(
             id=request_id,
@@ -146,8 +155,13 @@ def lineage(*, topic_status=TopicStatus.SELECTED.value):
             research_brief_id=brief_id,
             channel_dna_revision_id=dna_id,
             status=ContentRequestStatus.DRAFT.value,
+            outcome=ContentOutcome.GENERATED.value,
         ),
-        (ScriptVersion, script_id): SimpleNamespace(id=script_id, content_request_id=request_id),
+        (ScriptVersion, script_id): SimpleNamespace(
+            id=script_id,
+            content_request_id=request_id,
+            qa_status=ScriptQAStatus.PASSED.value,
+        ),
     }
     ctx = {
         "mission_id": str(mission_id),
@@ -209,6 +223,28 @@ def test_research_execution_or_channel_mismatch_fails_before_service(monkeypatch
     generate.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    ("target", "outcome"),
+    [
+        (ResearchRequest, ResearchOutcome.INSUFFICIENT.value),
+        (ResearchBrief, ResearchOutcome.INSUFFICIENT.value),
+    ],
+)
+def test_insufficient_research_cannot_authorize_content(
+    monkeypatch, target, outcome
+) -> None:
+    data = lineage()
+    record_id = data.research_id if target is ResearchRequest else data.brief_id
+    data.records[(target, record_id)].outcome = outcome
+    create, generate = install_adapter_fakes(monkeypatch, data)
+
+    with pytest.raises(ValueError, match="SUFFICIENT"):
+        worker_tasks._execute_canonical_content(uuid4(), None, data.context)
+
+    create.assert_not_awaited()
+    generate.assert_not_awaited()
+
+
 def test_pinned_dna_mismatch_fails_before_generation(monkeypatch) -> None:
     data = lineage()
     data.records[(ContentGenerationRequest, data.request_id)].channel_dna_revision_id = uuid4()
@@ -234,6 +270,23 @@ def test_canonical_long_form_uses_pinned_dna_default_runtime(monkeypatch) -> Non
     assert request.channel_dna_revision_id == data.dna_id
     assert request.target_duration_seconds == 840
     assert request.target_duration_seconds != 480
+
+
+def test_explicit_short_runtime_reaches_content_request(monkeypatch) -> None:
+    data = lineage()
+    create, _ = install_adapter_fakes(monkeypatch, data)
+    task_input = {
+        "canonical_content": {
+            "content_type": ContentType.YOUTUBE_SHORT.value,
+            "target_duration_seconds": 45,
+        }
+    }
+
+    worker_tasks._execute_canonical_content(uuid4(), task_input, data.context)
+
+    request_in = create.await_args.args[2]
+    assert request_in.content_type == ContentType.YOUTUBE_SHORT
+    assert request_in.target_duration_seconds == 45
 
 
 def test_generation_uses_deterministic_request_and_returns_persisted_ids(monkeypatch) -> None:
@@ -269,6 +322,32 @@ def test_successful_request_reuses_authoritative_current_script(monkeypatch) -> 
     create.assert_awaited_once()
     generate.assert_not_awaited()
     assert output["script_version_id"] == str(data.script_id)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda data: setattr(
+            data.records[(ContentGenerationRequest, data.request_id)],
+            "outcome",
+            ContentOutcome.BLOCKED.value,
+        ),
+        lambda data: setattr(
+            data.records[(ScriptVersion, data.script_id)],
+            "qa_status",
+            ScriptQAStatus.BLOCKED.value,
+        ),
+    ],
+)
+def test_blocked_generated_content_is_not_returned(monkeypatch, mutation) -> None:
+    data = lineage()
+    mutation(data)
+    _, generate = install_adapter_fakes(monkeypatch, data)
+
+    with pytest.raises(ValueError, match="accepted script"):
+        worker_tasks._execute_canonical_content(uuid4(), None, data.context)
+
+    generate.assert_awaited_once()
 
 
 def test_script_ownership_is_verified(monkeypatch) -> None:

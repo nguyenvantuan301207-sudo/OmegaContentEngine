@@ -13,7 +13,11 @@ from omega.application import executor as executor_module
 from omega.application import orchestrator
 from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.production_service import ProductionService
-from omega.domain.content import ContentRequestStatus
+from omega.domain.content import (
+    ContentOutcome,
+    ContentRequestStatus,
+    ScriptQAStatus,
+)
 from omega.domain.mission import MissionState
 from omega.domain.production import (
     MediaArtifactType,
@@ -113,8 +117,14 @@ def lineage():
         channel_id=channel_id,
         channel_dna_revision_id=dna_id,
         status=ContentRequestStatus.SUCCEEDED.value,
+        outcome=ContentOutcome.GENERATED.value,
     )
-    script = SimpleNamespace(id=script_id, content_request_id=content_id, is_current=True)
+    script = SimpleNamespace(
+        id=script_id,
+        content_request_id=content_id,
+        is_current=True,
+        qa_status=ScriptQAStatus.PASSED.value,
+    )
     request = SimpleNamespace(
         id=request_id,
         mission_execution_id=execution_id,
@@ -248,10 +258,21 @@ def test_terminal_render_failure_fails_stage(monkeypatch, lineage, state) -> Non
         worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
 
 
-def test_blocked_mechanical_success_is_still_stage_success(monkeypatch, lineage) -> None:
-    lineage.request.outcome = "BLOCKED"
-    install(monkeypatch, lineage, state=RenderJobState.SUCCEEDED.value, is_new=False, artifact=lineage.artifact)
-    assert worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)["media_artifact_id"] == str(lineage.artifact_id)
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda d: setattr(d.content, "outcome", ContentOutcome.BLOCKED.value),
+        lambda d: setattr(d.script, "qa_status", ScriptQAStatus.BLOCKED.value),
+    ],
+)
+def test_blocked_content_cannot_enter_production(monkeypatch, lineage, mutation) -> None:
+    mutation(lineage)
+    create, _, _, _ = install(monkeypatch, lineage)
+
+    with pytest.raises(ValueError, match="not accepted"):
+        worker_tasks._execute_canonical_production(lineage.task_id, lineage.ctx)
+
+    create.assert_not_awaited()
 
 
 class Query:

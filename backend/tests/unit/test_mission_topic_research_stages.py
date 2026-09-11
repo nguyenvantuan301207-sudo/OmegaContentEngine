@@ -4,18 +4,29 @@ from __future__ import annotations
 
 from copy import deepcopy
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
 
 from omega.application import executor as executor_module
+from omega.application import research_service
 from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.mission_service import _enrich_canonical_content_seed
 from omega.application.planner import StaticMissionPlanner
 from omega.domain.mission import MissionState
+from omega.domain.research import ResearchOutcome, ResearchRequestStatus
 from omega.domain.task import TaskState
-from omega.infrastructure import database_sync
+from omega.domain.topic import TopicStatus
+from omega.infrastructure import database, database_sync
+from omega.infrastructure.models import (
+    Mission,
+    MissionExecution,
+    ResearchBrief,
+    ResearchRequest,
+    Task,
+    TopicCandidate,
+)
 from omega.worker import tasks as worker_tasks
 
 
@@ -99,6 +110,158 @@ def test_research_output_is_directly_consumable_by_content_resolver() -> None:
         },
     )
     assert resolved == (topic_id, brief_id)
+
+
+class AsyncScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class ResearchSession:
+    def __init__(self, records, request, brief):
+        self.records = records
+        self.request = request
+        self.brief = brief
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def get(self, model, record_id):
+        return self.records.get((model, record_id))
+
+    async def execute(self, statement):
+        sql = str(statement)
+        if "research_requests" in sql:
+            return AsyncScalarResult(self.request)
+        if "research_briefs" in sql:
+            return AsyncScalarResult(self.brief)
+        raise AssertionError(f"Unexpected statement: {sql}")
+
+
+def install_research_stage(monkeypatch, *, outcome):
+    mission_id, execution_id, channel_id, dna_id = uuid4(), uuid4(), uuid4(), uuid4()
+    task_id, topic_id, request_id, brief_id = uuid4(), uuid4(), uuid4(), uuid4()
+    identity = f"mission-research:{execution_id}:{task_id}"
+    task = SimpleNamespace(id=task_id, mission_id=mission_id, execution_id=execution_id)
+    execution = SimpleNamespace(
+        id=execution_id,
+        mission_id=mission_id,
+        channel_dna_revision_id=dna_id,
+    )
+    mission = SimpleNamespace(id=mission_id, channel_id=channel_id)
+    topic = SimpleNamespace(
+        id=topic_id,
+        channel_id=channel_id,
+        status=TopicStatus.SELECTED.value,
+    )
+    request = SimpleNamespace(
+        id=request_id,
+        topic_candidate_id=topic_id,
+        mission_execution_id=execution_id,
+        channel_id=channel_id,
+        metadata_={"canonical_task_identity": identity},
+        status=ResearchRequestStatus.PENDING.value,
+        outcome=None,
+    )
+    brief = SimpleNamespace(
+        id=brief_id,
+        research_request_id=request_id,
+        topic_candidate_id=topic_id,
+        channel_id=channel_id,
+        outcome=outcome,
+    )
+    records = {
+        (Task, task_id): task,
+        (MissionExecution, execution_id): execution,
+        (Mission, mission_id): mission,
+        (TopicCandidate, topic_id): topic,
+        (ResearchRequest, request_id): request,
+        (ResearchBrief, brief_id): brief,
+    }
+    monkeypatch.setattr(
+        database,
+        "AsyncWorkerSessionLocal",
+        lambda: ResearchSession(records, request, brief),
+    )
+    create = AsyncMock()
+    add_sources = AsyncMock(return_value=[])
+
+    async def run_research(*args):
+        request.status = ResearchRequestStatus.SUCCEEDED.value
+        request.outcome = outcome
+        return SimpleNamespace(id=brief_id)
+
+    run = AsyncMock(side_effect=run_research)
+    monkeypatch.setattr(research_service, "create_research_request", create)
+    monkeypatch.setattr(research_service, "batch_add_sources", add_sources)
+    monkeypatch.setattr(research_service, "run_research", run)
+    ctx = {
+        "mission_id": str(mission_id),
+        "execution_id": str(execution_id),
+        "dependency_outputs": {
+            "topic_discovery": {"topic_candidate_id": str(topic_id)}
+        },
+    }
+    return SimpleNamespace(
+        task_id=task_id,
+        topic_id=topic_id,
+        request_id=request_id,
+        brief_id=brief_id,
+        request=request,
+        brief=brief,
+        context=ctx,
+        create=create,
+        add_sources=add_sources,
+        run=run,
+    )
+
+
+def test_zero_source_research_cannot_silently_authorize_content(monkeypatch) -> None:
+    data = install_research_stage(monkeypatch, outcome=ResearchOutcome.INSUFFICIENT.value)
+
+    with pytest.raises(ValueError, match="SUFFICIENT"):
+        worker_tasks._execute_canonical_research(data.task_id, {}, data.context)
+
+    data.add_sources.assert_not_awaited()
+    data.run.assert_awaited_once()
+
+
+def test_explicit_sources_use_existing_ingestion_and_replay_is_safe(monkeypatch) -> None:
+    data = install_research_stage(monkeypatch, outcome=ResearchOutcome.SUFFICIENT.value)
+    task_input = {
+        "canonical_research": {
+            "sources": [
+                {
+                    "source_type": "MANUAL",
+                    "title": "Explicit local source",
+                    "publisher": "Local editorial desk",
+                    "content_excerpt": "This is bounded explicit source authority.",
+                }
+            ]
+        }
+    }
+
+    first = worker_tasks._execute_canonical_research(
+        data.task_id, task_input, data.context
+    )
+    second = worker_tasks._execute_canonical_research(
+        data.task_id, task_input, data.context
+    )
+
+    assert first == second == {
+        "topic_candidate_id": str(data.topic_id),
+        "research_request_id": str(data.request_id),
+        "research_brief_id": str(data.brief_id),
+    }
+    data.add_sources.assert_awaited_once()
+    assert data.add_sources.await_args.args[1] == data.request_id
+    data.run.assert_awaited_once()
 
 
 class Query:

@@ -6,12 +6,15 @@ import pytest
 
 from omega.api import production
 from omega.application.brand_asset_resolver import BrandAssetResolver
+from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.production_render_factory import (
     ProductionVisualV2Adapter,
     build_production_render_service,
 )
 from omega.application.render_service import ProductionRenderService
+from omega.domain.production import RenderErrorCode, RenderJobState
+from omega.infrastructure import database
 from omega.infrastructure.models import ProductionRequest
 from omega.worker import tasks
 
@@ -302,6 +305,188 @@ class _WorkerSessionContext:
 
     async def __aexit__(self, exc_type, exc, traceback):
         return False
+
+
+class _ScalarResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+class _BootstrapFailureSession:
+    def __init__(self, job, request, mission_id):
+        self.job = job
+        self.request = request
+        self.mission_id = mission_id
+        self.statements = []
+        self.commit = AsyncMock()
+        self.rollback = AsyncMock()
+
+    async def execute(self, statement):
+        self.statements.append(statement)
+        if len(self.statements) % 2 == 1:
+            return _ScalarResult(self.job)
+        return _ScalarResult(self.mission_id)
+
+    async def get(self, model, record_id):
+        if model is ProductionRequest and record_id == self.request.id:
+            return self.request
+        return None
+
+
+def test_worker_render_bootstrap_failure_is_persisted(monkeypatch):
+    from omega.application import production_render_factory
+
+    channel_id, request_id, job_id = uuid4(), uuid4(), uuid4()
+    session = object()
+    monkeypatch.setattr(
+        database,
+        "AsyncWorkerSessionLocal",
+        MagicMock(return_value=_WorkerSessionContext(session)),
+    )
+    monkeypatch.setattr(
+        production_render_factory,
+        "build_production_render_service",
+        MagicMock(side_effect=ModuleNotFoundError("No module named 'playwright'")),
+    )
+    persist = AsyncMock(return_value=True)
+    monkeypatch.setattr(tasks, "_record_render_bootstrap_failure", persist)
+
+    result = tasks.execute_production_render_task.run(
+        str(channel_id), str(request_id), str(job_id)
+    )
+
+    assert result == {
+        "status": "failed",
+        "error": "ModuleNotFoundError: No module named 'playwright'",
+        "failure_persisted": True,
+    }
+    persist.assert_awaited_once_with(
+        session,
+        str(request_id),
+        str(job_id),
+        "ModuleNotFoundError: No module named 'playwright'",
+    )
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_failure_targets_exact_job_and_dispatches_terminal_evaluation(
+    monkeypatch,
+):
+    mission_id, execution_id, request_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
+    job = SimpleNamespace(
+        id=job_id,
+        production_request_id=request_id,
+        state=RenderJobState.QUEUED.value,
+        error_code=None,
+        sanitized_error=None,
+        completed_at=None,
+    )
+    unrelated = SimpleNamespace(
+        id=uuid4(),
+        production_request_id=uuid4(),
+        state=RenderJobState.QUEUED.value,
+        error_code=None,
+        sanitized_error=None,
+        completed_at=None,
+    )
+    request = SimpleNamespace(id=request_id, mission_execution_id=execution_id)
+    session = _BootstrapFailureSession(job, request, mission_id)
+    enqueue = AsyncMock()
+    monkeypatch.setattr(DurableDispatchService, "enqueue_async", enqueue)
+
+    first = await tasks._record_render_bootstrap_failure(
+        session, str(request_id), str(job_id), "ModuleNotFoundError: playwright"
+    )
+    completed_at = job.completed_at
+    second = await tasks._record_render_bootstrap_failure(
+        session, str(request_id), str(job_id), "different replay error"
+    )
+
+    assert first is second is True
+    assert job.state == RenderJobState.FAILED.value
+    assert job.error_code == RenderErrorCode.UNKNOWN.value
+    assert job.sanitized_error == "ModuleNotFoundError: playwright"
+    assert completed_at is not None
+    assert job.completed_at is completed_at
+    assert unrelated.state == RenderJobState.QUEUED.value
+    assert unrelated.error_code is None
+    session.commit.assert_awaited_once()
+    session.rollback.assert_awaited_once()
+    enqueue.assert_awaited_once()
+    expected_key = f"render-terminal-evaluation:{request_id}:{job_id}"
+    assert enqueue.await_args.kwargs["idempotency_key"] == expected_key
+    assert enqueue.await_args.kwargs["purpose"] == "RENDER_TERMINAL_EVALUATION"
+    assert enqueue.await_args.kwargs["mission_id"] == mission_id
+    assert enqueue.await_args.kwargs["mission_execution_id"] == execution_id
+    assert enqueue.await_args.kwargs["production_request_id"] == request_id
+    assert enqueue.await_args.kwargs["render_job_id"] == job_id
+    exact_job_sql = str(session.statements[0])
+    assert "production_render_jobs.id" in exact_job_sql
+    assert "production_render_jobs.production_request_id" in exact_job_sql
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        RenderJobState.RUNNING.value,
+        RenderJobState.SUCCEEDED.value,
+        RenderJobState.CANCELLED.value,
+    ],
+)
+@pytest.mark.asyncio
+async def test_bootstrap_failure_never_overwrites_running_or_terminal_job(
+    monkeypatch, state
+):
+    mission_id, execution_id, request_id, job_id = uuid4(), uuid4(), uuid4(), uuid4()
+    completed_at = object()
+    job = SimpleNamespace(
+        id=job_id,
+        production_request_id=request_id,
+        state=state,
+        error_code="existing-code",
+        sanitized_error="existing-error",
+        completed_at=completed_at,
+    )
+    request = SimpleNamespace(id=request_id, mission_execution_id=execution_id)
+    session = _BootstrapFailureSession(job, request, mission_id)
+    enqueue = AsyncMock()
+    monkeypatch.setattr(DurableDispatchService, "enqueue_async", enqueue)
+
+    persisted = await tasks._record_render_bootstrap_failure(
+        session, str(request_id), str(job_id), "duplicate bootstrap failure"
+    )
+
+    assert persisted is False
+    assert job.state == state
+    assert job.error_code == "existing-code"
+    assert job.sanitized_error == "existing-error"
+    assert job.completed_at is completed_at
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
+    enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_failure_mismatch_leaves_unrelated_job_untouched():
+    request_id, job_id = uuid4(), uuid4()
+    unrelated = SimpleNamespace(
+        id=uuid4(),
+        production_request_id=uuid4(),
+        state=RenderJobState.QUEUED.value,
+    )
+    session = _BootstrapFailureSession(None, SimpleNamespace(id=request_id), uuid4())
+
+    persisted = await tasks._record_render_bootstrap_failure(
+        session, str(request_id), str(job_id), "failure"
+    )
+
+    assert persisted is False
+    assert unrelated.state == RenderJobState.QUEUED.value
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
 
 
 def test_worker_render_task_uses_async_worker_session_and_existing_service(monkeypatch):
