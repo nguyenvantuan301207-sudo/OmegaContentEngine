@@ -61,6 +61,27 @@ def _map_task_to_workload_category(task_type: str) -> ScheduleWorkloadCategory:
     return ScheduleWorkloadCategory.LIGHT_API
 
 
+def _mission_task_dispatch_key(
+    task: Task,
+    execution_id: uuid.UUID | None,
+    guardian_epoch: int,
+) -> str:
+    """Return the deterministic identity for one logical task dispatch generation."""
+    base = (
+        f"mission-task-dispatch:{execution_id}:{task.id}"
+        f":{task.retry_count}:{guardian_epoch}"
+    )
+    if task.task_type != "production" or not isinstance(task.output, dict):
+        return base
+
+    try:
+        uuid.UUID(str(task.output["production_request_id"]))
+        render_job_id = uuid.UUID(str(task.output["render_job_id"]))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return base
+    return f"{base}:render-terminal:{render_job_id}"
+
+
 # ── Async Orchestrator (FastAPI application layer) ──
 
 
@@ -371,9 +392,8 @@ async def evaluate_mission(
     for task in tasks_to_dispatch:
         await DurableDispatchService.enqueue_async(
             session,
-            idempotency_key=(
-                f"mission-task-dispatch:{current_execution_id}:{task.id}"
-                f":{task.retry_count}:{mission.guardian_epoch}"
+            idempotency_key=_mission_task_dispatch_key(
+                task, current_execution_id, mission.guardian_epoch
             ),
             task_name="omega.tasks.execute",
             args=[str(task.id)],
@@ -774,9 +794,8 @@ def evaluate_mission_sync(
     for task in tasks_to_dispatch:
         DurableDispatchService.enqueue(
             session,
-            idempotency_key=(
-                f"mission-task-dispatch:{current_execution_id}:{task.id}"
-                f":{task.retry_count}:{mission.guardian_epoch}"
+            idempotency_key=_mission_task_dispatch_key(
+                task, current_execution_id, mission.guardian_epoch
             ),
             task_name="omega.tasks.execute",
             args=[str(task.id)],

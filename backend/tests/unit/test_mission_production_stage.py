@@ -606,6 +606,91 @@ def production_gate_records(job_state, output=None):
     return mission, execution, task, job
 
 
+def permit_immediate_dispatch(monkeypatch) -> None:
+    from omega.application.scheduler.policy_service import SchedulePolicyService
+
+    monkeypatch.setattr(
+        SchedulePolicyService, "get_active_policy", AsyncMock(return_value=None)
+    )
+
+
+@pytest.mark.asyncio
+async def test_async_terminal_render_uses_distinct_deterministic_continuation_dispatch(
+    monkeypatch,
+) -> None:
+    mission, execution, task, job = production_gate_records(RenderJobState.SUCCEEDED.value)
+    mission.autonomy_level = "SUPERVISED"
+    allow_pre_task_dispatch(monkeypatch)
+    permit_immediate_dispatch(monkeypatch)
+    session = AsyncOrchestratorSession(mission, execution, task, job)
+    enqueued = []
+
+    async def enqueue(_session, **kwargs):
+        enqueued.append(kwargs)
+
+    monkeypatch.setattr(DurableDispatchService, "enqueue_async", enqueue)
+    initial_key = orchestrator._mission_task_dispatch_key(
+        SimpleNamespace(
+            id=task.id,
+            task_type="production",
+            output=None,
+            retry_count=task.retry_count,
+        ),
+        execution.id,
+        mission.guardian_epoch,
+    )
+
+    result = await orchestrator.evaluate_mission(session, mission.id, execution.id)
+
+    expected_key = f"{initial_key}:render-terminal:{job.id}"
+    assert result["dispatched_tasks_count"] == 1
+    assert task.state == TaskState.QUEUED.value
+    assert [call["idempotency_key"] for call in enqueued] == [expected_key]
+    assert expected_key != initial_key
+    assert orchestrator._mission_task_dispatch_key(
+        task, execution.id, mission.guardian_epoch
+    ) == expected_key
+
+
+def test_sync_terminal_render_matches_async_continuation_dispatch_identity(monkeypatch) -> None:
+    mission, execution, task, job = production_gate_records(RenderJobState.SUCCEEDED.value)
+    mission.autonomy_level = "SUPERVISED"
+    allow_pre_task_dispatch(monkeypatch)
+    session = SyncOrchestratorSession(mission, execution, task, job)
+    enqueued = []
+
+    def enqueue(_session, **kwargs):
+        enqueued.append(kwargs)
+
+    monkeypatch.setattr(DurableDispatchService, "enqueue", enqueue)
+
+    result = orchestrator.evaluate_mission_sync(session, mission.id, execution.id)
+
+    expected_key = (
+        f"mission-task-dispatch:{execution.id}:{task.id}:0:{mission.guardian_epoch}"
+        f":render-terminal:{job.id}"
+    )
+    assert result["dispatched_tasks_count"] == 1
+    assert task.state == TaskState.QUEUED.value
+    assert [call["idempotency_key"] for call in enqueued] == [expected_key]
+
+
+@pytest.mark.parametrize(
+    "task_type",
+    ["strategy", "topic_discovery", "research", "content_generation", "qa", "publish"],
+)
+def test_normal_task_dispatch_identity_ignores_output_and_remains_idempotent(task_type) -> None:
+    task = SimpleNamespace(
+        id=uuid4(), task_type=task_type, retry_count=2, output={"render_job_id": str(uuid4())}
+    )
+    execution_id = uuid4()
+
+    first = orchestrator._mission_task_dispatch_key(task, execution_id, 7)
+    replay = orchestrator._mission_task_dispatch_key(task, execution_id, 7)
+
+    assert first == replay == f"mission-task-dispatch:{execution_id}:{task.id}:2:7"
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("job_state", [
     RenderJobState.QUEUED.value, RenderJobState.RUNNING.value, RenderJobState.RETRY.value

@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -16,6 +16,7 @@ from omega.application.durable_dispatch import (
     _sanitize_error,
     _validate_args,
 )
+from omega.application.orchestrator import _mission_task_dispatch_key
 from omega.application.render_service import ProductionRenderService
 from omega.domain.production import ProductionQAStatus, RenderJobState
 from omega.infrastructure.models import DurableDispatchIntent, ProductionRenderJob
@@ -196,6 +197,111 @@ def test_dispatch_key_differs_across_retry_counts():
     orchestrator_src = source("src/omega/application/orchestrator.py")
     assert "task.retry_count" in orchestrator_src
     assert "mission-task-dispatch:" in orchestrator_src
+
+
+def test_sent_initial_dispatch_does_not_block_persisted_render_continuation():
+    # Candidate #4's persisted stranded lineage, reproduced without mutating its rows.
+    execution_id = UUID("6ede0f19-2feb-43dd-8f19-42797c3e4d99")
+    task_id = UUID("1930c0da-bd0d-48fd-8fb4-601da5607a80")
+    request_id = UUID("6dc58e7b-5346-40cd-a760-7200c0056c95")
+    render_job_id = UUID("b92e27d0-4dab-4b94-b5e1-85d326d6cbcd")
+    initial_task = SimpleNamespace(
+        id=task_id, task_type="production", retry_count=0, output=None
+    )
+    continued_task = SimpleNamespace(
+        id=task_id,
+        task_type="production",
+        retry_count=0,
+        output={
+            "production_request_id": str(request_id),
+            "render_job_id": str(render_job_id),
+        },
+    )
+    initial_key = _mission_task_dispatch_key(initial_task, execution_id, 1)
+    continuation_key = _mission_task_dispatch_key(continued_task, execution_id, 1)
+    sent_initial = DurableDispatchIntent(
+        id=uuid4(),
+        idempotency_key=initial_key,
+        task_name="omega.tasks.execute",
+        args=[str(task_id)],
+        purpose="MISSION_TASK_DISPATCH",
+        state=SENT,
+        max_attempts=5,
+    )
+    query = MagicMock()
+    query.filter_by.return_value.first.side_effect = [sent_initial, None]
+    session = MagicMock()
+    session.query.return_value = query
+
+    replayed_initial = DurableDispatchService.enqueue(
+        session,
+        idempotency_key=initial_key,
+        task_name="omega.tasks.execute",
+        args=[str(task_id)],
+        purpose="MISSION_TASK_DISPATCH",
+    )
+    continuation = DurableDispatchService.enqueue(
+        session,
+        idempotency_key=continuation_key,
+        task_name="omega.tasks.execute",
+        args=[str(task_id)],
+        purpose="MISSION_TASK_DISPATCH",
+    )
+
+    assert replayed_initial is sent_initial
+    assert continuation.idempotency_key == continuation_key
+    assert continuation_key == (
+        f"{initial_key}:render-terminal:{render_job_id}"
+    )
+    session.add.assert_called_once_with(continuation)
+
+
+@pytest.mark.parametrize("intent_state", [PENDING, CLAIMED, RETRY, SENT])
+def test_render_continuation_replay_reuses_one_logical_intent(intent_state):
+    execution_id, task_id, request_id, render_job_id = (
+        uuid4(), uuid4(), uuid4(), uuid4()
+    )
+    task = SimpleNamespace(
+        id=task_id,
+        task_type="production",
+        retry_count=0,
+        output={
+            "production_request_id": str(request_id),
+            "render_job_id": str(render_job_id),
+        },
+    )
+    key = _mission_task_dispatch_key(task, execution_id, 1)
+    existing = DurableDispatchIntent(
+        id=uuid4(),
+        idempotency_key=key,
+        task_name="omega.tasks.execute",
+        args=[str(task_id)],
+        purpose="MISSION_TASK_DISPATCH",
+        state=intent_state,
+        max_attempts=5,
+    )
+    query = MagicMock()
+    query.filter_by.return_value.first.return_value = existing
+    session = MagicMock()
+    session.query.return_value = query
+
+    first = DurableDispatchService.enqueue(
+        session,
+        idempotency_key=key,
+        task_name="omega.tasks.execute",
+        args=[str(task_id)],
+        purpose="MISSION_TASK_DISPATCH",
+    )
+    replay = DurableDispatchService.enqueue(
+        session,
+        idempotency_key=_mission_task_dispatch_key(task, execution_id, 1),
+        task_name="omega.tasks.execute",
+        args=[str(task_id)],
+        purpose="MISSION_TASK_DISPATCH",
+    )
+
+    assert first is replay is existing
+    session.add.assert_not_called()
 
 
 # B. Stale exhausted CLAIMED intent becomes DEAD_LETTER.
