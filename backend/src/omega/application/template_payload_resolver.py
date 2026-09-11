@@ -7,7 +7,7 @@ from omega.application.scene_template_registry import (
     SceneTemplateRegistry,
     TemplateInputKey,
 )
-from omega.application.storyboard_engine import StoryboardScene
+from omega.application.storyboard_engine import StoryboardScene, extract_trustworthy_metric
 from omega.application.visual_direction import (
     VisualAssetRequirement,
     VisualDirection,
@@ -222,13 +222,7 @@ class TemplatePayloadResolver:
         return nodes, edges
 
     def _extract_metric(self, text: str) -> str | None:
-        m = re.search(r'\b(\d+(?:\.\d+)?(?:%|ms|x|k|M|m|s))\b', text)
-        if m:
-            return m.group(1)
-        m2 = re.search(r'(\d+(?:\.\d+)?(?:%|ms|x|k|M|m|s))(?:\s|$|\.|\,)', text)
-        if m2:
-            return m2.group(1)
-        return None
+        return extract_trustworthy_metric(text)
 
     def _extract_code(self, text: str) -> tuple[str | None, str | None]:
         m = re.search(r"```(?P<lang>\w+)?\n(?P<code>.*?)```", text, re.DOTALL)

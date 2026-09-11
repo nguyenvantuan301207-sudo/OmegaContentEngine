@@ -1,12 +1,17 @@
 import hashlib
 import uuid
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from omega.application.render_service import ProductionRenderService
+from omega.application.ffmpeg_renderer import FFmpegExecutionError
+from omega.application.render_service import ProductionRenderService, _classify_phase2_error
+from omega.application.template_payload_resolver import TemplatePayloadError
+from omega.domain.production import RenderErrorCode, RenderJobState
 from omega.infrastructure.models import ProductionRequest
 
 
@@ -87,6 +92,79 @@ def test_selection_mission_with_v2():
     req = ProductionRequest(mode="MISSION_EXECUTION")
     svc = ProductionRenderService(visual_production_service=AsyncMock())
     assert svc._should_use_v2(req) is True
+
+
+def test_phase2_template_payload_error_is_input_invalid():
+    error = TemplatePayloadError("Could not extract a trustworthy metric.")
+
+    assert _classify_phase2_error(error) == RenderErrorCode.INPUT_INVALID
+
+
+def test_phase2_ffmpeg_error_remains_ffmpeg_failed():
+    error = FFmpegExecutionError("FFmpeg scene render failed")
+
+    assert _classify_phase2_error(error) == RenderErrorCode.FFMPEG_FAILED
+
+
+class _FailureResult:
+    def __init__(self, value):
+        self.value = value
+
+    def scalar_one_or_none(self):
+        return self.value
+
+
+@pytest.mark.asyncio
+async def test_record_job_failure_sets_terminal_timestamp_once(render_service):
+    request_id = uuid.uuid4()
+    job_id = uuid.uuid4()
+    job = SimpleNamespace(
+        id=job_id,
+        production_request_id=request_id,
+        state=RenderJobState.RUNNING.value,
+        error_code=None,
+        sanitized_error=None,
+        completed_at=None,
+    )
+    request = SimpleNamespace(id=request_id)
+    session = AsyncMock(spec=AsyncSession)
+    session.execute.return_value = _FailureResult(job)
+    session.get.return_value = request
+    render_service._enqueue_terminal_evaluation = AsyncMock()
+
+    await render_service._record_job_failure(
+        session,
+        job_id,
+        RenderErrorCode.INPUT_INVALID,
+        "Could not extract a trustworthy metric.",
+    )
+
+    assert job.state == RenderJobState.FAILED.value
+    assert job.error_code == RenderErrorCode.INPUT_INVALID.value
+    assert job.sanitized_error == "Could not extract a trustworthy metric."
+    assert isinstance(job.completed_at, datetime)
+    completed_at = job.completed_at
+    session.commit.assert_awaited_once()
+    session.rollback.assert_not_awaited()
+    render_service._enqueue_terminal_evaluation.assert_awaited_once_with(
+        session, request, job_id
+    )
+
+    session.reset_mock()
+    render_service._enqueue_terminal_evaluation.reset_mock()
+    await render_service._record_job_failure(
+        session,
+        job_id,
+        RenderErrorCode.FFMPEG_FAILED,
+        "replayed failure",
+    )
+
+    assert job.completed_at is completed_at
+    assert job.error_code == RenderErrorCode.INPUT_INVALID.value
+    assert job.sanitized_error == "Could not extract a trustworthy metric."
+    session.rollback.assert_awaited_once()
+    session.commit.assert_not_awaited()
+    render_service._enqueue_terminal_evaluation.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -316,6 +394,14 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
                 "text": "two",
             },
         )
+        runtime_scenes = (
+            {
+                "sequence_index": 1,
+                "original_strategy": "TITLE_MOTION",
+                "effective_strategy": "TITLE_MOTION",
+                "duration_seconds": 2.0,
+            },
+        )
 
     mock_v2_service.render_mission_execution.return_value = FakeResult()
     session = AsyncMock(spec=AsyncSession)
@@ -358,6 +444,14 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
                 "text": "two",
             },
         ),
+        (
+            {
+                "sequence_index": 1,
+                "original_strategy": "TITLE_MOTION",
+                "effective_strategy": "TITLE_MOTION",
+                "duration_seconds": 2.0,
+            },
+        ),
     )
 
 
@@ -387,7 +481,7 @@ async def test_v2_helper_backward_compatibility(render_service, tmp_path, mock_v
         session, req, 30, 1920, 1080, "mp4", "h264", staging_out
     )
 
-    assert result == (None, (), None, (), ())
+    assert result == (None, (), None, (), (), ())
 
 
 def test_overlay_runtime_timeline_truth_overrides_prepared(render_service):

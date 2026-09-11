@@ -12,10 +12,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from omega.application.durable_dispatch import DurableDispatchService
-from omega.application.ffmpeg_renderer import FFmpegRenderer
+from omega.application.ffmpeg_renderer import FFmpegExecutionError, FFmpegRenderer
 from omega.application.media_probe import MediaProbe
 from omega.application.media_storage import LocalMediaStorageProvider, compute_sha256
 from omega.application.production_qa import ProductionQAEngine
+from omega.application.template_payload_resolver import TemplatePayloadError
 from omega.domain.production import (
     AssetType,
     MediaArtifactType,
@@ -38,6 +39,15 @@ from omega.infrastructure.models import (
 from omega.logging import get_logger
 
 logger = get_logger(service="omega-render-service")
+
+
+def _classify_phase2_error(exc: Exception) -> RenderErrorCode:
+    """Classify known Phase 2 failures without treating input defects as FFmpeg errors."""
+    if isinstance(exc, TemplatePayloadError):
+        return RenderErrorCode.INPUT_INVALID
+    if isinstance(exc, FFmpegExecutionError):
+        return RenderErrorCode.FFMPEG_FAILED
+    return RenderErrorCode.FFMPEG_FAILED
 
 
 class ProductionRenderService:
@@ -407,7 +417,7 @@ class ProductionRenderService:
             # Clean staging directory on failure
             self.storage.cleanup_directory(staging_dir)
             # Update job state in DB as FAILED
-            await self._record_job_failure(session, job_id, RenderErrorCode.FFMPEG_FAILED, str(exc))
+            await self._record_job_failure(session, job_id, _classify_phase2_error(exc), str(exc))
             raise
 
         # ══════════════════════════════════════════════════════════════════
@@ -906,26 +916,30 @@ class ProductionRenderService:
     ) -> None:
         """Record failed render job state in a short transaction."""
         try:
-            request_id = (
+            job = (
                 await session.execute(
-                    select(ProductionRenderJob.production_request_id).where(
-                        ProductionRenderJob.id == job_id
-                    )
+                    select(ProductionRenderJob)
+                    .where(ProductionRenderJob.id == job_id)
+                    .with_for_update()
                 )
             ).scalar_one_or_none()
-            await session.execute(
-                update(ProductionRenderJob)
-                .where(ProductionRenderJob.id == job_id)
-                .values(
-                    state=RenderJobState.FAILED.value,
-                    error_code=error_code.value,
-                    sanitized_error=error_msg[:1000],
-                )
-            )
-            if request_id is not None:
-                request = await session.get(ProductionRequest, request_id)
-                if request is not None:
-                    await self._enqueue_terminal_evaluation(session, request, job_id)
+            if job is None or job.state not in (
+                RenderJobState.PENDING.value,
+                RenderJobState.QUEUED.value,
+                RenderJobState.RUNNING.value,
+                RenderJobState.RETRY.value,
+            ):
+                await session.rollback()
+                return
+
+            job.state = RenderJobState.FAILED.value
+            job.error_code = error_code.value
+            job.sanitized_error = error_msg[:1000]
+            job.completed_at = datetime.now(UTC)
+
+            request = await session.get(ProductionRequest, job.production_request_id)
+            if request is not None:
+                await self._enqueue_terminal_evaluation(session, request, job_id)
             await session.commit()
         except Exception:
             await session.rollback()

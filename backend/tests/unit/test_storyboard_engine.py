@@ -1,5 +1,11 @@
+import pytest
+
 from omega.application.content_provider import TemplateContentProvider
-from omega.application.storyboard_engine import StoryboardEngine, VisualStrategy
+from omega.application.storyboard_engine import (
+    StoryboardEngine,
+    VisualStrategy,
+    extract_trustworthy_metric,
+)
 
 
 def test_storyboard_engine_longform():
@@ -35,7 +41,9 @@ def test_storyboard_engine_longform():
 
     assert VisualStrategy.DIAGRAM in strategies
     assert VisualStrategy.CODE_DEMO in strategies
-    assert (VisualStrategy.STATISTIC in strategies or VisualStrategy.INFOGRAPHIC in strategies)
+    for scene in plan.scenes:
+        if scene.visual_strategy == VisualStrategy.STATISTIC:
+            assert extract_trustworthy_metric(scene.narration_excerpt) is not None
 
     # Check PRESENTER does not exist
     assert all(s != "PRESENTER" for s in strategies)
@@ -77,3 +85,41 @@ def test_storyboard_engine_routing_v2():
 
     # H. BROLL routing
     check_strat("In the real world, this looks beautiful.", VisualStrategy.BROLL)
+
+    # I. INFOGRAPHIC routing
+    check_strat("A comparison of the available choices.", VisualStrategy.INFOGRAPHIC)
+
+
+@pytest.mark.parametrize(
+    "narration",
+    [
+        "The growth rate remained stable during the observation window.",
+        "The report discusses metrics, growth, and latency without quantitative results.",
+        (
+            "In this section, we explore architectural deep dive. Building resilient "
+            "systems around Why Leaves Change Color in Autumn requires balancing "
+            "throughput, isolation, and maintainability."
+        ),
+    ],
+)
+def test_statistic_routing_requires_a_trustworthy_numeric_metric(narration):
+    strategy = StoryboardEngine()._select_strategy(
+        narration,
+        word_count=len(narration.split()),
+        is_first=False,
+        is_last=False,
+    )
+
+    assert strategy != VisualStrategy.STATISTIC
+
+
+@pytest.mark.parametrize("narration", ["50% faster", "120ms latency", "2x growth", "3.5s runtime"])
+def test_statistic_routing_accepts_resolver_compatible_metrics(narration):
+    strategy = StoryboardEngine()._select_strategy(
+        narration,
+        word_count=len(narration.split()),
+        is_first=False,
+        is_last=False,
+    )
+
+    assert strategy == VisualStrategy.STATISTIC

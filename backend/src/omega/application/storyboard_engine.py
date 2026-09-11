@@ -7,6 +7,17 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+def extract_trustworthy_metric(text: str) -> str | None:
+    """Extract the numeric metric syntax accepted by statistic templates."""
+    match = re.search(r"\b(\d+(?:\.\d+)?(?:%|ms|x|k|M|m|s))\b", text)
+    if match:
+        return match.group(1)
+    trailing_match = re.search(
+        r"(\d+(?:\.\d+)?(?:%|ms|x|k|M|m|s))(?:\s|$|\.|,)", text
+    )
+    return trailing_match.group(1) if trailing_match else None
+
+
 class VisualStrategy(enum.StrEnum):
     TITLE_MOTION = "TITLE_MOTION"
     DIAGRAM = "DIAGRAM"
@@ -215,7 +226,7 @@ class StoryboardEngine:
             return VisualStrategy.DIAGRAM
 
         # 3. STATISTIC
-        if re.search(r'\b(percentage|percent|benchmark|throughput|growth|metrics|rate|latency|milliseconds)\b', n_lower) or re.search(r'\b\d+(?:\.\d+)?(?:%|x|ms|k|m)\b', n_lower):
+        if extract_trustworthy_metric(narration) is not None:
             return VisualStrategy.STATISTIC
 
         # 4. INFOGRAPHIC
