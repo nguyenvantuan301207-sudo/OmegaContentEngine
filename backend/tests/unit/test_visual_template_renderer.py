@@ -98,6 +98,19 @@ def test_hero_rendering(renderer):
     assert "scene-root" in doc.semantic_element_ids
     assert "hero-title" in doc.semantic_element_ids
 
+
+def test_hero_long_text_fitting_is_applied_and_provenanced(renderer):
+    payload = create_payload(VisualTemplateId.HERO_TITLE, {
+        TemplateInputKey.TITLE: "A deterministic production title " * 20,
+        TemplateInputKey.SUBTITLE: "Readable supporting copy " * 40,
+    })
+    doc = renderer.render(payload)
+
+    assert len(doc.text_fitting) == 2
+    assert any(decision.text_truncated for decision in doc.text_fitting)
+    assert "white-space: pre-line !important" in doc.html
+    assert "…" in doc.html
+
 def test_flow_diagram_2_nodes(renderer):
     payload = create_payload(VisualTemplateId.FLOW_DIAGRAM, {
         TemplateInputKey.NODES: ["A", "B"]

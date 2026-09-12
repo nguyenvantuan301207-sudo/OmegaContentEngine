@@ -40,6 +40,30 @@ def test_escape_ffmpeg_filter_string_length_bound():
 
 
 @pytest.mark.asyncio
+async def test_concatenate_clips_cfr_command(tmp_path):
+    renderer = FFmpegRenderer()
+    output = tmp_path / "final.mp4"
+    proc = AsyncMock()
+    proc.communicate.return_value = (b"", b"")
+    proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=proc) as mock_exec:
+        await renderer.concatenate_clips(
+            [tmp_path / "a.mp4", tmp_path / "b.mp4"],
+            output,
+            target_fps=12,
+        )
+
+    command = mock_exec.call_args.args
+    assert command[command.index("-vf") + 1] == "fps=12"
+    assert command[command.index("-fps_mode") + 1] == "cfr"
+    assert command[command.index("-r") + 1] == "12"
+    assert command[command.index("-c:v") + 1] == "libx264"
+    assert command[command.index("-c:a") + 1] == "aac"
+    assert "copy" not in command
+
+
+@pytest.mark.asyncio
 async def test_overlay_logo_command_is_deterministic(tmp_path):
     renderer = FFmpegRenderer()
     video = tmp_path / "input.mp4"

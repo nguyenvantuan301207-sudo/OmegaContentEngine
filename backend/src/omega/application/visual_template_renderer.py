@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict
 
 from omega.application.scene_template_registry import SceneTemplateRegistry, TemplateInputKey
 from omega.application.template_payload_resolver import TemplatePayload
+from omega.application.text_fitting import TextFittingDecision, fit_text
 from omega.application.visual_asset_binding import (
     BoundBrollAsset,
     BoundVisualAsset,
@@ -25,6 +26,7 @@ class RenderedTemplateDocument(BaseModel):
     html: str
     semantic_element_ids: tuple[str, ...]
     content_sha256: str
+    text_fitting: tuple[TextFittingDecision, ...] = ()
 
 
 class VisualTemplateRenderError(ValueError):
@@ -74,6 +76,7 @@ class VisualTemplateRenderer:
             if key not in allowed_keys:
                 raise VisualTemplateRenderError(f"Unexpected input key {key}")
 
+        payload, text_fitting, fit_css = self._fit_payload_text(payload)
         semantic_ids: list[str] = []
         html_content = ""
         transparent_bg = False
@@ -99,7 +102,11 @@ class VisualTemplateRenderer:
             html_content, semantic_ids = self._render_cta(payload)
 
         # Wrap in full HTML document
-        final_html = self._wrap_in_document(html_content, transparent_background=transparent_bg)
+        final_html = self._wrap_in_document(
+            html_content,
+            transparent_background=transparent_bg,
+            fitted_text_css=fit_css,
+        )
 
         sha256 = hashlib.sha256(final_html.encode("utf-8")).hexdigest()
         return RenderedTemplateDocument(
@@ -110,7 +117,57 @@ class VisualTemplateRenderer:
             html=final_html,
             semantic_element_ids=tuple(semantic_ids),
             content_sha256=sha256,
+            text_fitting=tuple(text_fitting),
         )
+
+    def _fit_payload_text(
+        self, payload: TemplatePayload
+    ) -> tuple[TemplatePayload, list[TextFittingDecision], str]:
+        rules = {
+            VisualTemplateId.HERO_TITLE: {
+                TemplateInputKey.TITLE: ("hero-title", 110, 56, 3, 22),
+                TemplateInputKey.SUBTITLE: ("hero-subtitle", 40, 28, 3, 55),
+            },
+            VisualTemplateId.IMAGE_EXPLAINER: {
+                TemplateInputKey.TITLE: ("image-title", 64, 40, 3, 30),
+                TemplateInputKey.BODY: ("image-body", 34, 24, 8, 48),
+                TemplateInputKey.CAPTION: ("image-caption", 22, 18, 3, 58),
+            },
+            VisualTemplateId.BROLL_EXPLAINER: {
+                TemplateInputKey.TITLE: ("broll-title", 68, 42, 3, 28),
+                TemplateInputKey.BODY: ("broll-body", 36, 24, 7, 46),
+                TemplateInputKey.CAPTION: ("broll-caption", 24, 18, 3, 56),
+            },
+            VisualTemplateId.KINETIC_TEXT: {
+                TemplateInputKey.BODY: ("kinetic-body", 84, 44, 5, 24),
+            },
+            VisualTemplateId.CTA: {
+                TemplateInputKey.TITLE: ("cta-title", 36, 26, 3, 48),
+                TemplateInputKey.CTA_TEXT: ("cta-text", 92, 48, 4, 23),
+            },
+        }.get(payload.template_id, {})
+        inputs = dict(payload.inputs)
+        decisions: list[TextFittingDecision] = []
+        css: list[str] = []
+        for key, (element_id, initial, minimum, max_lines, chars) in rules.items():
+            value = inputs.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            decision = fit_text(
+                value,
+                role=key.value,
+                initial_font_size=initial,
+                min_font_size=minimum,
+                max_lines=max_lines,
+                chars_per_line_at_initial_size=chars,
+            )
+            inputs[key] = decision.rendered_text
+            decisions.append(decision)
+            css.append(
+                f"#{element_id} {{ font-size: {decision.font_size}px !important; "
+                "white-space: pre-line !important; overflow-wrap: anywhere; }}"
+            )
+        return payload.model_copy(update={"inputs": inputs}), decisions, "\n".join(css)
 
     def _is_meaningful(self, val: Any) -> bool:
         if val is None:
@@ -119,13 +176,19 @@ class VisualTemplateRenderer:
             return False
         return not (isinstance(val, (list, tuple, dict, set)) and len(val) == 0)
 
-    def _wrap_in_document(self, body_content: str, transparent_background: bool = False) -> str:
+    def _wrap_in_document(
+        self,
+        body_content: str,
+        transparent_background: bool = False,
+        fitted_text_css: str = "",
+    ) -> str:
         return f"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
 {self._get_base_css(transparent_background=transparent_background)}
+{fitted_text_css}
 </style>
 </head>
 <body>

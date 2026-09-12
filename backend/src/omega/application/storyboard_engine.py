@@ -186,10 +186,10 @@ class StoryboardEngine:
             brief = "Screenshot of relevant interface."
             motion_hint = "Zoom into relevant area."
 
-        # Ensure we have some short on-screen text
+        # Preserve source text. The template renderer owns explicit fitting/provenance.
         on_screen_text = None
         if strategy in self._static_cards or strategy == VisualStrategy.TITLE_MOTION:
-            on_screen_text = narration[:30] + "..." if len(narration) > 30 else narration
+            on_screen_text = narration
 
         return StoryboardScene(
             sequence_index=sequence_index,

@@ -13,6 +13,7 @@ from omega.application.storyboard_engine import (
     StoryboardScene,
     VisualStrategy,
 )
+from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.application.visual_asset_engine import (
     ResolvedVisualAsset,
     VisualAssetCandidate,
@@ -595,7 +596,7 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
     # Mock FFmpegRenderer concat
     mock_ffmpeg_renderer = MagicMock()
 
-    async def fake_concat(clip_paths, output_path, srt_path=None):
+    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None):
         Path(output_path).write_bytes(VALID_MP4_HEADER + b"render_content")
 
     mock_ffmpeg_renderer.concatenate_clips = AsyncMock(side_effect=fake_concat)
@@ -979,7 +980,7 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
         )
     svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
 
-    async def fake_concat(clip_paths, output_path, srt_path=None):
+    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None):
         Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat")
     mock_ffmpeg.concatenate_clips.side_effect = fake_concat
 
@@ -1404,7 +1405,19 @@ async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
     res_disabled = await svc.render_mission_execution(session, m_exec.id, req.id, subtitle_enabled=False)
     call_order.clear()
 
-    res_enabled = await svc.render_mission_execution(session, m_exec.id, req.id, subtitle_enabled=True)
+    requested_style = SubtitleRenderStyle(
+        font_size=40,
+        primary_color="#FFD400",
+        margin_v=150,
+        bold=True,
+    )
+    res_enabled = await svc.render_mission_execution(
+        session,
+        m_exec.id,
+        req.id,
+        subtitle_enabled=True,
+        subtitle_style=requested_style,
+    )
 
     assert res_enabled.run_fingerprint != res_disabled.run_fingerprint
     assert "karaoke" in res_enabled.run_fingerprint or res_enabled.run_fingerprint != ""
@@ -1429,6 +1442,7 @@ async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
     assert "Testing" in ass_content
     assert "subtitles" in ass_content
     assert "integration" in ass_content
+    assert "OMEGA_KARAOKE,Arial,40,&H0000D4FF" in ass_content
 
     # F: Final SHA semantics
     # The SHA should be computed on "final_muxed_scene"
@@ -1441,6 +1455,10 @@ async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
 
     # H: Manifest
     assert manifest_data["karaoke_subtitles_enabled"] is True
+    assert manifest_data["subtitle_style_applied"] == requested_style.model_dump()
+    assert manifest_data["target_fps"] == 12
+    assert manifest_data["effective_fps_mode"] == "CFR"
+    assert res_enabled.subtitle_style_applied == requested_style
     assert manifest_data["scenes"][0]["subtitle_cue_count"] > 0
 
     # Check disabled manifest
@@ -1497,7 +1515,7 @@ async def test_idempotency_v1_edge_cases(tmp_path: Path, lineage_data):
     mock_video_renderer.render_clip = AsyncMock(side_effect=fake_render_clip)
 
     mock_ffmpeg_renderer = MagicMock()
-    async def fake_concat(clip_paths, output_path, srt_path=None):
+    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None):
         Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat")
     mock_ffmpeg_renderer.concatenate_clips = AsyncMock(side_effect=fake_concat)
 
@@ -1604,7 +1622,7 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
 
     mock_ffmpeg_renderer = MagicMock()
     concat_calls = []
-    async def fake_concat(clip_paths, output_path, srt_path=None):
+    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None):
         concat_calls.append(len(clip_paths))
         Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat_" + str(len(clip_paths)).encode('utf-8'))
     mock_ffmpeg_renderer.concatenate_clips = AsyncMock(side_effect=fake_concat)

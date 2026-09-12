@@ -36,7 +36,8 @@ from omega.application.storyboard_engine import (
     VisualStrategy,
 )
 from omega.application.subtitle_engine import (
-    generate_karaoke_ass_content,
+    SubtitleRenderStyle,
+    generate_karaoke_ass_document,
     generate_karaoke_cues,
 )
 from omega.application.template_payload_resolver import TemplatePayloadResolver
@@ -109,6 +110,9 @@ class VerticalSliceSceneResult(BaseModel):
     audio_content_sha256: str | None = None
     audio_duration_seconds: float | None = None
     subtitle_cue_count: int | None = None
+    subtitle_text_truncated: bool | None = None
+    text_fitting: tuple[dict[str, Any], ...] = ()
+    text_truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -158,6 +162,8 @@ class VerticalSliceRenderResult(BaseModel):
     runtime_narration_segments: tuple[VerticalSliceRuntimeNarrationSegment, ...] = ()
     runtime_subtitle_cues: tuple[VerticalSliceRuntimeSubtitleCue, ...] = ()
     runtime_scenes: tuple[VerticalSliceSceneResult, ...] = ()
+    subtitle_style_applied: SubtitleRenderStyle | None = None
+    effective_fps_mode: str = "CFR"
 
 
 _STOPWORDS = frozenset({
@@ -277,6 +283,7 @@ class VisualProductionV2Service:
         sfx_inputs: list[VerticalSliceSFXInput] | None = None,
         audio_mix_enabled: bool = False,
         subtitle_enabled: bool = False,
+        subtitle_style: SubtitleRenderStyle | None = None,
     ) -> VerticalSliceRenderResult:
         audio_mix_enabled = background_music is not None or bool(sfx_inputs)
 
@@ -394,6 +401,7 @@ class VisualProductionV2Service:
 
         if subtitle_enabled and not self._narration_provider:
             raise VerticalSliceError("Karaoke subtitles require narration")
+        resolved_subtitle_style = subtitle_style or SubtitleRenderStyle()
 
         # 3. Deterministic Run Fingerprint & Idempotency Check
         fingerprint_input = (
@@ -423,6 +431,7 @@ class VisualProductionV2Service:
             if subtitle_enabled:
                 subtitle_marker = f"karaoke:{KARAOKE_SUBTITLE_VERSION}:words={KARAOKE_MAX_WORDS_PER_CUE}:chars={KARAOKE_MAX_CHARS_PER_CUE}"
                 fingerprint_input += f":{subtitle_marker}"
+                fingerprint_input += ":style=" + resolved_subtitle_style.model_dump_json()
 
         normalized_sfx = []
         if audio_mix_enabled:
@@ -539,6 +548,12 @@ class VisualProductionV2Service:
                     runtime_scenes=tuple(
                         VerticalSliceSceneResult(**s) for s in manifest_data.get("scenes", [])
                     ),
+                    subtitle_style_applied=(
+                        SubtitleRenderStyle(**manifest_data["subtitle_style_applied"])
+                        if manifest_data.get("subtitle_style_applied")
+                        else None
+                    ),
+                    effective_fps_mode=manifest_data.get("effective_fps_mode", "CFR"),
                 )
             except Exception as e:
                 raise VerticalSliceError(f"Incomplete or corrupt prior run: {e}") from e
@@ -661,6 +676,7 @@ class VisualProductionV2Service:
                             narration_source_refs_list.append(n_ref)
 
                         scene_subtitle_cues = 0
+                        scene_subtitle_text_truncated = False
                         if subtitle_enabled:
                             segment = {
                                 "text": scene.narration_excerpt,
@@ -695,7 +711,16 @@ class VisualProductionV2Service:
                                     )
                                     runtime_cue_order += 1
 
-                                ass_content = generate_karaoke_ass_content(scene_cues, width=1920, height=1080)
+                                ass_document = generate_karaoke_ass_document(
+                                    scene_cues,
+                                    width=1920,
+                                    height=1080,
+                                    style=resolved_subtitle_style,
+                                )
+                                ass_content = ass_document.content
+                                scene_subtitle_text_truncated = any(
+                                    item.text_truncated for item in ass_document.layout
+                                )
                                 ass_path = work_dir / f"scene_{scene.sequence_index:03d}.ass"
                                 with open(ass_path, "w", encoding="utf-8") as f:
                                     f.write(ass_content)
@@ -839,6 +864,13 @@ class VisualProductionV2Service:
                             audio_content_sha256=audio_sha,
                             audio_duration_seconds=audio_duration_sec,
                             subtitle_cue_count=scene_subtitle_cues if subtitle_enabled else None,
+                            subtitle_text_truncated=scene_subtitle_text_truncated if subtitle_enabled else None,
+                            text_fitting=tuple(
+                                decision.model_dump() for decision in document.text_fitting
+                            ),
+                            text_truncated=any(
+                                decision.text_truncated for decision in document.text_fitting
+                            ),
                         )
                     )
 
@@ -895,6 +927,7 @@ class VisualProductionV2Service:
                     clip_paths=branded_content_paths,
                     output_path=generated_content_mp4,
                     srt_path=None,
+                    target_fps=fps,
                 )
             except Exception as e:
                 raise VerticalSliceError(f"Generated content concatenation failed: {self._sanitize_error(e)}") from e
@@ -1032,6 +1065,7 @@ class VisualProductionV2Service:
                         clip_paths=final_clip_paths,
                         output_path=final_branded_mp4,
                         srt_path=None,
+                        target_fps=fps,
                     )
                 except Exception as e:
                     raise VerticalSliceError(f"Final brand concatenation failed: {self._sanitize_error(e)}") from e
@@ -1086,10 +1120,15 @@ class VisualProductionV2Service:
                 "width": 1920,
                 "height": 1080,
                 "fps": fps,
+                "target_fps": fps,
+                "effective_fps_mode": "CFR",
                 "content_sha256": final_sha,
                 **audio_mix_manifest,
                 "narration_enabled": bool(self._narration_provider),
                 "karaoke_subtitles_enabled": subtitle_enabled,
+                "subtitle_style_applied": (
+                    resolved_subtitle_style.model_dump() if subtitle_enabled else None
+                ),
                 "narration_provider": self._narration_provider.__class__.__name__ if self._narration_provider else None,
                 "narration_model": getattr(self._narration_provider, "model", None) if self._narration_provider else None,
                 "narration_voice": getattr(self._narration_provider, "default_voice", None) if self._narration_provider else None,
@@ -1130,6 +1169,8 @@ class VisualProductionV2Service:
             runtime_narration_segments=tuple(runtime_narration_segments),
             runtime_subtitle_cues=tuple(runtime_subtitle_cues),
             runtime_scenes=tuple(scene_results),
+            subtitle_style_applied=resolved_subtitle_style if subtitle_enabled else None,
+            effective_fps_mode="CFR",
         )
 
 
@@ -1403,6 +1444,7 @@ class VisualProductionV2Service:
                 clip_paths=ordered_scene_paths,
                 output_path=final_temp_mp4,
                 srt_path=None,
+                target_fps=fps,
             )
 
             if not final_temp_mp4.is_file() or final_temp_mp4.stat().st_size <= 0:

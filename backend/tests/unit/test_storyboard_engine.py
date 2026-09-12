@@ -90,6 +90,21 @@ def test_storyboard_engine_routing_v2():
     check_strat("A comparison of the available choices.", VisualStrategy.INFOGRAPHIC)
 
 
+def test_storyboard_preserves_full_on_screen_text_without_silent_ellipsis():
+    narration = "A script enters OMEGA, where deterministic planning preserves every source word."
+    scene = StoryboardEngine()._create_scene(
+        sequence_index=1,
+        section_heading="Render truth",
+        statements=[{"statement_order": 1, "statement_text": narration}],
+        is_first=True,
+        is_last=False,
+        history=[],
+    )
+
+    assert scene.on_screen_text == narration
+    assert not scene.on_screen_text.endswith("...")
+
+
 @pytest.mark.parametrize(
     "narration",
     [

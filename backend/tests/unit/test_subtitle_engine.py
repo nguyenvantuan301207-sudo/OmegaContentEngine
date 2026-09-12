@@ -7,9 +7,11 @@ import pytest
 
 from omega.application.subtitle_engine import (
     SubtitleEngine,
+    SubtitleRenderStyle,
     format_ass_time,
     format_srt_time,
     generate_karaoke_ass_content,
+    generate_karaoke_ass_document,
     generate_karaoke_cues,
     generate_srt_content,
 )
@@ -129,7 +131,7 @@ def test_generate_karaoke_ass_content():
     assert "Dialogue: 0,0:00:00.00,0:00:01.00,OMEGA_KARAOKE," in ass
     # L. malicious narration Escaping
     assert "{\\override}" not in ass
-    assert "{\\kf50}\\override" in ass
+    assert "{\\kf50}（／override）" in ass
 
 def test_generate_karaoke_ass_content_centisecond_conservation():
     cues = [
@@ -152,6 +154,70 @@ def test_generate_karaoke_ass_content_centisecond_conservation():
     # Expected output is "Dialogue: ... {\kf...}one {\kf...}two {\kf...}three"
     # Wait, the assertion is just that it doesn't raise ValueError and it adds up correctly.
     assert "0:00:00.00,0:00:00.03" in ass
+
+
+def test_ass_styles_are_validated_and_render_differently():
+    cues = [{
+        "cue_order": 1,
+        "start_ms": 0,
+        "end_ms": 1000,
+        "text": "Style proof",
+        "words": [
+            {"text": "Style", "duration_ms": 500},
+            {"text": "proof", "duration_ms": 500},
+        ],
+    }]
+    style_a = SubtitleRenderStyle(font_size=56, primary_color="#FFFFFF", margin_v=70)
+    style_b = SubtitleRenderStyle(
+        font_size=40,
+        primary_color="#FFD400",
+        margin_v=150,
+        bold=True,
+        background_box=True,
+    )
+    ass_a = generate_karaoke_ass_content(cues, style=style_a)
+    ass_b = generate_karaoke_ass_content(cues, style=style_b)
+
+    assert ass_a != ass_b
+    assert "OMEGA_KARAOKE,Arial,56,&H00FFFFFF" in ass_a
+    assert "OMEGA_KARAOKE,Arial,40,&H0000D4FF" in ass_b
+    assert ",-1,0,0,0,100,100,0,0,3," in ass_b
+    assert ",150,1" in ass_b
+
+    with pytest.raises(ValueError, match="font_family"):
+        SubtitleRenderStyle(font_family="Arial,Injected")
+    with pytest.raises(ValueError, match="#RRGGBB"):
+        SubtitleRenderStyle(primary_color="yellow")
+
+
+def test_ass_escaping_and_explicit_truncation_provenance():
+    punctuation = "It's \"safe\", yes: really? wow! (ok) - fine — Unicode"
+    hostile = punctuation + " {\\pos(0,0)}\nnext"
+    cue = {
+        "cue_order": 1,
+        "start_ms": 0,
+        "end_ms": 1200,
+        "text": hostile,
+        "words": [{"text": hostile, "duration_ms": 1200}],
+    }
+    escaped_document = generate_karaoke_ass_document([cue])
+    assert "{\\pos(0,0)}" not in escaped_document.content
+    assert "（／pos(0,0)）" in escaped_document.content
+    assert "\n" not in escaped_document.content.split("Dialogue:", 1)[1].strip()
+
+    cue["words"] = [{"text": "x" * 300, "duration_ms": 1200}]
+    document = generate_karaoke_ass_document(
+        [cue],
+        style=SubtitleRenderStyle(
+            font_size=48,
+            min_font_size=48,
+            max_lines=1,
+            max_width_ratio=0.4,
+        ),
+    )
+
+    assert document.layout[0].text_truncated is True
+    assert "…" in document.content
 
 def test_export_ass_file(tmp_path):
     """M. Test ASS export"""
