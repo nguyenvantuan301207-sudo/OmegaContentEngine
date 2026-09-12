@@ -1613,6 +1613,64 @@ export async function rerunScriptQA(
 
 // ── Production Engine Types & APIs (OMEGA-007) ──
 
+export type RenderTruthState = "RENDER_APPLIED" | "PREVIEW_ONLY" | "UNSUPPORTED";
+
+export interface SubtitleRenderStyle {
+  font_family: string;
+  font_size: number;
+  min_font_size: number;
+  bold: boolean;
+  primary_color: string;
+  outline_color: string;
+  outline_width: number;
+  shadow: number;
+  background_box: boolean;
+  alignment: number;
+  margin_v: number;
+  max_lines: number;
+  max_width_ratio: number;
+}
+
+export interface ProductionRenderCapabilities {
+  truth_states: RenderTruthState[];
+  subtitle: {
+    defaults: SubtitleRenderStyle;
+    fields: Array<{
+      name: keyof SubtitleRenderStyle;
+      truth_state: RenderTruthState;
+      user_editable: boolean;
+    }>;
+    font_families: string[];
+    alignments: Record<string, string>;
+  };
+  text_fitting: {
+    wrap: boolean;
+    font_downscale: boolean;
+    truncation_fallback: boolean;
+    truncation_provenance: boolean;
+  };
+  video: {
+    fps_mode: "CFR";
+    target_fps: number;
+    user_editable: boolean;
+  };
+  subtitle_timing_label: "Estimated word timing";
+}
+
+export interface RenderArtifactProvenance {
+  subtitle_style_applied: SubtitleRenderStyle | null;
+  target_fps: number;
+  effective_fps_mode: "CFR";
+  text_truncated: boolean;
+  scenes: Array<{ sequence_index: number; text_truncated: boolean }>;
+}
+
+export interface ProductionRequestMetadata {
+  render_settings?: { subtitle_style: SubtitleRenderStyle };
+  render_provenance?: RenderArtifactProvenance;
+  [key: string]: unknown;
+}
+
 export interface ProductionRequest {
   id: string;
   channel_id: string;
@@ -1633,7 +1691,7 @@ export interface ProductionRequest {
   started_at?: string | null;
   completed_at?: string | null;
   failed_at?: string | null;
-  metadata?: Record<string, unknown>;
+  metadata?: ProductionRequestMetadata;
 }
 
 export interface ProductionScene {
@@ -1796,6 +1854,21 @@ export async function listProductionRequests(channelId: string): Promise<Product
 
 export async function getProductionRequest(channelId: string, requestId: string): Promise<ProductionRequest> {
   return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}`);
+}
+
+export async function getProductionRenderCapabilities(): Promise<ProductionRenderCapabilities> {
+  return apiFetch("/api/v1/system/render-capabilities");
+}
+
+export async function updateProductionRenderSettings(
+  channelId: string,
+  requestId: string,
+  subtitleStyle: SubtitleRenderStyle,
+): Promise<ProductionRequest> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/render-settings`, {
+    method: "PATCH",
+    body: JSON.stringify({ subtitle_style: subtitleStyle }),
+  });
 }
 
 export async function prepareProduction(channelId: string, requestId: string): Promise<ProductionRequest> {

@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.ffmpeg_renderer import FFmpegExecutionError
 from omega.application.render_service import ProductionRenderService, _classify_phase2_error
+from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.application.template_payload_resolver import TemplatePayloadError
 from omega.domain.production import RenderErrorCode, RenderJobState
 from omega.infrastructure.models import ProductionRequest
@@ -202,6 +203,7 @@ async def test_v2_helper_success(render_service, tmp_path, mock_v2_service):
         fps=30,
         voice_profile=req.voice_profile,
         subtitle_enabled=True,
+        subtitle_style=SubtitleRenderStyle(),
     )
 
     assert staging_out.exists()
@@ -345,9 +347,16 @@ async def test_v2_helper_dimension_fps_mismatch(render_service, tmp_path, mock_v
 
 @pytest.mark.asyncio
 async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mock_v2_service):
+    selected_style = SubtitleRenderStyle(
+        font_size=54,
+        primary_color="#FFD400",
+        outline_width=3,
+        margin_v=135,
+    )
     req = ProductionRequest(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
+        metadata_={"render_settings": {"subtitle_style": selected_style.model_dump()}},
     )
     staging_out = tmp_path / "staging.mp4"
     v2_out = tmp_path / "v2_final.mp4"
@@ -400,8 +409,11 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
                 "original_strategy": "TITLE_MOTION",
                 "effective_strategy": "TITLE_MOTION",
                 "duration_seconds": 2.0,
+                "text_truncated": True,
             },
         )
+        subtitle_style_applied = selected_style
+        effective_fps_mode = "CFR"
 
     mock_v2_service.render_mission_execution.return_value = FakeResult()
     session = AsyncMock(spec=AsyncSession)
@@ -450,9 +462,20 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
                 "original_strategy": "TITLE_MOTION",
                 "effective_strategy": "TITLE_MOTION",
                 "duration_seconds": 2.0,
+                "text_truncated": True,
             },
         ),
+        {
+            "subtitle_style_applied": selected_style.model_dump(),
+            "target_fps": 30,
+            "effective_fps_mode": "CFR",
+            "text_truncated": True,
+            "scenes": [{"sequence_index": 1, "text_truncated": True}],
+        },
     )
+
+    call = mock_v2_service.render_mission_execution.call_args.kwargs
+    assert call["subtitle_style"] == selected_style
 
 
 @pytest.mark.asyncio
@@ -481,7 +504,21 @@ async def test_v2_helper_backward_compatibility(render_service, tmp_path, mock_v
         session, req, 30, 1920, 1080, "mp4", "h264", staging_out
     )
 
-    assert result == (None, (), None, (), (), ())
+    assert result == (
+        None,
+        (),
+        None,
+        (),
+        (),
+        (),
+        {
+            "subtitle_style_applied": None,
+            "target_fps": 30,
+            "effective_fps_mode": None,
+            "text_truncated": False,
+            "scenes": [],
+        },
+    )
 
 
 def test_overlay_runtime_timeline_truth_overrides_prepared(render_service):

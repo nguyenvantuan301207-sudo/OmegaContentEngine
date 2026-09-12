@@ -10,6 +10,10 @@ import time
 
 from fastapi import APIRouter
 
+from omega.application.render_capabilities import (
+    ProductionRenderCapabilities,
+    get_production_render_capabilities,
+)
 from omega.config import get_settings
 from omega.logging import get_logger
 
@@ -118,3 +122,9 @@ async def system_tts() -> dict:
     from omega.application.local_tts.capability import get_tts_capability
 
     return get_tts_capability(settings)
+
+
+@router.get("/render-capabilities", response_model=ProductionRenderCapabilities)
+async def system_render_capabilities() -> ProductionRenderCapabilities:
+    """Return renderer-backed Production Studio capabilities and defaults."""
+    return get_production_render_capabilities()

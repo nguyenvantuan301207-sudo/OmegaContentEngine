@@ -8,37 +8,25 @@ import {
   type NarrationSegment,
   type ProductionAsset,
   type ProductionQAResult,
+  type ProductionRenderCapabilities,
   type ProductionRenderJob,
+  type ProductionRequest,
   type ProductionScene,
+  type RenderArtifactProvenance,
   type RenderPlan,
+  type SubtitleRenderStyle,
   type SubtitleCue,
 } from "@/lib/api";
+import {
+  resolveSubtitleDraft,
+  subtitleHorizontalAlignment,
+  subtitleVerticalAlignment,
+} from "@/lib/subtitle-render-ui";
 import {
   TechnicalDetails,
   WorkflowStatusSummary,
   statusTone,
 } from "./WorkflowPrimitives";
-
-type SubtitlePreviewStyle = {
-  preset: "Clean" | "Bold" | "Caption Box" | "Karaoke Highlight" | "Minimal";
-  position: "Bottom" | "Lower Third" | "Center";
-  size: "Small" | "Medium" | "Large";
-  weight: "Regular" | "Medium" | "Bold";
-  alignment: "Left" | "Center";
-  background: "None" | "Shadow" | "Outline" | "Solid Box";
-  safeMargin: "Compact" | "Normal" | "Wide";
-};
-
-const SUBTITLE_PREVIEW_DEFAULT: SubtitlePreviewStyle = {
-  preset: "Clean",
-  position: "Bottom",
-  size: "Medium",
-  weight: "Medium",
-  alignment: "Center",
-  background: "Shadow",
-  safeMargin: "Normal",
-};
-const SUBTITLE_PREVIEW_STORAGE_KEY = "omega.subtitle-preview-style.v1";
 
 export function TimelinePanel({
   scenes,
@@ -362,55 +350,92 @@ export function ArtifactPanel({
   );
 }
 
-export function ProductionQAPanel({ qa }: { qa: ProductionQAResult | null }) {
-  if (!qa)
-    return (
-      <EmptyState
-        title="No production QA result"
-        description="QA becomes available after a rendered artifact is evaluated."
-      />
-    );
+export function ProductionQAPanel({
+  qa,
+  renderProvenance,
+}: {
+  qa: ProductionQAResult | null;
+  renderProvenance?: RenderArtifactProvenance | null;
+}) {
   return (
     <PageSection
       title="Production quality assurance"
       description="Artifact acceptance and blocking findings are displayed explicitly."
     >
-      <WorkflowStatusSummary
-        metrics={[
-          { label: "QA status", value: qa.status, status: qa.status },
-          { label: "Findings", value: qa.findings.length },
-        ]}
-      />
-      {qa.findings.length === 0 ? (
-        <Alert tone="success" title="Artifact accepted">
-          Production QA completed with no findings.
-        </Alert>
+      {qa ? (
+        <>
+          <WorkflowStatusSummary
+            metrics={[
+              { label: "QA status", value: qa.status, status: qa.status },
+              { label: "Findings", value: qa.findings.length },
+            ]}
+          />
+          {qa.findings.length === 0 ? (
+            <Alert tone="success" title="Artifact accepted">
+              Production QA completed with no findings.
+            </Alert>
+          ) : (
+            <div className="workflow-card-grid">
+              {qa.findings.map((finding, index) => (
+                <article
+                  className={`workflow-card ${finding.severity === "BLOCKING" || finding.severity === "ERROR" ? "workflow-error-card" : ""}`}
+                  key={`${finding.rule_code}-${index}`}
+                >
+                  <div className="workflow-card-header">
+                    <h3>{finding.rule_code}</h3>
+                    <StatusBadge tone={statusTone(finding.severity)}>
+                      {finding.severity}
+                    </StatusBadge>
+                  </div>
+                  <p className="workflow-copy">{finding.message}</p>
+                  <TechnicalDetails data={finding.details} />
+                </article>
+              ))}
+            </div>
+          )}
+        </>
       ) : (
-        <div className="workflow-card-grid">
-          {qa.findings.map((finding, index) => (
-            <article
-              className={`workflow-card ${finding.severity === "BLOCKING" || finding.severity === "ERROR" ? "workflow-error-card" : ""}`}
-              key={`${finding.rule_code}-${index}`}
-            >
-              <div className="workflow-card-header">
-                <h3>{finding.rule_code}</h3>
-                <StatusBadge tone={statusTone(finding.severity)}>
-                  {finding.severity}
-                </StatusBadge>
-              </div>
-              <p className="workflow-copy">{finding.message}</p>
-              <TechnicalDetails data={finding.details} />
-            </article>
-          ))}
-        </div>
+        <EmptyState
+          title="No production QA result"
+          description="QA becomes available after a rendered artifact is evaluated."
+        />
       )}
-      <TechnicalDetails
-        data={{
-          id: qa.id,
-          artifact_id: qa.artifact_id,
-          executed_at: qa.executed_at,
-        }}
-      />
+      {renderProvenance ? (
+        <PageSection
+          title="Rendered artifact provenance"
+          description="Read-only values returned by the renderer for the current production artifact."
+        >
+          {renderProvenance.text_truncated ? (
+            <Alert tone="warning" title="Text truncation fallback used">
+              One or more rendered scenes reached the explicit final truncation fallback.
+            </Alert>
+          ) : (
+            <Alert tone="success" title="No text truncation reported">
+              The renderer fitted scene text without its truncation fallback.
+            </Alert>
+          )}
+          <WorkflowStatusSummary metrics={[
+            { label: "Source", value: "From Artifact" },
+            { label: "FPS mode", value: renderProvenance.effective_fps_mode },
+            { label: "Target FPS", value: renderProvenance.target_fps },
+            { label: "Subtitle style", value: renderProvenance.subtitle_style_applied ? "Recorded" : "Unavailable" },
+          ]} />
+          <TechnicalDetails data={renderProvenance} />
+        </PageSection>
+      ) : (
+        <Alert tone="info" title="Artifact render provenance unavailable">
+          Existing artifacts rendered before P15-B may not expose subtitle style or text-fitting provenance.
+        </Alert>
+      )}
+      {qa ? (
+        <TechnicalDetails
+          data={{
+            id: qa.id,
+            artifact_id: qa.artifact_id,
+            executed_at: qa.executed_at,
+          }}
+        />
+      ) : null}
     </PageSection>
   );
 }
@@ -472,20 +497,24 @@ export function StoryboardPanel({
 
 export function SubtitlePanel({
   subtitles,
+  request,
+  capabilities,
+  busy = false,
+  onApply,
 }: {
   subtitles: SubtitleCue[];
+  request: ProductionRequest | null;
+  capabilities: ProductionRenderCapabilities | null;
+  busy?: boolean;
+  onApply: (style: SubtitleRenderStyle) => Promise<void>;
 }) {
-  const [style, setStyle] = useState<SubtitlePreviewStyle>(SUBTITLE_PREVIEW_DEFAULT);
+  const [style, setStyle] = useState<SubtitleRenderStyle | null>(null);
   const [selectedCueId, setSelectedCueId] = useState<string | null>(subtitles[0]?.id ?? null);
+  const [applyError, setApplyError] = useState<string | null>(null);
 
   useEffect(() => {
-    try {
-      const stored = window.localStorage.getItem(SUBTITLE_PREVIEW_STORAGE_KEY);
-      if (stored) setStyle({ ...SUBTITLE_PREVIEW_DEFAULT, ...JSON.parse(stored) });
-    } catch {
-      // Preview preferences are optional and never affect persisted production data.
-    }
-  }, []);
+    if (capabilities) setStyle(resolveSubtitleDraft(capabilities, request));
+  }, [capabilities, request]);
 
   useEffect(() => {
     if (!subtitles.some((cue) => cue.id === selectedCueId)) {
@@ -493,96 +522,97 @@ export function SubtitlePanel({
     }
   }, [selectedCueId, subtitles]);
 
-  const updateStyle = <K extends keyof SubtitlePreviewStyle>(key: K, value: SubtitlePreviewStyle[K]) => {
-    const next = { ...style, [key]: value };
-    setStyle(next);
-    try {
-      window.localStorage.setItem(SUBTITLE_PREVIEW_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // Keep the live preview useful even when browser storage is unavailable.
-    }
+  if (!capabilities || !style) {
+    return <EmptyState title="Loading renderer capabilities" description="Subtitle controls wait for authoritative backend defaults." />;
+  }
+
+  const updateStyle = <K extends keyof SubtitleRenderStyle>(key: K, value: SubtitleRenderStyle[K]) => {
+    setApplyError(null);
+    setStyle({ ...style, [key]: value });
   };
 
-  const applyPreset = (preset: SubtitlePreviewStyle["preset"]) => {
-    const presets: Record<SubtitlePreviewStyle["preset"], SubtitlePreviewStyle> = {
-      Clean: { ...SUBTITLE_PREVIEW_DEFAULT, preset: "Clean" },
-      Bold: { ...SUBTITLE_PREVIEW_DEFAULT, preset: "Bold", position: "Lower Third", size: "Large", weight: "Bold", background: "Outline" },
-      "Caption Box": { ...SUBTITLE_PREVIEW_DEFAULT, preset: "Caption Box", background: "Solid Box" },
-      "Karaoke Highlight": { ...SUBTITLE_PREVIEW_DEFAULT, preset: "Karaoke Highlight", position: "Lower Third", weight: "Bold" },
-      Minimal: { ...SUBTITLE_PREVIEW_DEFAULT, preset: "Minimal", size: "Small", weight: "Regular", alignment: "Left", background: "None", safeMargin: "Wide" },
-    };
-    const next = presets[preset];
-    setStyle(next);
-    try {
-      window.localStorage.setItem(SUBTITLE_PREVIEW_STORAGE_KEY, JSON.stringify(next));
-    } catch {
-      // Local persistence is optional.
-    }
-  };
+  const appliedStyle = request?.metadata?.render_settings?.subtitle_style ?? null;
+  const artifactProvenance = request?.metadata?.render_provenance ?? null;
+  const artifactStyle = artifactProvenance?.subtitle_style_applied ?? null;
+  const draftChanged = JSON.stringify(style) !== JSON.stringify(appliedStyle ?? capabilities.subtitle.defaults);
+  const fieldState = (name: keyof SubtitleRenderStyle) =>
+    capabilities.subtitle.fields.find((field) => field.name === name)?.truth_state ?? "UNSUPPORTED";
 
   const selectedCue = subtitles.find((cue) => cue.id === selectedCueId) ?? subtitles[0] ?? null;
+  const vertical = subtitleVerticalAlignment(style.alignment);
+  const horizontal = subtitleHorizontalAlignment(style.alignment);
+  const scaledMargin = Math.max(8, Math.round(style.margin_v * 0.21));
   const previewStyle: CSSProperties = {
-    alignItems: style.position === "Center" ? "center" : "flex-end",
-    justifyContent: style.alignment === "Left" ? "flex-start" : "center",
-    paddingBottom: style.position === "Lower Third" ? "24%" : style.position === "Center" ? undefined : style.safeMargin === "Compact" ? 18 : style.safeMargin === "Wide" ? 64 : 38,
-    paddingInline: style.safeMargin === "Compact" ? 18 : style.safeMargin === "Wide" ? 64 : 38,
-    textAlign: style.alignment.toLowerCase() as CSSProperties["textAlign"],
+    alignItems: vertical,
+    justifyContent: horizontal === "left" ? "flex-start" : horizontal === "right" ? "flex-end" : "center",
+    paddingBottom: vertical === "flex-end" ? scaledMargin : undefined,
+    paddingTop: vertical === "flex-start" ? scaledMargin : undefined,
+    paddingInline: "4%",
+    textAlign: horizontal,
   };
   const captionStyle: CSSProperties = {
-    fontSize: style.size === "Small" ? 16 : style.size === "Large" ? 28 : 21,
-    fontWeight: style.weight === "Regular" ? 400 : style.weight === "Bold" ? 800 : 600,
-    background: style.background === "Solid Box" ? "rgba(4, 8, 15, .88)" : "transparent",
-    boxShadow: style.background === "Shadow" ? "0 3px 12px rgba(0, 0, 0, .95)" : "none",
-    WebkitTextStroke: style.background === "Outline" ? "1.25px rgba(0, 0, 0, .92)" : undefined,
+    maxWidth: `${style.max_width_ratio * 100}%`,
+    fontFamily: style.font_family,
+    fontSize: Math.max(12, Math.round(style.font_size * 0.5)),
+    fontWeight: style.bold ? 700 : 400,
+    color: style.primary_color,
+    background: style.background_box ? "rgba(4, 8, 15, .82)" : "transparent",
+    textShadow: style.shadow ? `0 ${Math.max(1, style.shadow * 0.5)}px ${Math.max(2, style.shadow * 2)}px rgba(0,0,0,.9)` : "none",
+    WebkitTextStroke: style.outline_width ? `${Math.max(0.5, style.outline_width * 0.5)}px ${style.outline_color}` : undefined,
+    display: "-webkit-box",
+    WebkitBoxOrient: "vertical",
+    WebkitLineClamp: style.max_lines,
+    overflow: "hidden",
   };
-
-  const control = <K extends keyof SubtitlePreviewStyle>(label: string, key: K, values: readonly SubtitlePreviewStyle[K][]) => (
-    <fieldset className="subtitle-style-control">
-      <legend>{label}</legend>
-      <div className="subtitle-option-group">
-        {values.map((value) => <button type="button" key={String(value)} aria-pressed={style[key] === value} className={style[key] === value ? "active" : ""} onClick={() => updateStyle(key, value)}>{String(value)}</button>)}
-      </div>
-    </fieldset>
-  );
 
   return (
     <div className="workflow-detail subtitle-workspace">
       <PageSection
         title="Subtitle Style"
-        description="Local appearance preview using persisted subtitle cues. Render customization is not yet supported."
-        actions={<StatusBadge tone="warning">Preview only</StatusBadge>}
+        description="Draft values preview the same fields the backend validates and applies to the next render."
+        actions={<StatusBadge tone={draftChanged ? "warning" : "success"}>{draftChanged ? "Draft" : "Render Applied"}</StatusBadge>}
       >
         <div className="subtitle-style-layout">
           <div className="subtitle-controls">
-            <fieldset className="subtitle-style-control subtitle-presets">
-              <legend>Style preset</legend>
-              <div className="subtitle-option-group">
-                {(["Clean", "Bold", "Caption Box", "Karaoke Highlight", "Minimal"] as const).map((preset) => <button type="button" key={preset} aria-pressed={style.preset === preset} className={style.preset === preset ? "active" : ""} onClick={() => applyPreset(preset)}>{preset}</button>)}
-              </div>
-            </fieldset>
-            {control("Position", "position", ["Bottom", "Lower Third", "Center"])}
-            {control("Size", "size", ["Small", "Medium", "Large"])}
-            {control("Weight", "weight", ["Regular", "Medium", "Bold"])}
-            {control("Alignment", "alignment", ["Left", "Center"])}
-            {control("Background", "background", ["None", "Shadow", "Outline", "Solid Box"])}
-            {control("Safe margin", "safeMargin", ["Compact", "Normal", "Wide"])}
+            <label className="subtitle-field"><span>Font family <small>{fieldState("font_family")}</small></span><select value={style.font_family} onChange={(event) => updateStyle("font_family", event.target.value)}>{capabilities.subtitle.font_families.map((font) => <option key={font}>{font}</option>)}</select></label>
+            <label className="subtitle-field"><span>Font size <small>{fieldState("font_size")}</small></span><input type="range" min="24" max="96" value={style.font_size} onChange={(event) => updateStyle("font_size", Number(event.target.value))} /><output>{style.font_size}px</output></label>
+            <label className="subtitle-field subtitle-checkbox"><input type="checkbox" checked={style.bold} onChange={(event) => updateStyle("bold", event.target.checked)} /><span>Bold <small>{fieldState("bold")}</small></span></label>
+            <label className="subtitle-field"><span>Text color <small>{fieldState("primary_color")}</small></span><span className="subtitle-color"><input type="color" value={style.primary_color} onChange={(event) => updateStyle("primary_color", event.target.value.toUpperCase())} /><output>{style.primary_color}</output></span></label>
+            <label className="subtitle-field"><span>Outline color <small>{fieldState("outline_color")}</small></span><span className="subtitle-color"><input type="color" value={style.outline_color} onChange={(event) => updateStyle("outline_color", event.target.value.toUpperCase())} /><output>{style.outline_color}</output></span></label>
+            <label className="subtitle-field"><span>Outline width <small>{fieldState("outline_width")}</small></span><input type="range" min="0" max="8" step="0.5" value={style.outline_width} onChange={(event) => updateStyle("outline_width", Number(event.target.value))} /><output>{style.outline_width}px</output></label>
+            <label className="subtitle-field"><span>Shadow <small>{fieldState("shadow")}</small></span><input type="range" min="0" max="8" step="0.5" value={style.shadow} onChange={(event) => updateStyle("shadow", Number(event.target.value))} /><output>{style.shadow}</output></label>
+            <label className="subtitle-field subtitle-checkbox"><input type="checkbox" checked={style.background_box} onChange={(event) => updateStyle("background_box", event.target.checked)} /><span>Background box <small>{fieldState("background_box")}</small></span></label>
+            <label className="subtitle-field"><span>Alignment <small>{fieldState("alignment")}</small></span><select value={style.alignment} onChange={(event) => updateStyle("alignment", Number(event.target.value))}>{Object.entries(capabilities.subtitle.alignments).map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
+            <label className="subtitle-field"><span>Vertical margin <small>{fieldState("margin_v")}</small></span><input type="range" min="0" max="400" step="5" value={style.margin_v} onChange={(event) => updateStyle("margin_v", Number(event.target.value))} /><output>{style.margin_v}px</output></label>
+            <label className="subtitle-field"><span>Maximum lines <small>{fieldState("max_lines")}</small></span><select value={style.max_lines} onChange={(event) => updateStyle("max_lines", Number(event.target.value))}><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
+            <label className="subtitle-field"><span>Maximum width <small>{fieldState("max_width_ratio")}</small></span><input type="range" min="0.4" max="0.95" step="0.01" value={style.max_width_ratio} onChange={(event) => updateStyle("max_width_ratio", Number(event.target.value))} /><output>{Math.round(style.max_width_ratio * 100)}%</output></label>
+            <div className="subtitle-field subtitle-readonly"><span>Minimum fitted font size <small>RENDER_APPLIED · advanced</small></span><strong>{style.min_font_size}px</strong></div>
+            <button type="button" className="btn primary" disabled={!request || busy || !draftChanged} onClick={async () => { try { setApplyError(null); await onApply(style); } catch (error) { setApplyError(error instanceof Error ? error.message : "Could not apply render settings."); } }}>Apply to next render</button>
+            {applyError && <Alert tone="danger" title="Settings were not applied">{applyError}</Alert>}
             <div className="subtitle-render-truth">
-              <strong>Renderer style is fixed</strong>
-              <span>Font: renderer-selected Sans / Arial. These controls are stored only in this browser and are not applied to render jobs.</span>
-              {style.preset === "Karaoke Highlight" && <span>Karaoke is preview-only here: persisted cues do not expose authoritative word-level timestamps.</span>}
+              <strong>Renderer truth</strong>
+              <span>Wrap: supported · Font downscale: supported · Truncation fallback: possible.</span>
+              <span>Timing: {capabilities.subtitle_timing_label}. It is not forced alignment.</span>
+              <span>FPS mode: {capabilities.video.fps_mode} · Target FPS: {capabilities.video.target_fps} · read-only.</span>
             </div>
           </div>
           <div className="subtitle-preview-card">
             <div className="subtitle-preview-meta"><span>Live cue preview</span><strong>{selectedCue ? `${(selectedCue.start_ms / 1000).toFixed(2)}s – ${(selectedCue.end_ms / 1000).toFixed(2)}s` : "No cue selected"}</strong></div>
             <div className="subtitle-preview-stage" style={previewStyle} aria-live="polite">
-              {selectedCue ? <span className={`subtitle-preview-caption background-${style.background.toLowerCase().replaceAll(" ", "-")}`} style={captionStyle}>{selectedCue.text}</span> : <div className="subtitle-preview-empty"><strong>No persisted subtitle text</strong><span>Prepare a production with authoritative cues to preview subtitle appearance.</span></div>}
+              {selectedCue ? <span className="subtitle-preview-caption" style={captionStyle}>{selectedCue.text}</span> : <div className="subtitle-preview-empty"><strong>No persisted subtitle text</strong><span>Prepare a production with subtitle cues to preview renderer-backed appearance.</span></div>}
+            </div>
+            <div className="subtitle-state-stack">
+              <span><b>Draft</b>{draftChanged ? "Unsaved selection" : "Matches applied configuration"}</span>
+              <span><b>Render Applied</b>{appliedStyle ? `${appliedStyle.font_size}px · ${appliedStyle.primary_color} · margin ${appliedStyle.margin_v}` : "Backend defaults until explicitly applied"}</span>
+              <span><b>From Artifact</b>{artifactStyle ? `${artifactStyle.font_size}px · ${artifactStyle.primary_color} · margin ${artifactStyle.margin_v}` : "No persisted artifact provenance"}</span>
             </div>
           </div>
         </div>
+        {artifactProvenance?.text_truncated && <Alert tone="warning" title="Rendered text was truncated">At least one scene used the explicit renderer truncation fallback. Review scene provenance in QA.</Alert>}
       </PageSection>
       <PageSection
         title="Subtitle cues"
-        description={`${subtitles.length} cue${subtitles.length === 1 ? "" : "s"} aligned to narration.`}
+        description={`${subtitles.length} cue${subtitles.length === 1 ? "" : "s"} using ${capabilities.subtitle_timing_label.toLowerCase()}.`}
       >
         {subtitles.length === 0 ? <EmptyState title="No subtitle cues" description="No authoritative subtitle track exists for this production." /> : <div className="card subtitle-cue-table-wrap">
           <table className="v2-table">

@@ -3,13 +3,14 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  getChannels, getMediaArtifactStreamUrl, getProductionQAResult, getRenderPlan, listMediaArtifacts,
+  getChannels, getMediaArtifactStreamUrl, getProductionQAResult, getProductionRenderCapabilities, getRenderPlan, listMediaArtifacts,
   listNarrationSegments, listProductionAssets, listProductionRequests, listProductionScenes,
-  listRenderJobs, listSubtitleCues, prepareProduction, renderProduction,
+  listRenderJobs, listSubtitleCues, prepareProduction, renderProduction, updateProductionRenderSettings,
   type MediaArtifact, type NarrationSegment, type ProductionAsset, type ProductionQAResult,
-  type ProductionRenderJob, type ProductionRequest, type ProductionScene, type RenderPlan,
-  type SubtitleCue, type Channel,
+  type ProductionRenderCapabilities, type ProductionRenderJob, type ProductionRequest, type ProductionScene, type RenderPlan,
+  type SubtitleCue, type SubtitleRenderStyle, type Channel,
 } from "@/lib/api";
+import { resolveArtifactProvenance } from "@/lib/subtitle-render-ui";
 import { useOperatorContext } from "@/lib/operator-context";
 import { classifyChannel, isChannelVisible } from "@/lib/channel-classification";
 import { PublishPreparationModal } from "@/components/PublishPreparationModal";
@@ -69,6 +70,7 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
   const [jobs, setJobs] = useState<ProductionRenderJob[]>([]);
   const [artifacts, setArtifacts] = useState<MediaArtifact[]>([]);
   const [qa, setQa] = useState<ProductionQAResult | null>(null);
+  const [renderCapabilities, setRenderCapabilities] = useState<ProductionRenderCapabilities | null>(null);
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [artifactVersion, setArtifactVersion] = useState<number | null>(null);
   const [view, setView] = useState<ProductionView>("overview");
@@ -113,6 +115,7 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
   }, [clearDetails, loadDetails]);
 
   useEffect(() => { if (forcedChannelId) void setSelectedChannelId(forcedChannelId); }, [forcedChannelId, setSelectedChannelId]);
+  useEffect(() => { void getProductionRenderCapabilities().then(setRenderCapabilities).catch((caught) => setError(caught instanceof Error ? caught.message : "Renderer capabilities are unavailable.")); }, []);
   useEffect(() => { void loadChannel(channelId); }, [channelId, loadChannel]);
   useEffect(() => {
     if (!channels.length || recentDiscoveryStarted.current) return;
@@ -139,6 +142,17 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
   const chooseRequest = async (request: ProductionRequest) => { setSelectedRequestId(request.id); setSelectedSceneId(null); setTerminalClearedAt(null); await loadDetails(channelId, request); };
   const openRecent = async (value: string) => { const item = recent.find((candidate) => `${candidate.channelId}:${candidate.request.id}` === value); if (!item) return; setSelectedRequestId(item.request.id); await setSelectedChannelId(item.channelId); if (forcedChannelId) return; await loadChannel(item.channelId, item.request.id); };
   const perform = async (action: () => Promise<unknown>) => { if (!selectedRequest) return; setBusy(true); setError(null); try { await action(); await loadChannel(channelId, selectedRequest.id); } catch (caught) { setError(caught instanceof Error ? caught.message : "Production action failed."); } finally { setBusy(false); } };
+  const applySubtitleStyle = async (style: SubtitleRenderStyle) => {
+    if (!selectedRequest) throw new Error("Select a production before applying render settings.");
+    setBusy(true);
+    setError(null);
+    try {
+      const updated = await updateProductionRenderSettings(channelId, selectedRequest.id, style);
+      setRequests((current) => current.map((request) => request.id === updated.id ? updated : request));
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const pipeline: Array<[string, PipelineState]> = [
     ["Research", "PENDING"], ["Script / Content", stageState(Boolean(selectedRequest))], ["Storyboard / Planning", stageState(scenes.length > 0, Boolean(selectedRequest))], ["Assets", stageState(assets.length > 0, scenes.length > 0)], ["Voice", stageState(narration.length > 0, scenes.length > 0)],
@@ -194,10 +208,10 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
         {view === "overview" && <Overview request={selectedRequest} artifact={selectedArtifact} artifacts={artifacts} artifactVersion={artifactVersion} setArtifactVersion={setArtifactVersion} channelId={channelId} channelName={activeChannel?.name || "this channel"} availableProduction={recent} openProduction={(item) => void openRecent(`${item.channelId}:${item.request.id}`)} scenes={scenes} narration={narration} subtitles={subtitles} plan={plan} selectedSceneId={selectedSceneId} setSelectedSceneId={setSelectedSceneId} loading={loading} onRender={() => selectedRequest && void perform(() => renderProduction(channelId, selectedRequest.id, `render-${Date.now()}`))} />}
         {view === "script" && <div className="studio-tab-pane"><PanelHeading eyebrow="SCRIPT STUDIO" title="Read-only production script" detail={`${scenes.length} scene blocks`} />{scenes.length ? <div className="script-blocks">{scenes.map((scene) => <button type="button" key={scene.id} className="script-block" onClick={() => { setSelectedSceneId(scene.id); setView("overview"); }}><span>Scene {scene.scene_order} · {scene.scene_type}</span><p>{scene.narration_text}</p>{scene.visual_intent && <small>{scene.visual_intent}</small>}</button>)}</div> : <PanelEmpty title="No script blocks available" description="This production has no persisted scene narration yet." />}</div>}
         {view === "storyboard" && <div className="studio-tab-pane"><PanelHeading eyebrow="STORYBOARD" title="Scene planning" detail={`${scenes.length} persisted scenes`} />{scenes.length ? <StoryboardPanel scenes={scenes} onSelectScene={(scene) => { setSelectedSceneId(scene.id); setView("overview"); }} /> : <PanelEmpty title="No storyboard available" description="Scene planning data has not been persisted for this production." />}</div>}
-        {view === "subtitle" && <div className="studio-tab-pane"><PanelHeading eyebrow="SUBTITLE" title="Timed subtitle cues" detail={`${subtitles.length} persisted cues`} /><SubtitlePanel subtitles={subtitles} /></div>}
+        {view === "subtitle" && <div className="studio-tab-pane"><PanelHeading eyebrow="SUBTITLE" title="Timed subtitle cues" detail={`${subtitles.length} persisted cues`} /><SubtitlePanel subtitles={subtitles} request={selectedRequest} capabilities={renderCapabilities} busy={busy} onApply={applySubtitleStyle} /></div>}
         {view === "timeline" && <div className="studio-tab-pane"><PanelHeading eyebrow="TIMELINE" title="Track detail" detail="Read-only persisted timing" />{scenes.length || narration.length || subtitles.length ? <TimelinePanel scenes={scenes} narration={narration} subtitles={subtitles} /> : <PanelEmpty title="Timeline has no clips" description="Tracks will appear when real scene, narration, or subtitle timing exists." />}</div>}
         {view === "terminal" && <TerminalPanel events={visibleEvents} totalEvents={terminalEvents.length} live={terminalLive} setLive={setTerminalLive} autoScroll={terminalAutoScroll} setAutoScroll={setTerminalAutoScroll} search={terminalSearch} setSearch={setTerminalSearch} filter={terminalFilter} setFilter={setTerminalFilter} onCopy={async () => { try { await navigator.clipboard.writeText(visibleEvents.map((event) => `${displayTime(event.timestamp)} ${event.domain.toUpperCase()} ${event.status} ${event.message}`).join("\n")); setTerminalNotice(`${visibleEvents.length} visible entries copied`); } catch { setTerminalNotice("Clipboard permission was unavailable"); } }} onClear={() => { setTerminalClearedAt(Date.now()); setTerminalNotice("View cleared locally; persisted records were not changed"); }} notice={terminalNotice} endRef={terminalEndRef} />}
-        {view === "qa" && <div className="studio-tab-pane"><PanelHeading eyebrow="QA / GUARDIAN" title="Production assurance" detail={qa?.status ? safeStatus(qa.status) : "No result"} />{qa ? <ProductionQAPanel qa={qa} /> : <PanelEmpty title="No QA result available" description="Guardian findings will appear after an authoritative production QA run." />}</div>}
+        {view === "qa" && <div className="studio-tab-pane"><PanelHeading eyebrow="QA / GUARDIAN" title="Production assurance" detail={qa?.status ? safeStatus(qa.status) : "No result"} /><ProductionQAPanel qa={qa} renderProvenance={resolveArtifactProvenance(selectedRequest)} /></div>}
       </main><Inspector request={selectedRequest} scene={selectedScene} artifact={selectedArtifact} plan={plan} latestJob={latestJob} qa={qa} assets={assets} narration={narration} subtitles={subtitles} busy={busy} onClearScene={() => setSelectedSceneId(null)} onPrepare={() => selectedRequest && void perform(() => prepareProduction(channelId, selectedRequest.id))} onRender={() => selectedRequest && void perform(() => renderProduction(channelId, selectedRequest.id, `render-${Date.now()}`))} onPublish={() => setPublishOpen(true)} />
       </div>
     </section>

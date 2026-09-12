@@ -19,7 +19,7 @@ from omega.domain.production import (
 class SubtitleRenderStyle(BaseModel):
     """Canonical render-time subtitle controls supported by the ASS pipeline."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen=True, extra="forbid")
 
     font_family: str = "Arial"
     font_size: int = Field(default=48, ge=24, le=96)

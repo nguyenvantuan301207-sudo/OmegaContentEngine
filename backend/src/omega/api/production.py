@@ -8,6 +8,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import PlainTextResponse, StreamingResponse
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,6 +18,7 @@ from omega.application.production_service import (
     ProductionService,
     ProductionStateError,
 )
+from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.domain.production import (
     MediaArtifactResponse,
     NarrationSegmentResponse,
@@ -49,6 +51,12 @@ from omega.worker.tasks import execute_production_render_task
 logger = structlog.get_logger()
 
 router = APIRouter(prefix="/api/v1/channels/{channel_id}/production", tags=["Production Engine"])
+
+
+class ProductionRenderSettingsUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subtitle_style: SubtitleRenderStyle
 
 
 def _get_production_service() -> ProductionService:
@@ -120,6 +128,29 @@ async def get_production_request(
             detail=f"ProductionRequest {request_id} not found.",
         )
     return req
+
+
+@router.patch(
+    "/{request_id}/render-settings",
+    response_model=ProductionRequestResponse,
+    summary="Persist validated renderer settings for the next production render",
+)
+async def update_render_settings(
+    channel_id: UUID,
+    request_id: UUID,
+    payload: ProductionRenderSettingsUpdate,
+    session: Annotated[AsyncSession, Depends(get_async_session)],
+    service: Annotated[ProductionService, Depends(_get_production_service)],
+) -> ProductionRequest:
+    try:
+        return await service.update_render_settings(
+            session,
+            channel_id,
+            request_id,
+            payload.subtitle_style,
+        )
+    except (ProductionLineageError, ProductionStateError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 # ── 4. Prepare Production ──

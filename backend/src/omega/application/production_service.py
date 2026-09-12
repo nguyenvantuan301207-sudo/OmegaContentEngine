@@ -14,7 +14,7 @@ from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.narration_provider import get_narration_provider
 from omega.application.production_timeline import align_production_timeline
 from omega.application.scene_planner import plan_scenes_from_script
-from omega.application.subtitle_engine import SubtitleEngine
+from omega.application.subtitle_engine import SubtitleEngine, SubtitleRenderStyle
 from omega.domain.production import (
     ProductionMode,
     ProductionRequestCreate,
@@ -60,6 +60,33 @@ class ProductionService:
         self.asset_provider = LocalAssetProvider(self.storage)
         self.narration_provider = get_narration_provider(self.storage)
         self.subtitle_engine = SubtitleEngine(self.storage)
+
+    async def update_render_settings(
+        self,
+        session: AsyncSession,
+        channel_id: uuid.UUID,
+        request_id: uuid.UUID,
+        subtitle_style: SubtitleRenderStyle,
+    ) -> ProductionRequest:
+        """Persist validated V2 render settings in existing request metadata JSON."""
+        stmt = select(ProductionRequest).where(
+            ProductionRequest.id == request_id,
+            ProductionRequest.channel_id == channel_id,
+        )
+        request = (await session.execute(stmt)).scalar_one_or_none()
+        if request is None:
+            raise ProductionLineageError(f"ProductionRequest {request_id} not found.")
+        if request.status == ProductionRequestStatus.RUNNING.value:
+            raise ProductionStateError("Render settings cannot change while a render is running.")
+
+        metadata = dict(request.metadata_ or {})
+        metadata["render_settings"] = {
+            "subtitle_style": subtitle_style.model_dump(),
+        }
+        request.metadata_ = metadata
+        await session.commit()
+        await session.refresh(request)
+        return request
 
     async def create_production_request(
         self,

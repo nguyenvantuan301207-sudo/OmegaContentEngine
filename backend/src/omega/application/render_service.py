@@ -16,6 +16,7 @@ from omega.application.ffmpeg_renderer import FFmpegExecutionError, FFmpegRender
 from omega.application.media_probe import MediaProbe
 from omega.application.media_storage import LocalMediaStorageProvider, compute_sha256
 from omega.application.production_qa import ProductionQAEngine
+from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.application.template_payload_resolver import TemplatePayloadError
 from omega.domain.production import (
     AssetType,
@@ -299,6 +300,7 @@ class ProductionRenderService:
         runtime_narration_segments = ()
         runtime_subtitle_cues = ()
         runtime_scenes = ()
+        runtime_render_provenance: dict | None = None
 
         try:
             # Check if we should use V2
@@ -313,6 +315,7 @@ class ProductionRenderService:
                     runtime_narration_segments,
                     runtime_subtitle_cues,
                     runtime_scenes,
+                    runtime_render_provenance,
                 ) = await self._render_v2_staging(
                     session=session,
                     req=req,
@@ -564,6 +567,14 @@ class ProductionRenderService:
                 .values(
                     status=ProductionRequestStatus.SUCCEEDED.value,
                     outcome=outcome,
+                    metadata_={
+                        **dict(req.metadata_ or {}),
+                        **(
+                            {"render_provenance": runtime_render_provenance}
+                            if runtime_render_provenance is not None
+                            else {}
+                        ),
+                    },
                 )
             )
 
@@ -765,6 +776,7 @@ class ProductionRenderService:
         tuple[object, ...],
         tuple[object, ...],
         tuple[object, ...],
+        dict,
     ]:
         import shutil
 
@@ -780,6 +792,11 @@ class ProductionRenderService:
         if video_codec.lower() not in ("h264", "libx264"):
             raise ValueError(f"V2 unsupported codec: {video_codec}")
 
+        render_settings = dict(req.metadata_ or {}).get("render_settings", {})
+        subtitle_style = SubtitleRenderStyle.model_validate(
+            render_settings.get("subtitle_style", {})
+        )
+
         # V2 execution
         result = await self.visual_production_service.render_mission_execution(
             session,
@@ -788,6 +805,7 @@ class ProductionRenderService:
             fps=fps,
             voice_profile=req.voice_profile,
             subtitle_enabled=True,
+            subtitle_style=subtitle_style,
         )
 
         # Validate V2 Result Lineage
@@ -827,13 +845,39 @@ class ProductionRenderService:
         if copied_sha != source_sha:
             raise ValueError("V2 copied SHA mismatch")
 
+        runtime_scenes = tuple(getattr(result, "runtime_scenes", ()) or ())
+        runtime_scene_data = [
+            scene.model_dump() if hasattr(scene, "model_dump") else dict(scene)
+            for scene in runtime_scenes
+        ]
+        render_provenance = {
+            "subtitle_style_applied": (
+                result.subtitle_style_applied.model_dump()
+                if getattr(result, "subtitle_style_applied", None)
+                else None
+            ),
+            "target_fps": result.fps,
+            "effective_fps_mode": getattr(result, "effective_fps_mode", None),
+            "text_truncated": any(
+                bool(scene.get("text_truncated", False)) for scene in runtime_scene_data
+            ),
+            "scenes": [
+                {
+                    "sequence_index": scene.get("sequence_index"),
+                    "text_truncated": bool(scene.get("text_truncated", False)),
+                }
+                for scene in runtime_scene_data
+            ],
+        }
+
         return (
             getattr(result, "narration_quality", None),
             tuple(getattr(result, "narration_source_refs", ()) or ()),
             getattr(result, "runtime_timeline_duration_ms", None),
             tuple(getattr(result, "runtime_narration_segments", ()) or ()),
             tuple(getattr(result, "runtime_subtitle_cues", ()) or ()),
-            tuple(getattr(result, "runtime_scenes", ()) or ()),
+            runtime_scenes,
+            render_provenance,
         )
 
     async def _render_synthetic_clip(

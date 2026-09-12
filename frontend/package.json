@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint . --no-cache",
-    "test": "node --experimental-strip-types --test tests/foundation.test.ts tests/classification.test.ts"
+    "test": "node --experimental-strip-types --test tests/foundation.test.ts tests/classification.test.ts tests/production-render-parity.test.ts"
   },
   "dependencies": {
     "next": "^15.5.24",

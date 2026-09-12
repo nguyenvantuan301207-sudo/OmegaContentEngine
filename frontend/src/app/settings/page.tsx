@@ -145,7 +145,7 @@ export default function SettingsPage() {
           </SectionCard>
           <SectionCard eyebrow="DISCLOSURE" title="Technical information" kind="LOCAL_PREFERENCE">
             <Row title="Show technical IDs" description="Shows or hides ID and hash disclosures on integrated surfaces" classification="LOCAL_PREFERENCE" value={<button type="button" className={`switch ${prefs.showTechnicalIds ? "on" : ""}`} aria-pressed={prefs.showTechnicalIds} onClick={() => updatePref("showTechnicalIds", !prefs.showTechnicalIds)} aria-label="Toggle technical ID visibility" />} />
-            <Row title="Color system" description="Theme-aware OMEGA V2 surface tokens" value={<span className="readout">OMEGA V2</span>} />
+            <Row title="Color system" description="Theme-aware surface tokens" value={<span className="readout">OMEGA V2</span>} />
           </SectionCard>
         </div>}
 
