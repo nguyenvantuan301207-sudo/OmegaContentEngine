@@ -620,6 +620,42 @@ export async function getSystemInfo(): Promise<SystemInfo> {
   return apiFetch("/api/v1/system/info");
 }
 
+export interface TTSVoice {
+  id: string;
+  name: string;
+  locale: string;
+  gender: string;
+  description: string;
+  is_default: boolean;
+}
+
+export interface TTSCapability {
+  provider: string;
+  engine: string;
+  model: string;
+  readiness: "READY" | "MISSING" | "CHECKSUM_MISMATCH" | string;
+  device: string;
+  available_devices: string[];
+  profiles: string[];
+  default_profile: string;
+  languages: string[];
+  default_language: string;
+  default_voice: string;
+  voices: TTSVoice[];
+  speed_presets: number[];
+  speed_range: { min: number; max: number };
+  canonical_audio: {
+    format: string;
+    encoding: string;
+    sample_rate: number;
+    channels: number;
+  };
+}
+
+export async function getTTSCapability(): Promise<TTSCapability> {
+  return apiFetch("/api/v1/system/tts");
+}
+
 export async function createTestJob(): Promise<JobCreated> {
   return apiFetch("/api/v1/jobs/test", { method: "POST" });
 }

@@ -351,10 +351,24 @@ class LocalTTSNarrationProvider:
         if not text:
             raise NarrationProviderError("Empty narration text for synthesis")
 
-        voice = (voice_profile or {}).get("voice_ref")
-        language = (voice_profile or {}).get("language")
-        speaking_rate = (voice_profile or {}).get("speaking_rate")
-        speed = float(speaking_rate) if speaking_rate else None
+        # Single authoritative policy resolution
+        from omega.application.local_tts.policy import (
+            ResolvedNarrationPolicy,
+            resolve_narration_policy,
+        )
+
+        if isinstance(voice_profile, ResolvedNarrationPolicy):
+            policy = voice_profile
+        else:
+            policy = resolve_narration_policy(
+                request_policy=voice_profile,
+                actual_provider="LOCAL_TTS",
+            )
+
+        voice = policy.voice
+        language = policy.language
+        speed = policy.speed
+        profile = policy.profile
 
         # Apply semantic chunking policy (splits only if segment exceeds upper token threshold)
         chunks = chunk_narration_segment(text)
@@ -368,7 +382,7 @@ class LocalTTSNarrationProvider:
                     voice=voice,
                     language=language,
                     speed=speed,
-                    profile=self.profile,
+                    profile=profile,
                 )
             else:
                 # Multi-chunk synthesis concatenated into single canonical WAV
@@ -378,6 +392,7 @@ class LocalTTSNarrationProvider:
                     voice=voice,
                     language=language,
                     speed=speed,
+                    profile=profile,
                 )
         except (LocalTTSError, Exception) as e:
             # Explicit failure policy: NO fallback to sine waves or cloud APIs
@@ -424,6 +439,7 @@ class LocalTTSNarrationProvider:
         voice: str | None,
         language: str | None,
         speed: float | None,
+        profile: str | None = None,
     ) -> Any:
         """Synthesize multiple semantic chunks sequentially and concatenate to target WAV."""
         temp_paths: list[Path] = []
@@ -440,7 +456,7 @@ class LocalTTSNarrationProvider:
                     voice=voice,
                     language=language,
                     speed=speed,
-                    profile=self.profile,
+                    profile=profile or self.profile,
                 )
                 temp_paths.append(chunk_path)
                 total_gen_ms += res.generation_duration_ms

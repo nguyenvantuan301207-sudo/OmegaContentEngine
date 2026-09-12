@@ -48,13 +48,12 @@ def test_language_normalization_valid():
     assert canonical == "en-GB"
     assert internal == "en-gb"
 
-    canonical, internal = normalize_language("en")
-    assert canonical == "en-US"
-    assert internal == "en-us"
-
 
 def test_language_normalization_invalid():
-    """Verify unsupported languages are rejected explicitly."""
+    """Verify unsupported languages and generic 'en' are rejected explicitly."""
+    with pytest.raises(UnsupportedLanguageError, match="Unsupported language 'en'"):
+        normalize_language("en")
+
     with pytest.raises(UnsupportedLanguageError, match="Unsupported language 'vi'"):
         normalize_language("vi")
 

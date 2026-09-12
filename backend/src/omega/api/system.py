@@ -107,3 +107,14 @@ async def system_info() -> dict:
         "version": settings.app_version,
         "environment": settings.environment,
     }
+
+
+@router.get("/tts")
+async def system_tts() -> dict:
+    """Return local TTS provider capability, model readiness, and policy defaults.
+
+    Read-only, zero model download, zero DB mutation, zero secret exposure.
+    """
+    from omega.application.local_tts.capability import get_tts_capability
+
+    return get_tts_capability(settings)

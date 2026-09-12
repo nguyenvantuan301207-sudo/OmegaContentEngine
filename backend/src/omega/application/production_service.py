@@ -23,6 +23,7 @@ from omega.domain.production import (
 )
 from omega.infrastructure.models import (
     AssetRequirement,
+    Channel,
     ContentGenerationRequest,
     NarrationSegment,
     ProductionAsset,
@@ -291,11 +292,24 @@ class ProductionService:
         # 5. Timeline Alignment, Narration Audio, and Subtitles
         narration_plans, subtitle_plans, total_dur_ms = align_production_timeline(planned_scenes)
 
+        resolved_narration_policy = None
+        if self.narration_provider:
+            from omega.application.local_tts.policy import resolve_narration_policy
+
+            channel = await session.get(Channel, channel_id)
+            resolved_narration_policy = resolve_narration_policy(
+                request_policy=req.voice_profile,
+                request_metadata=req.metadata_,
+                channel_policy=channel.metadata_ if channel and channel.metadata_ else None,
+                actual_provider="LOCAL_TTS",
+            )
+
         for n_plan in narration_plans:
             audio_dict = await self.narration_provider.synthesize_segment_audio(
                 channel_id=channel_id,
                 request_id=req.id,
                 segment=n_plan,
+                voice_profile=resolved_narration_policy,
             )
             audio_asset = ProductionAsset(
                 id=audio_dict["id"],

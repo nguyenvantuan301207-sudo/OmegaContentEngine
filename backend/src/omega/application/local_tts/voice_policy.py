@@ -16,7 +16,6 @@ SUPPORTED_LANGUAGES: dict[str, str] = {
     "en-us": "en-us",
     "en_US": "en-us",
     "en_us": "en-us",
-    "en": "en-us",
     "en-GB": "en-gb",
     "en-gb": "en-gb",
     "en_GB": "en-gb",
@@ -28,42 +27,49 @@ VOICE_REGISTRY: dict[str, dict[str, Any]] = {
     "af_heart": {
         "language": "en-US",
         "gender": "female",
+        "label": "Heart (US Female)",
         "description": "US Female (Warm / Expressive Flagship Narration)",
         "is_default": True,
     },
     "af_bella": {
         "language": "en-US",
         "gender": "female",
+        "label": "Bella (US Female)",
         "description": "US Female (Crisp / Direct)",
         "is_default": False,
     },
     "am_michael": {
         "language": "en-US",
         "gender": "male",
+        "label": "Michael (US Male)",
         "description": "US Male (Expository / Documentary)",
         "is_default": True,
     },
     "am_fenrir": {
         "language": "en-US",
         "gender": "male",
+        "label": "Fenrir (US Male)",
         "description": "US Male (Deep Baritone / Cinematic)",
         "is_default": False,
     },
     "am_puck": {
         "language": "en-US",
         "gender": "male",
+        "label": "Puck (US Male)",
         "description": "US Male (Energetic / Conversational)",
         "is_default": False,
     },
     "bf_emma": {
         "language": "en-GB",
         "gender": "female",
+        "label": "Emma (UK Female)",
         "description": "UK Female (BBC / Authoritative)",
         "is_default": True,
     },
     "bm_george": {
         "language": "en-GB",
         "gender": "male",
+        "label": "George (UK Male)",
         "description": "UK Male (Classical British Expository)",
         "is_default": True,
     },
@@ -84,10 +90,15 @@ DEFAULT_SPEED = 1.0
 # Explicit speed bounds: presets 0.9, 1.0, 1.1; supported range [0.8, 1.2]
 MIN_SPEED = 0.8
 MAX_SPEED = 1.2
+SPEED_PRESETS = [0.9, 1.0, 1.1]
 
 # Profiles
 SUPPORTED_PROFILES = {"fast", "quality"}
 DEFAULT_PROFILE = "quality"
+
+# Devices
+SUPPORTED_DEVICES = {"auto", "cpu", "cuda"}
+DEFAULT_DEVICE = "auto"
 
 
 def normalize_language(lang: str | None) -> tuple[str, str]:
@@ -106,7 +117,7 @@ def normalize_language(lang: str | None) -> tuple[str, str]:
 
 
 def validate_voice(voice: str | None, language: str | None = None) -> str:
-    """Validate voice against explicit registry. Rejects unknown voices clearly."""
+    """Validate voice against explicit registry and language compatibility."""
     if not voice or voice in ("default", "neutral_default"):
         canonical_lang, _ = normalize_language(language)
         return DEFAULT_VOICES.get((canonical_lang, "female"), DEFAULT_OVERALL_VOICE)
@@ -118,14 +129,14 @@ def validate_voice(voice: str | None, language: str | None = None) -> str:
             f"Unsupported voice '{cleaned}'. Supported voices: {valid_voices}"
         )
 
-    # Optional cross-check: warn or verify language compatibility
+    # Cross-check: strict language compatibility
     if language:
         canonical_lang, _ = normalize_language(language)
         expected_lang = VOICE_REGISTRY[cleaned]["language"]
         if canonical_lang != expected_lang:
-            # Voice belongs to different accent (e.g. bf_emma with en-US)
-            # We allow it if explicitly requested, but keep strict registration
-            pass
+            raise VoiceNotFoundError(
+                f"Voice '{cleaned}' ({expected_lang}) is incompatible with language '{canonical_lang}'"
+            )
 
     return cleaned
 
@@ -157,5 +168,17 @@ def validate_profile(profile: str | None) -> str:
     if cleaned not in SUPPORTED_PROFILES:
         raise ValueError(
             f"Unsupported profile '{profile}'. Supported: {', '.join(sorted(SUPPORTED_PROFILES))}"
+        )
+    return cleaned
+
+
+def validate_device(device: str | None) -> str:
+    """Validate synthesis device ('auto', 'cpu', or 'cuda')."""
+    if not device:
+        return DEFAULT_DEVICE
+    cleaned = device.strip().lower()
+    if cleaned not in SUPPORTED_DEVICES:
+        raise ValueError(
+            f"Unsupported device '{device}'. Supported: {', '.join(sorted(SUPPORTED_DEVICES))}"
         )
     return cleaned
