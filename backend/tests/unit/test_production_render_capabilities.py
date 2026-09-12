@@ -26,10 +26,10 @@ def test_capability_contract_uses_canonical_defaults_and_supported_fields():
         field for field in capabilities.subtitle.fields if field.name == "min_font_size"
     ).user_editable is False
     assert capabilities.video.fps_mode == "CFR"
-    assert capabilities.video.target_fps == 12
+    assert capabilities.video.target_fps == 24
     assert capabilities.video.user_editable is False
     assert capabilities.text_fitting.truncation_provenance is True
-    assert capabilities.subtitle_timing_label == "Estimated word timing"
+    assert capabilities.subtitle_timing_label == "Full-sentence cue timing"
 
 
 @pytest.mark.asyncio
@@ -43,7 +43,7 @@ async def test_render_capability_endpoint_is_read_only_and_typed():
     assert payload["subtitle"]["defaults"]["font_size"] == 48
     assert payload["video"] == {
         "fps_mode": "CFR",
-        "target_fps": 12,
+        "target_fps": 24,
         "user_editable": False,
     }
 

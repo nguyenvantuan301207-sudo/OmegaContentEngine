@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict
 
 from omega.application.subtitle_engine import SubtitleRenderStyle
+from omega.application.subtitle_presets import SubtitlePreset, get_subtitle_presets
 
 TruthState = Literal["RENDER_APPLIED", "PREVIEW_ONLY", "UNSUPPORTED"]
 
@@ -26,6 +27,7 @@ class SubtitleCapabilities(BaseModel):
     fields: tuple[SubtitleFieldCapability, ...]
     font_families: tuple[str, ...]
     alignments: dict[int, str]
+    presets: tuple[SubtitlePreset, ...] = ()
 
 
 class TextFittingCapabilities(BaseModel):
@@ -76,6 +78,7 @@ def get_production_render_capabilities() -> ProductionRenderCapabilities:
                 5: "Center",
                 8: "Top center",
             },
+            presets=get_subtitle_presets(),
         ),
         text_fitting=TextFittingCapabilities(
             wrap=True,
@@ -83,6 +86,6 @@ def get_production_render_capabilities() -> ProductionRenderCapabilities:
             truncation_fallback=True,
             truncation_provenance=True,
         ),
-        video=VideoCapabilities(fps_mode="CFR", target_fps=12, user_editable=False),
-        subtitle_timing_label="Estimated word timing",
+        video=VideoCapabilities(fps_mode="CFR", target_fps=24, user_editable=False),
+        subtitle_timing_label="Full-sentence cue timing",
     )

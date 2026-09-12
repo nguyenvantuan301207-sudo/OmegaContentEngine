@@ -3,7 +3,10 @@
 import { useEffect, useState, type CSSProperties } from "react";
 import { Alert, EmptyState, PageSection, StatusBadge } from "@/components/ui";
 import {
+  getChannelStyleProfile,
+  updateChannelStyleProfile,
   getMediaArtifactStreamUrl,
+  type ChannelStyleProfile,
   type MediaArtifact,
   type NarrationSegment,
   type ProductionAsset,
@@ -18,6 +21,7 @@ import {
   type SubtitleCue,
 } from "@/lib/api";
 import {
+  findMatchingPresetId,
   resolveSubtitleDraft,
   subtitleHorizontalAlignment,
   subtitleVerticalAlignment,
@@ -499,22 +503,34 @@ export function SubtitlePanel({
   subtitles,
   request,
   capabilities,
+  channelId,
   busy = false,
   onApply,
 }: {
   subtitles: SubtitleCue[];
   request: ProductionRequest | null;
   capabilities: ProductionRenderCapabilities | null;
+  channelId?: string;
   busy?: boolean;
   onApply: (style: SubtitleRenderStyle) => Promise<void>;
 }) {
   const [style, setStyle] = useState<SubtitleRenderStyle | null>(null);
   const [selectedCueId, setSelectedCueId] = useState<string | null>(subtitles[0]?.id ?? null);
   const [applyError, setApplyError] = useState<string | null>(null);
+  const [channelProfile, setChannelProfile] = useState<ChannelStyleProfile | null>(null);
+  const [channelNotice, setChannelNotice] = useState<string | null>(null);
 
   useEffect(() => {
     if (capabilities) setStyle(resolveSubtitleDraft(capabilities, request));
   }, [capabilities, request]);
+
+  useEffect(() => {
+    if (channelId) {
+      void getChannelStyleProfile(channelId)
+        .then(setChannelProfile)
+        .catch(() => setChannelProfile(null));
+    }
+  }, [channelId]);
 
   useEffect(() => {
     if (!subtitles.some((cue) => cue.id === selectedCueId)) {
@@ -529,6 +545,32 @@ export function SubtitlePanel({
   const updateStyle = <K extends keyof SubtitleRenderStyle>(key: K, value: SubtitleRenderStyle[K]) => {
     setApplyError(null);
     setStyle({ ...style, [key]: value });
+  };
+
+  const activePresetId = findMatchingPresetId(capabilities, style);
+
+  const handlePresetChange = (presetId: string) => {
+    if (presetId === "custom") return;
+    const found = capabilities.subtitle.presets?.find((p) => p.id === presetId);
+    if (found) {
+      setApplyError(null);
+      setStyle(found.style);
+    }
+  };
+
+  const handleSaveAsChannelDefault = async () => {
+    if (!channelId) return;
+    try {
+      setChannelNotice(null);
+      const updated = await updateChannelStyleProfile(channelId, {
+        preset_id: activePresetId ?? "default",
+        custom_subtitle_style: activePresetId ? null : style,
+      });
+      setChannelProfile(updated);
+      setChannelNotice("Channel style profile saved as default.");
+    } catch (err) {
+      setChannelNotice(err instanceof Error ? err.message : "Failed to save channel style profile.");
+    }
   };
 
   const appliedStyle = request?.metadata?.render_settings?.subtitle_style ?? null;
@@ -574,6 +616,22 @@ export function SubtitlePanel({
       >
         <div className="subtitle-style-layout">
           <div className="subtitle-controls">
+            {capabilities.subtitle.presets && capabilities.subtitle.presets.length > 0 && (
+              <label className="subtitle-field">
+                <span>Preset <small>RENDER_APPLIED</small></span>
+                <select
+                  value={activePresetId ?? "custom"}
+                  onChange={(event) => handlePresetChange(event.target.value)}
+                >
+                  {capabilities.subtitle.presets.map((preset) => (
+                    <option key={preset.id} value={preset.id}>
+                      {preset.name}
+                    </option>
+                  ))}
+                  {!activePresetId && <option value="custom">Custom Configuration</option>}
+                </select>
+              </label>
+            )}
             <label className="subtitle-field"><span>Font family <small>{fieldState("font_family")}</small></span><select value={style.font_family} onChange={(event) => updateStyle("font_family", event.target.value)}>{capabilities.subtitle.font_families.map((font) => <option key={font}>{font}</option>)}</select></label>
             <label className="subtitle-field"><span>Font size <small>{fieldState("font_size")}</small></span><input type="range" min="24" max="96" value={style.font_size} onChange={(event) => updateStyle("font_size", Number(event.target.value))} /><output>{style.font_size}px</output></label>
             <label className="subtitle-field subtitle-checkbox"><input type="checkbox" checked={style.bold} onChange={(event) => updateStyle("bold", event.target.checked)} /><span>Bold <small>{fieldState("bold")}</small></span></label>
@@ -587,11 +645,17 @@ export function SubtitlePanel({
             <label className="subtitle-field"><span>Maximum lines <small>{fieldState("max_lines")}</small></span><select value={style.max_lines} onChange={(event) => updateStyle("max_lines", Number(event.target.value))}><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></label>
             <label className="subtitle-field"><span>Maximum width <small>{fieldState("max_width_ratio")}</small></span><input type="range" min="0.4" max="0.95" step="0.01" value={style.max_width_ratio} onChange={(event) => updateStyle("max_width_ratio", Number(event.target.value))} /><output>{Math.round(style.max_width_ratio * 100)}%</output></label>
             <div className="subtitle-field subtitle-readonly"><span>Minimum fitted font size <small>RENDER_APPLIED · advanced</small></span><strong>{style.min_font_size}px</strong></div>
-            <button type="button" className="btn primary" disabled={!request || busy || !draftChanged} onClick={async () => { try { setApplyError(null); await onApply(style); } catch (error) { setApplyError(error instanceof Error ? error.message : "Could not apply render settings."); } }}>Apply to next render</button>
+            <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+              <button type="button" className="btn primary" disabled={!request || busy || !draftChanged} onClick={async () => { try { setApplyError(null); await onApply(style); } catch (error) { setApplyError(error instanceof Error ? error.message : "Could not apply render settings."); } }}>Apply to next render</button>
+              {channelId && (
+                <button type="button" className="btn secondary" disabled={busy} onClick={handleSaveAsChannelDefault}>Save as Channel Default</button>
+              )}
+            </div>
             {applyError && <Alert tone="danger" title="Settings were not applied">{applyError}</Alert>}
+            {channelNotice && <Alert tone="success" title="Channel Style Profile">{channelNotice}</Alert>}
             <div className="subtitle-render-truth">
               <strong>Renderer truth</strong>
-              <span>Wrap: supported · Font downscale: supported · Truncation fallback: possible.</span>
+              <span>Preset: {activePresetId ?? "custom"} · Wrap: supported · Font downscale: supported.</span>
               <span>Timing: {capabilities.subtitle_timing_label}. It is not forced alignment.</span>
               <span>FPS mode: {capabilities.video.fps_mode} · Target FPS: {capabilities.video.target_fps} · read-only.</span>
             </div>
@@ -602,6 +666,8 @@ export function SubtitlePanel({
               {selectedCue ? <span className="subtitle-preview-caption" style={captionStyle}>{selectedCue.text}</span> : <div className="subtitle-preview-empty"><strong>No persisted subtitle text</strong><span>Prepare a production with subtitle cues to preview renderer-backed appearance.</span></div>}
             </div>
             <div className="subtitle-state-stack">
+              <span><b>Preset</b>{activePresetId ? capabilities.subtitle.presets?.find((p) => p.id === activePresetId)?.name ?? activePresetId : "Custom"}</span>
+              <span><b>Channel Default</b>{channelProfile ? `${channelProfile.preset_id}${channelProfile.custom_subtitle_style ? " (custom)" : ""}` : "Default"}</span>
               <span><b>Draft</b>{draftChanged ? "Unsaved selection" : "Matches applied configuration"}</span>
               <span><b>Render Applied</b>{appliedStyle ? `${appliedStyle.font_size}px · ${appliedStyle.primary_color} · margin ${appliedStyle.margin_v}` : "Backend defaults until explicitly applied"}</span>
               <span><b>From Artifact</b>{artifactStyle ? `${artifactStyle.font_size}px · ${artifactStyle.primary_color} · margin ${artifactStyle.margin_v}` : "No persisted artifact provenance"}</span>

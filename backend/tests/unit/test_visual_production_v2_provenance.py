@@ -10,10 +10,13 @@ from omega.application.storyboard_engine import (
     StoryboardScene,
     VisualStrategy,
 )
+from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.application.visual_production_v2_service import (
+    VerticalSliceError,
     VisualProductionV2Service,
 )
 from omega.infrastructure.models import (
+    ChannelDNARevision,
     ContentGenerationRequest,
     Mission,
     MissionExecution,
@@ -51,7 +54,17 @@ def base_service_kwargs(tmp_path, mock_storage):
             b"muxed"
         )
 
+    async def mock_burn_ass_subtitles(video_path, ass_path, output_path):
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(
+            b"\x00\x00\x00\x18ftypmp42"
+            b"\x00\x00\x00\x00mp42isom"
+            b"subtitled"
+        )
+
     ffmpeg_renderer.mux_video_audio.side_effect = mock_mux_video_audio
+    ffmpeg_renderer.burn_ass_subtitles.side_effect = mock_burn_ass_subtitles
 
     return {
         "asset_orchestrator": AsyncMock(),
@@ -66,12 +79,15 @@ def base_service_kwargs(tmp_path, mock_storage):
 
 def _setup_mock_db(mock_session, execution_id, request_id):
     mission = Mission(id=uuid.uuid4(), channel_id="test-chan")
+    dna_rev_id = uuid.uuid4()
+    dna_rev = ChannelDNARevision(id=dna_rev_id, channel_id=mission.channel_id, snapshot={})
     exec_record = MissionExecution(
         id=execution_id,
         mission_id=mission.id,
-        channel_dna_revision_id=uuid.uuid4(),
+        channel_dna_revision_id=dna_rev_id,
     )
     exec_record.mission = mission
+    exec_record.channel_dna_revision = dna_rev
 
     mock_exec_res = MagicMock()
     mock_exec_res.scalar_one_or_none.return_value = exec_record
@@ -140,7 +156,7 @@ async def test_provenance_neural_production(mock_session, base_service_kwargs):
 
     # Ensure final temp exists
     # Wait, the code creates it inside the run dir work dir, we'll mock the concatenate
-    async def mock_concat(clip_paths, output_path, srt_path):
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"ftyp dummy final")
     base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
@@ -200,7 +216,7 @@ async def test_provenance_development_fallback_dominates(mock_session, base_serv
     )
     (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
 
-    async def mock_concat(clip_paths, output_path, srt_path):
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"ftyp dummy final")
     base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
@@ -277,7 +293,7 @@ async def test_provenance_deduplication(mock_session, base_service_kwargs):
     )
     (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
 
-    async def mock_concat(clip_paths, output_path, srt_path):
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"ftyp dummy final")
     base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
@@ -424,7 +440,7 @@ async def test_provenance_actual_duration_overrides_estimates(mock_session, base
     )
     (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
 
-    async def mock_concat(clip_paths, output_path, srt_path):
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"ftyp dummy final")
     base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
@@ -476,7 +492,7 @@ async def test_provenance_global_runtime_karaoke_timeline(mock_session, base_ser
     )
     (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
 
-    async def mock_concat(clip_paths, output_path, srt_path):
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"ftyp dummy final")
     base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
@@ -551,7 +567,7 @@ async def test_provenance_fallback_mixed_runtime_durations(mock_session, base_se
     )
     (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
 
-    async def mock_concat(clip_paths, output_path, srt_path):
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"ftyp dummy final")
     base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
@@ -599,7 +615,7 @@ async def test_provenance_subtitles_disabled_narration_present(mock_session, bas
     )
     (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
 
-    async def mock_concat(clip_paths, output_path, srt_path):
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"ftyp dummy final")
     base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
@@ -679,7 +695,7 @@ async def test_provenance_fresh_manifest_persistence(mock_session, base_service_
     )
     (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
 
-    async def mock_concat(clip_paths, output_path, srt_path):
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(b"ftyp dummy final")
     base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
@@ -710,3 +726,201 @@ async def test_provenance_fresh_manifest_persistence(mock_session, base_service_
             assert len(data["runtime_narration_segments"]) == 1
             assert data["runtime_narration_segments"][0]["duration_ms"] == 2000
             assert data["runtime_subtitle_cues"] == []
+
+
+@pytest.mark.asyncio
+async def test_provenance_subtitle_semantics_sentence_default(mock_session, base_service_kwargs):
+    service = VisualProductionV2Service(**base_service_kwargs)
+
+    base_service_kwargs["video_renderer"].render_clip.return_value = MagicMock(
+        output_path=base_service_kwargs["output_root"] / "clip.mp4",
+        video_sha256="abc",
+        template_id="test",
+        duration_seconds=2.0,
+    )
+    (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
+
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"ftyp dummy final")
+    base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
+
+    base_service_kwargs["narration_provider"].synthesize_segment_audio.side_effect = [
+        {"storage_uri": "s3://audio/1", "duration_ms": 2000, "content_hash": "h1"}
+    ]
+
+    exec_id = uuid.uuid4()
+    req_id = uuid.uuid4()
+    _setup_mock_db(mock_session, exec_id, req_id)
+
+    with patch("omega.application.visual_production_v2_service.StoryboardEngine.generate_storyboard") as mock_gen:
+        mock_plan = MagicMock()
+        mock_plan.scenes = [
+            StoryboardScene(sequence_index=1, section_id="sec1", purpose="test", source_statement_references=[], narration_excerpt="hello", estimated_duration_seconds=2.0, visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="test", asset_query_hint=None)
+        ]
+        mock_gen.return_value = mock_plan
+
+        with patch.object(service, "_ensure_meaningful_query"):
+            res = await service.render_mission_execution(mock_session, exec_id, req_id, subtitle_enabled=True)
+
+            manifest_path = res.output_path.parent / "manifest.json"
+            assert manifest_path.exists()
+            data = json.loads(manifest_path.read_text())
+
+            assert data["subtitle_enabled"] is True
+            assert data["karaoke_subtitles_enabled"] is False
+            assert data["subtitle_mode"] == "sentence"
+            assert res.subtitle_enabled is True
+            assert res.karaoke_subtitles_enabled is False
+            assert res.subtitle_mode == "sentence"
+
+
+@pytest.mark.asyncio
+async def test_provenance_subtitle_semantics_karaoke_opt_in(mock_session, base_service_kwargs):
+    service = VisualProductionV2Service(**base_service_kwargs)
+
+    base_service_kwargs["video_renderer"].render_clip.return_value = MagicMock(
+        output_path=base_service_kwargs["output_root"] / "clip.mp4",
+        video_sha256="abc",
+        template_id="test",
+        duration_seconds=2.0,
+    )
+    (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
+
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"ftyp dummy final")
+    base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
+
+    base_service_kwargs["narration_provider"].synthesize_segment_audio.side_effect = [
+        {"storage_uri": "s3://audio/1", "duration_ms": 2000, "content_hash": "h1"}
+    ]
+
+    exec_id = uuid.uuid4()
+    req_id = uuid.uuid4()
+    _setup_mock_db(mock_session, exec_id, req_id)
+
+    with patch("omega.application.visual_production_v2_service.StoryboardEngine.generate_storyboard") as mock_gen:
+        mock_plan = MagicMock()
+        mock_plan.scenes = [
+            StoryboardScene(sequence_index=1, section_id="sec1", purpose="test", source_statement_references=[], narration_excerpt="hello", estimated_duration_seconds=2.0, visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="test", asset_query_hint=None)
+        ]
+        mock_gen.return_value = mock_plan
+
+        with patch.object(service, "_ensure_meaningful_query"):
+            karaoke_style = SubtitleRenderStyle(karaoke=True)
+            res = await service.render_mission_execution(
+                mock_session, exec_id, req_id, subtitle_enabled=True, subtitle_style=karaoke_style
+            )
+
+            manifest_path = res.output_path.parent / "manifest.json"
+            assert manifest_path.exists()
+            data = json.loads(manifest_path.read_text())
+
+            assert data["subtitle_enabled"] is True
+            assert data["karaoke_subtitles_enabled"] is True
+            assert data["subtitle_mode"] == "karaoke"
+            assert res.subtitle_enabled is True
+            assert res.karaoke_subtitles_enabled is True
+            assert res.subtitle_mode == "karaoke"
+
+
+@pytest.mark.asyncio
+async def test_provenance_subtitle_semantics_disabled(mock_session, base_service_kwargs):
+    service = VisualProductionV2Service(**base_service_kwargs)
+
+    base_service_kwargs["video_renderer"].render_clip.return_value = MagicMock(
+        output_path=base_service_kwargs["output_root"] / "clip.mp4",
+        video_sha256="abc",
+        template_id="test",
+        duration_seconds=2.0,
+    )
+    (base_service_kwargs["output_root"] / "clip.mp4").write_bytes(b"ftyp dummy video")
+
+    async def mock_concat(clip_paths, output_path, srt_path, *args, **kwargs):
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"ftyp dummy final")
+    base_service_kwargs["ffmpeg_renderer"].concatenate_clips.side_effect = mock_concat
+
+    base_service_kwargs["narration_provider"].synthesize_segment_audio.side_effect = [
+        {"storage_uri": "s3://audio/1", "duration_ms": 2000, "content_hash": "h1"}
+    ]
+
+    exec_id = uuid.uuid4()
+    req_id = uuid.uuid4()
+    _setup_mock_db(mock_session, exec_id, req_id)
+
+    with patch("omega.application.visual_production_v2_service.StoryboardEngine.generate_storyboard") as mock_gen:
+        mock_plan = MagicMock()
+        mock_plan.scenes = [
+            StoryboardScene(sequence_index=1, section_id="sec1", purpose="test", source_statement_references=[], narration_excerpt="hello", estimated_duration_seconds=2.0, visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="test", asset_query_hint=None)
+        ]
+        mock_gen.return_value = mock_plan
+
+        with patch.object(service, "_ensure_meaningful_query"):
+            res = await service.render_mission_execution(mock_session, exec_id, req_id, subtitle_enabled=False)
+
+            manifest_path = res.output_path.parent / "manifest.json"
+            assert manifest_path.exists()
+            data = json.loads(manifest_path.read_text())
+
+            assert data["subtitle_enabled"] is False
+            assert data["karaoke_subtitles_enabled"] is False
+            assert data["subtitle_mode"] == "sentence"
+            assert res.subtitle_enabled is False
+            assert res.karaoke_subtitles_enabled is False
+            assert res.subtitle_mode == "sentence"
+
+
+@pytest.mark.asyncio
+async def test_provenance_subtitles_require_narration_wording(mock_session, base_service_kwargs):
+    base_service_kwargs["narration_provider"] = None
+    service = VisualProductionV2Service(**base_service_kwargs)
+
+    exec_id = uuid.uuid4()
+    req_id = uuid.uuid4()
+    _setup_mock_db(mock_session, exec_id, req_id)
+
+    with pytest.raises(VerticalSliceError, match="Subtitles require narration"):
+        await service.render_mission_execution(mock_session, exec_id, req_id, subtitle_enabled=True)
+
+
+@pytest.mark.asyncio
+async def test_provenance_legacy_manifest_karaoke_backward_compatibility(mock_session, base_service_kwargs):
+    service = VisualProductionV2Service(**base_service_kwargs)
+    exec_id = uuid.uuid4()
+    req_id = uuid.uuid4()
+    _setup_mock_db(mock_session, exec_id, req_id)
+
+    with patch("omega.application.visual_production_v2_service.hashlib.sha256") as mock_sha:
+        mock_hash = MagicMock()
+        mock_hash.hexdigest.return_value = "fake_fingerprint_legacy_sub"
+        mock_sha.return_value = mock_hash
+
+        run_dir = base_service_kwargs["output_root"] / str(exec_id) / "fake_fingerprint_legacy_sub"
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        final_mp4 = run_dir / "final.mp4"
+        final_mp4.write_bytes(b"ftyp dummy")
+
+        manifest_path = run_dir / "manifest.json"
+        manifest_path.write_text(json.dumps({
+            "run_fingerprint": "fake_fingerprint_legacy_sub",
+            "content_sha256": "fake_sha",
+            "scene_count": 1,
+            "template_scene_count": 1,
+            "image_scene_count": 0,
+            "broll_scene_count": 0,
+            "duration_seconds": 2.0,
+            "width": 1920,
+            "height": 1080,
+            "fps": 24,
+            "karaoke_subtitles_enabled": True,
+        }))
+
+        with patch.object(service, "_compute_streaming_sha", return_value="fake_sha"):
+            res = await service.render_mission_execution(mock_session, exec_id, req_id)
+
+            assert res.subtitle_enabled is True
+            assert res.karaoke_subtitles_enabled is True
+            assert res.subtitle_mode == "karaoke"

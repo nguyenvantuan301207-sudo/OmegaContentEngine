@@ -31,7 +31,6 @@ from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.narration_provider import NarrationProvider
 from omega.application.storyboard_engine import (
     StoryboardEngine,
-    StoryboardPlan,
     StoryboardScene,
     VisualStrategy,
 )
@@ -47,8 +46,10 @@ from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import VisualAssetKind, VisualDirector
 from omega.application.visual_template_renderer import VisualTemplateRenderer
 from omega.domain.channel_dna import BrandFormat, resolve_production_brand_spec
+from omega.domain.channel_style import ChannelStyleProfile, extract_channel_style_profile
 from omega.infrastructure.browser_capture_runtime import BrowserCaptureRuntime
 from omega.infrastructure.models import (
+    Channel,
     ChannelDNARevision,
     ContentGenerationRequest,
     MissionExecution,
@@ -60,7 +61,6 @@ from omega.infrastructure.visual_asset_materializer import VisualAssetMaterializ
 from omega.infrastructure.visual_v2_video_renderer import VisualV2VideoRenderer
 
 _NON_ALPHANUM_REGEX = re.compile(r"[^\w\s-]")
-
 _WHITESPACE_REGEX = re.compile(r"\s+")
 
 
@@ -71,6 +71,8 @@ class VerticalSliceError(Exception):
 KARAOKE_SUBTITLE_VERSION = "v1"
 KARAOKE_MAX_WORDS_PER_CUE = 5
 KARAOKE_MAX_CHARS_PER_CUE = 36
+SENTENCE_MAX_WORDS_PER_CUE = 16
+SENTENCE_MAX_CHARS_PER_CUE = 80
 
 VISUAL_DIRECTOR_VERSION = "v2"
 
@@ -163,7 +165,11 @@ class VerticalSliceRenderResult(BaseModel):
     runtime_subtitle_cues: tuple[VerticalSliceRuntimeSubtitleCue, ...] = ()
     runtime_scenes: tuple[VerticalSliceSceneResult, ...] = ()
     subtitle_style_applied: SubtitleRenderStyle | None = None
+    style_profile_applied: ChannelStyleProfile | None = None
     effective_fps_mode: str = "CFR"
+    subtitle_enabled: bool = False
+    karaoke_subtitles_enabled: bool = False
+    subtitle_mode: str = "sentence"
 
 
 _STOPWORDS = frozenset({
@@ -277,13 +283,14 @@ class VisualProductionV2Service:
         mission_execution_id: UUID,
         content_request_id: UUID,
         *,
-        fps: int = 12,
+        fps: int = 24,
         voice_profile: dict[str, Any] | None = None,
         background_music: VerticalSliceBackgroundMusicInput | None = None,
         sfx_inputs: list[VerticalSliceSFXInput] | None = None,
         audio_mix_enabled: bool = False,
         subtitle_enabled: bool = False,
         subtitle_style: SubtitleRenderStyle | None = None,
+        style_profile: ChannelStyleProfile | None = None,
     ) -> VerticalSliceRenderResult:
         audio_mix_enabled = background_music is not None or bool(sfx_inputs)
 
@@ -399,9 +406,28 @@ class VisualProductionV2Service:
         if not script_version:
             raise VerticalSliceError(f"No ScriptVersion available for request '{content_request_id}'")
 
+        if style_profile is None and mission.channel_id:
+            try:
+                ch_stmt = select(Channel).where(Channel.id == mission.channel_id)
+                ch_res = await session.execute(ch_stmt)
+                ch = ch_res.scalar_one_or_none()
+                if ch:
+                    style_profile = extract_channel_style_profile(ch.metadata_)
+                else:
+                    style_profile = ChannelStyleProfile()
+            except Exception:
+                style_profile = ChannelStyleProfile()
+        elif style_profile is None:
+            style_profile = ChannelStyleProfile()
+
         if subtitle_enabled and not self._narration_provider:
-            raise VerticalSliceError("Karaoke subtitles require narration")
-        resolved_subtitle_style = subtitle_style or SubtitleRenderStyle()
+            raise VerticalSliceError("Subtitles require narration")
+        if subtitle_style is not None:
+            resolved_subtitle_style = subtitle_style
+        elif style_profile is not None:
+            resolved_subtitle_style = style_profile.resolve_effective_style()
+        else:
+            resolved_subtitle_style = SubtitleRenderStyle()
 
         # 3. Deterministic Run Fingerprint & Idempotency Check
         fingerprint_input = (
@@ -410,6 +436,8 @@ class VisualProductionV2Service:
             f"visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:"
             f"visual-asset-mode:{self._visual_asset_mode}"
         )
+        if style_profile:
+            fingerprint_input += f":style-profile-v1:{style_profile.model_dump_json()}"
         if resolved_brand.identity is not None:
             fingerprint_input += f":brand-spec-v1:{resolved_brand.identity}"
         resolved_brand_identity = self._resolved_brand_asset_identity(
@@ -432,7 +460,6 @@ class VisualProductionV2Service:
                 subtitle_marker = f"karaoke:{KARAOKE_SUBTITLE_VERSION}:words={KARAOKE_MAX_WORDS_PER_CUE}:chars={KARAOKE_MAX_CHARS_PER_CUE}"
                 fingerprint_input += f":{subtitle_marker}"
                 fingerprint_input += ":style=" + resolved_subtitle_style.model_dump_json()
-
         normalized_sfx = []
         if audio_mix_enabled:
             audio_mix_fp = {}
@@ -553,7 +580,36 @@ class VisualProductionV2Service:
                         if manifest_data.get("subtitle_style_applied")
                         else None
                     ),
+                    style_profile_applied=(
+                        ChannelStyleProfile(**manifest_data["style_profile_applied"])
+                        if manifest_data.get("style_profile_applied")
+                        else None
+                    ),
                     effective_fps_mode=manifest_data.get("effective_fps_mode", "CFR"),
+                    subtitle_enabled=bool(
+                        manifest_data.get("subtitle_enabled", manifest_data.get("karaoke_subtitles_enabled", False))
+                    ),
+                    karaoke_subtitles_enabled=bool(
+                        manifest_data.get("karaoke_subtitles_enabled", False)
+                        if "subtitle_enabled" in manifest_data
+                        else (
+                            manifest_data.get("subtitle_style_applied", {}).get("karaoke", False)
+                            if manifest_data.get("subtitle_style_applied")
+                            else manifest_data.get("karaoke_subtitles_enabled", False)
+                        )
+                    ),
+                    subtitle_mode=str(
+                        manifest_data.get(
+                            "subtitle_mode",
+                            "karaoke" if (
+                                manifest_data.get("karaoke_subtitles_enabled")
+                                and (
+                                    "subtitle_enabled" not in manifest_data
+                                    or manifest_data.get("subtitle_style_applied", {}).get("karaoke", False)
+                                )
+                            ) else "sentence"
+                        )
+                    ),
                 )
             except Exception as e:
                 raise VerticalSliceError(f"Incomplete or corrupt prior run: {e}") from e
@@ -563,7 +619,11 @@ class VisualProductionV2Service:
 
         # 4. Script -> Storyboard
         script_dict = ScriptStoryboardAdapter.to_script_dict(script_version)
-        storyboard: StoryboardPlan = self._storyboard_engine.generate_storyboard(script_dict)
+        pacing = style_profile.pacing if style_profile else "BALANCED"
+        try:
+            storyboard = self._storyboard_engine.generate_storyboard(script_dict, pacing=pacing)
+        except TypeError:
+            storyboard = self._storyboard_engine.generate_storyboard(script_dict)
 
         if not storyboard.scenes:
             raise VerticalSliceError("StoryboardEngine produced 0 scenes")
@@ -686,8 +746,9 @@ class VisualProductionV2Service:
                             try:
                                 scene_cues = generate_karaoke_cues(
                                     [segment],
-                                    max_words_per_cue=KARAOKE_MAX_WORDS_PER_CUE,
-                                    max_chars_per_cue=KARAOKE_MAX_CHARS_PER_CUE,
+                                    max_words_per_cue=KARAOKE_MAX_WORDS_PER_CUE if resolved_subtitle_style.karaoke else SENTENCE_MAX_WORDS_PER_CUE,
+                                    max_chars_per_cue=KARAOKE_MAX_CHARS_PER_CUE if resolved_subtitle_style.karaoke else SENTENCE_MAX_CHARS_PER_CUE,
+                                    sentence_mode=not resolved_subtitle_style.karaoke,
                                 )
                                 scene_subtitle_cues = len(scene_cues)
 
@@ -794,7 +855,12 @@ class VisualProductionV2Service:
                         template_scenes += 1
 
                     try:
-                        document = self._template_renderer.render(payload, assets=assets)
+                        document = self._template_renderer.render(
+                            payload,
+                            assets=assets,
+                            accent_color=style_profile.accent_color if style_profile else None,
+                            bg_color=style_profile.bg_color if style_profile else None,
+                        )
                     except Exception as e:
                         raise VerticalSliceError(f"Template renderer failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
 
@@ -1125,9 +1191,22 @@ class VisualProductionV2Service:
                 "content_sha256": final_sha,
                 **audio_mix_manifest,
                 "narration_enabled": bool(self._narration_provider),
-                "karaoke_subtitles_enabled": subtitle_enabled,
+                "subtitle_enabled": subtitle_enabled,
+                "karaoke_subtitles_enabled": bool(
+                    subtitle_enabled
+                    and resolved_subtitle_style is not None
+                    and getattr(resolved_subtitle_style, "karaoke", False)
+                ),
+                "subtitle_mode": (
+                    "karaoke"
+                    if (resolved_subtitle_style is not None and getattr(resolved_subtitle_style, "karaoke", False))
+                    else "sentence"
+                ),
                 "subtitle_style_applied": (
                     resolved_subtitle_style.model_dump() if subtitle_enabled else None
+                ),
+                "style_profile_applied": (
+                    style_profile.model_dump() if style_profile else None
                 ),
                 "narration_provider": self._narration_provider.__class__.__name__ if self._narration_provider else None,
                 "narration_model": getattr(self._narration_provider, "model", None) if self._narration_provider else None,
@@ -1170,7 +1249,19 @@ class VisualProductionV2Service:
             runtime_subtitle_cues=tuple(runtime_subtitle_cues),
             runtime_scenes=tuple(scene_results),
             subtitle_style_applied=resolved_subtitle_style if subtitle_enabled else None,
+            style_profile_applied=style_profile,
             effective_fps_mode="CFR",
+            subtitle_enabled=subtitle_enabled,
+            karaoke_subtitles_enabled=bool(
+                subtitle_enabled
+                and resolved_subtitle_style is not None
+                and getattr(resolved_subtitle_style, "karaoke", False)
+            ),
+            subtitle_mode=(
+                "karaoke"
+                if (resolved_subtitle_style is not None and getattr(resolved_subtitle_style, "karaoke", False))
+                else "sentence"
+            ),
         )
 
 
@@ -1206,7 +1297,7 @@ class VisualProductionV2Service:
         if manifest.get("scene_artifacts_version") != "v1":
             raise VerticalSliceError("Scene preview unavailable for legacy run")
 
-        if manifest.get("narration_enabled") or manifest.get("karaoke_subtitles_enabled") or manifest.get("audio_mix_enabled"):
+        if manifest.get("narration_enabled") or manifest.get("karaoke_subtitles_enabled") or manifest.get("subtitle_enabled") or manifest.get("audio_mix_enabled"):
             raise VerticalSliceError("V1 regeneration unsupported for audio/subtitle enabled base runs")
 
         base_scenes = manifest.get("scenes", [])
@@ -1380,8 +1471,16 @@ class VisualProductionV2Service:
                 else:
                     raise VerticalSliceError(f"Unsupported asset requirement kind: {req_spec.kind}")
 
+            base_style_profile = manifest.get("style_profile_applied")
+            accent_color = base_style_profile.get("accent_color") if base_style_profile else None
+            bg_color = base_style_profile.get("bg_color") if base_style_profile else None
             try:
-                document = self._template_renderer.render(payload, assets=assets)
+                document = self._template_renderer.render(
+                    payload,
+                    assets=assets,
+                    accent_color=accent_color,
+                    bg_color=bg_color,
+                )
             except Exception as e:
                 raise VerticalSliceError(f"Template renderer failed: {self._sanitize_error(e)}") from e
 

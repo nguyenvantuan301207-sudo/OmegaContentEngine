@@ -41,6 +41,8 @@ class VisualTemplateRenderer:
         self,
         payload: TemplatePayload,
         assets: tuple[RenderBoundAsset, ...] = (),
+        accent_color: str | None = None,
+        bg_color: str | None = None,
     ) -> RenderedTemplateDocument:
         if payload.template_id not in (
             VisualTemplateId.HERO_TITLE,
@@ -106,6 +108,8 @@ class VisualTemplateRenderer:
             html_content,
             transparent_background=transparent_bg,
             fitted_text_css=fit_css,
+            accent_color=accent_color,
+            bg_color=bg_color,
         )
 
         sha256 = hashlib.sha256(final_html.encode("utf-8")).hexdigest()
@@ -181,13 +185,20 @@ class VisualTemplateRenderer:
         body_content: str,
         transparent_background: bool = False,
         fitted_text_css: str = "",
+        accent_color: str | None = None,
+        bg_color: str | None = None,
     ) -> str:
+        base_css = self._get_base_css(
+            transparent_background=transparent_background,
+            accent_color=accent_color,
+            bg_color=bg_color,
+        )
         return f"""<!doctype html>
 <html>
 <head>
 <meta charset="utf-8">
 <style>
-{self._get_base_css(transparent_background=transparent_background)}
+{base_css}
 {fitted_text_css}
 </style>
 </head>
@@ -198,18 +209,25 @@ class VisualTemplateRenderer:
 </body>
 </html>"""
 
-    def _get_base_css(self, transparent_background: bool = False) -> str:
+    def _get_base_css(
+        self,
+        transparent_background: bool = False,
+        accent_color: str | None = None,
+        bg_color: str | None = None,
+    ) -> str:
+        accent = accent_color or "#3B82F6"
+        bg = bg_color or "#0B0F19"
         if transparent_background:
-            return """
-        :root {
+            return f"""
+        :root {{
             --bg: transparent;
             --text-primary: #F1F5F9;
             --text-secondary: #94A3B8;
-            --accent: #3B82F6;
+            --accent: {accent};
             --surface: rgba(30, 41, 59, 0.7);
             --surface-border: rgba(255, 255, 255, 0.1);
-        }
-        body, html {
+        }}
+        body, html {{
             margin: 0;
             padding: 0;
             width: 1920px;
@@ -221,8 +239,8 @@ class VisualTemplateRenderer:
             display: flex;
             align-items: center;
             justify-content: center;
-        }
-        .scene-root {
+        }}
+        .scene-root {{
             width: 1920px;
             height: 1080px;
             position: relative;
@@ -230,19 +248,19 @@ class VisualTemplateRenderer:
             box-sizing: border-box;
             background: transparent;
             display: flex;
-        }
+        }}
         """
 
-        return """
-        :root {
-            --bg: #0B0F19;
+        return f"""
+        :root {{
+            --bg: {bg};
             --text-primary: #F1F5F9;
             --text-secondary: #94A3B8;
-            --accent: #3B82F6;
+            --accent: {accent};
             --surface: rgba(30, 41, 59, 0.7);
             --surface-border: rgba(255, 255, 255, 0.1);
-        }
-        body, html {
+        }}
+        body, html {{
             margin: 0;
             padding: 0;
             width: 1920px;
@@ -254,8 +272,8 @@ class VisualTemplateRenderer:
             display: flex;
             align-items: center;
             justify-content: center;
-        }
-        .scene-root {
+        }}
+        .scene-root {{
             width: 1920px;
             height: 1080px;
             position: relative;
@@ -264,7 +282,7 @@ class VisualTemplateRenderer:
             background: radial-gradient(circle at top left, rgba(59, 130, 246, 0.1), transparent 50%),
                         radial-gradient(circle at bottom right, rgba(99, 102, 241, 0.05), transparent 50%);
             display: flex;
-        }
+        }}
         """
 
     def _render_hero_title(self, payload: TemplatePayload) -> tuple[str, list[str]]:

@@ -45,7 +45,7 @@ class VisualV2VideoRenderer:
         duration_seconds: float,
         output_path: Path,
         browser_runtime: BrowserCaptureRuntime,
-        fps: int = 12,
+        fps: int = 24,
         timeout_seconds: int = 120,
         broll_asset: BoundBrollAsset | None = None,
     ) -> VisualV2VideoRenderResult:

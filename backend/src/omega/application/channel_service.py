@@ -27,6 +27,12 @@ from omega.domain.channel import (
 )
 from omega.domain.channel_context import ChannelContext
 from omega.domain.channel_dna import ChannelDNA
+from omega.domain.channel_style import (
+    ChannelStyleProfile,
+    ChannelStyleProfileResponse,
+    ChannelStyleProfileUpdate,
+    extract_channel_style_profile,
+)
 from omega.infrastructure.models import Channel, ChannelDNARevision
 from omega.logging import get_logger
 
@@ -397,4 +403,66 @@ async def get_channel_context(session: AsyncSession, channel_id: UUID) -> Channe
         timezone=channel.timezone,
         dna=ChannelDNA.model_validate(channel.dna),
         active_dna_version=active_version,
+    )
+
+
+async def get_channel_style_profile(
+    session: AsyncSession, channel_id: UUID
+) -> ChannelStyleProfileResponse | None:
+    """Retrieve the style profile for a channel."""
+    res = await session.execute(select(Channel).where(Channel.id == channel_id))
+    channel = res.scalar_one_or_none()
+    if not channel:
+        return None
+    profile = extract_channel_style_profile(channel.metadata_)
+    return ChannelStyleProfileResponse(
+        channel_id=channel.id,
+        preset_id=profile.preset_id,
+        custom_subtitle_style=profile.custom_subtitle_style,
+        effective_subtitle_style=profile.resolve_effective_style(),
+        pacing=profile.pacing,
+        accent_color=profile.accent_color,
+        bg_color=profile.bg_color,
+        notes=profile.notes,
+    )
+
+
+async def update_channel_style_profile(
+    session: AsyncSession, channel_id: UUID, update: ChannelStyleProfileUpdate
+) -> ChannelStyleProfileResponse | None:
+    """Update and persist the style profile for a channel."""
+    res = await session.execute(select(Channel).where(Channel.id == channel_id).with_for_update())
+    channel = res.scalar_one_or_none()
+    if not channel:
+        return None
+
+    if channel.state == ChannelState.ARCHIVED.value:
+        raise ValueError("Cannot update style profile for an archived channel.")
+
+    profile = ChannelStyleProfile(
+        preset_id=update.preset_id,
+        custom_subtitle_style=update.custom_subtitle_style,
+        pacing=update.pacing,
+        accent_color=update.accent_color,
+        bg_color=update.bg_color,
+        notes=update.notes,
+    )
+
+    metadata = dict(channel.metadata_ or {})
+    metadata["style_profile"] = profile.model_dump()
+    channel.metadata_ = metadata
+    channel.updated_at = datetime.now(UTC)
+
+    await session.commit()
+    logger.info("Channel style profile updated", channel_id=str(channel.id), preset_id=profile.preset_id)
+
+    return ChannelStyleProfileResponse(
+        channel_id=channel.id,
+        preset_id=profile.preset_id,
+        custom_subtitle_style=profile.custom_subtitle_style,
+        effective_subtitle_style=profile.resolve_effective_style(),
+        pacing=profile.pacing,
+        accent_color=profile.accent_color,
+        bg_color=profile.bg_color,
+        notes=profile.notes,
     )

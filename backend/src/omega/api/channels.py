@@ -24,6 +24,10 @@ from omega.domain.channel import (
 )
 from omega.domain.channel_context import ChannelContext
 from omega.domain.channel_dna import ChannelDNA
+from omega.domain.channel_style import (
+    ChannelStyleProfileResponse,
+    ChannelStyleProfileUpdate,
+)
 
 router = APIRouter(prefix="/api/v1/channels", tags=["Channels"])
 
@@ -226,3 +230,37 @@ async def get_channel_context(
             detail=f"Channel '{channel_id}' not found",
         )
     return context
+
+
+@router.get("/{channel_id}/style-profile", response_model=ChannelStyleProfileResponse)
+async def get_channel_style_profile(
+    channel_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ChannelStyleProfileResponse:
+    """Retrieve default styling and subtitle preset profile for a channel."""
+    profile = await channel_service.get_channel_style_profile(db, channel_id)
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Channel '{channel_id}' not found",
+        )
+    return profile
+
+
+@router.put("/{channel_id}/style-profile", response_model=ChannelStyleProfileResponse)
+async def update_channel_style_profile(
+    channel_id: UUID,
+    profile_in: ChannelStyleProfileUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ChannelStyleProfileResponse:
+    """Update styling and subtitle preset profile for a channel."""
+    try:
+        updated = await channel_service.update_channel_style_profile(db, channel_id, profile_in)
+        if not updated:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Channel '{channel_id}' not found",
+            )
+        return updated
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc

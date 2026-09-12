@@ -18,6 +18,10 @@ from omega.application.media_storage import LocalMediaStorageProvider, compute_s
 from omega.application.production_qa import ProductionQAEngine
 from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.application.template_payload_resolver import TemplatePayloadError
+from omega.domain.channel_style import (
+    extract_channel_style_profile,
+    resolve_effective_subtitle_style,
+)
 from omega.domain.production import (
     AssetType,
     MediaArtifactType,
@@ -28,6 +32,7 @@ from omega.domain.production import (
     RenderJobState,
 )
 from omega.infrastructure.models import (
+    Channel,
     ContentGenerationRequest,
     MediaArtifact,
     MissionExecution,
@@ -793,8 +798,18 @@ class ProductionRenderService:
             raise ValueError(f"V2 unsupported codec: {video_codec}")
 
         render_settings = dict(req.metadata_ or {}).get("render_settings", {})
-        subtitle_style = SubtitleRenderStyle.model_validate(
-            render_settings.get("subtitle_style", {})
+        raw_subtitle_style = render_settings.get("subtitle_style")
+
+        channel_style = None
+        if req.channel_id:
+            ch_res = await session.execute(select(Channel).where(Channel.id == req.channel_id))
+            ch = ch_res.scalar_one_or_none()
+            if ch:
+                channel_style = extract_channel_style_profile(ch.metadata_)
+
+        subtitle_style = resolve_effective_subtitle_style(
+            channel_style=channel_style,
+            request_subtitle_style=SubtitleRenderStyle.model_validate(raw_subtitle_style) if raw_subtitle_style else None,
         )
 
         # V2 execution
@@ -806,6 +821,7 @@ class ProductionRenderService:
             voice_profile=req.voice_profile,
             subtitle_enabled=True,
             subtitle_style=subtitle_style,
+            style_profile=channel_style,
         )
 
         # Validate V2 Result Lineage

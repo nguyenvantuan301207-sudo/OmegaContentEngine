@@ -1629,6 +1629,14 @@ export interface SubtitleRenderStyle {
   margin_v: number;
   max_lines: number;
   max_width_ratio: number;
+  karaoke?: boolean;
+}
+
+export interface SubtitlePreset {
+  id: string;
+  name: string;
+  description: string;
+  style: SubtitleRenderStyle;
 }
 
 export interface ProductionRenderCapabilities {
@@ -1642,6 +1650,7 @@ export interface ProductionRenderCapabilities {
     }>;
     font_families: string[];
     alignments: Record<string, string>;
+    presets?: SubtitlePreset[];
   };
   text_fitting: {
     wrap: boolean;
@@ -1654,7 +1663,7 @@ export interface ProductionRenderCapabilities {
     target_fps: number;
     user_editable: boolean;
   };
-  subtitle_timing_label: "Estimated word timing";
+  subtitle_timing_label: string;
 }
 
 export interface RenderArtifactProvenance {
@@ -1669,6 +1678,26 @@ export interface ProductionRequestMetadata {
   render_settings?: { subtitle_style: SubtitleRenderStyle };
   render_provenance?: RenderArtifactProvenance;
   [key: string]: unknown;
+}
+
+export interface ChannelStyleProfile {
+  channel_id: string;
+  preset_id: string;
+  custom_subtitle_style?: SubtitleRenderStyle | null;
+  effective_subtitle_style: SubtitleRenderStyle;
+  pacing?: string;
+  accent_color?: string;
+  bg_color?: string;
+  notes?: string | null;
+}
+
+export interface ChannelStyleProfileUpdate {
+  preset_id: string;
+  custom_subtitle_style?: SubtitleRenderStyle | null;
+  pacing?: string;
+  accent_color?: string;
+  bg_color?: string;
+  notes?: string | null;
 }
 
 export interface ProductionRequest {
@@ -1868,6 +1897,20 @@ export async function updateProductionRenderSettings(
   return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/render-settings`, {
     method: "PATCH",
     body: JSON.stringify({ subtitle_style: subtitleStyle }),
+  });
+}
+
+export async function getChannelStyleProfile(channelId: string): Promise<ChannelStyleProfile> {
+  return apiFetch(`/api/v1/channels/${channelId}/style-profile`);
+}
+
+export async function updateChannelStyleProfile(
+  channelId: string,
+  profile: ChannelStyleProfileUpdate,
+): Promise<ChannelStyleProfile> {
+  return apiFetch(`/api/v1/channels/${channelId}/style-profile`, {
+    method: "PUT",
+    body: JSON.stringify(profile),
   });
 }
 

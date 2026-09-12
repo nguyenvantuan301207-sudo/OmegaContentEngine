@@ -34,6 +34,7 @@ class SubtitleRenderStyle(BaseModel):
     margin_v: int = Field(default=80, ge=0, le=400)
     max_lines: int = Field(default=2, ge=1, le=3)
     max_width_ratio: float = Field(default=0.82, ge=0.4, le=0.95)
+    karaoke: bool = False
 
     @field_validator("font_family")
     @classmethod
@@ -175,6 +176,7 @@ def generate_karaoke_cues(
     *,
     max_words_per_cue: int = 5,
     max_chars_per_cue: int = 36,
+    sentence_mode: bool = False,
 ) -> list[dict[str, Any]]:
     cues = []
     cue_order = 1
@@ -198,7 +200,7 @@ def generate_karaoke_cues(
         for w in words:
             alpha_chars = sum(1 for c in w if c.isalnum())
             base_wt = max(alpha_chars, 1)
-            if any(p in w for p in [',', ';', ':']):
+            if any(p in w for p in [',', ';', ':', '—']):
                 base_wt += 2
             if any(p in w for p in ['.', '?', '!']):
                 base_wt += 4
@@ -231,40 +233,95 @@ def generate_karaoke_cues(
         current_chars = 0
         current_start = start_ms
         current_cue_duration = 0
-        for w, wd in zip(words, word_durations, strict=True):
+
+        for idx, (w, wd) in enumerate(zip(words, word_durations, strict=True)):
             word_len = len(w)
-            if current_cue_words and (
-                len(current_cue_words) >= max_words_per_cue
-                or (current_chars + 1 + word_len) > max_chars_per_cue
-            ):
-                cues.append(
-                    {
+
+            if sentence_mode:
+                chars_to_add = word_len if not current_cue_words else word_len + 1
+                current_cue_words.append({"text": w, "duration_ms": wd})
+                current_chars += chars_to_add
+
+                is_last_word = idx == len(words) - 1
+                is_sentence_end = any(w.endswith(p) for p in [".", "!", "?"])
+                is_clause_end = any(w.endswith(p) for p in [",", ";", ":", "—"])
+                too_many_words = len(current_cue_words) >= max_words_per_cue
+                too_many_chars = current_chars >= max_chars_per_cue
+
+                should_split = not is_last_word and (
+                    is_sentence_end
+                    or ((too_many_words or too_many_chars) and is_clause_end)
+                    or len(current_cue_words) >= max_words_per_cue + 4
+                )
+
+                if should_split and current_cue_words:
+                    cue_dur = sum(item["duration_ms"] for item in current_cue_words)
+                    cues.append({
                         "cue_order": cue_order,
                         "start_ms": current_start,
-                        "end_ms": current_start + current_cue_duration,
+                        "end_ms": current_start + cue_dur,
                         "text": " ".join(item["text"] for item in current_cue_words),
                         "words": current_cue_words,
-                    }
-                )
-                cue_order += 1
-                current_start += current_cue_duration
-                current_cue_words = []
-                current_cue_duration = 0
-                current_chars = 0
-            chars_to_add = word_len if not current_cue_words else word_len + 1
-            current_cue_words.append({"text": w, "duration_ms": wd})
-            current_chars += chars_to_add
-            current_cue_duration += wd
+                    })
+                    cue_order += 1
+                    current_start += cue_dur
+                    current_cue_words = []
+                    current_chars = 0
+            else:
+                if current_cue_words and (
+                    len(current_cue_words) >= max_words_per_cue
+                    or (current_chars + 1 + word_len) > max_chars_per_cue
+                ):
+                    cues.append(
+                        {
+                            "cue_order": cue_order,
+                            "start_ms": current_start,
+                            "end_ms": current_start + current_cue_duration,
+                            "text": " ".join(item["text"] for item in current_cue_words),
+                            "words": current_cue_words,
+                        }
+                    )
+                    cue_order += 1
+                    current_start += current_cue_duration
+                    current_cue_words = []
+                    current_cue_duration = 0
+                    current_chars = 0
+                chars_to_add = word_len if not current_cue_words else word_len + 1
+                current_cue_words.append({"text": w, "duration_ms": wd})
+                current_chars += chars_to_add
+                current_cue_duration += wd
+
         if current_cue_words:
+            cue_dur = sum(item["duration_ms"] for item in current_cue_words)
             cues.append({
                 "cue_order": cue_order,
                 "start_ms": current_start,
-                "end_ms": current_start + current_cue_duration,
+                "end_ms": current_start + cue_dur,
                 "text": " ".join(cw["text"] for cw in current_cue_words),
                 "words": current_cue_words
             })
             cue_order += 1
     return cues
+
+
+def generate_sentence_cues(
+    segments: list[dict[str, Any]],
+    *,
+    max_words_per_cue: int = 16,
+    max_chars_per_cue: int = 80,
+) -> list[dict[str, Any]]:
+    """Generate full-sentence / full-cue subtitle cues from narration segments.
+
+    Splits narration into readable sentence-level cues (preferring natural punctuation
+    like ., !, ? and clause boundaries) without progressive word reveal.
+    """
+    return generate_karaoke_cues(
+        segments,
+        max_words_per_cue=max_words_per_cue,
+        max_chars_per_cue=max_chars_per_cue,
+        sentence_mode=True,
+    )
+
 
 def generate_karaoke_ass_document(
     karaoke_cues: list[dict[str, Any]],
@@ -274,6 +331,7 @@ def generate_karaoke_ass_document(
     style: SubtitleRenderStyle | None = None,
 ) -> KaraokeASSDocument:
     resolved_style = style or SubtitleRenderStyle()
+    enable_karaoke = resolved_style.karaoke if style is not None else True
     if resolved_style.min_font_size > resolved_style.font_size:
         raise ValueError("min_font_size must not exceed font_size")
     primary = _ass_color(resolved_style.primary_color)
@@ -324,10 +382,16 @@ def generate_karaoke_ass_document(
         lines, resolved_size, truncated = _layout_karaoke_words(
             timed_words, width=width, style=resolved_style
         )
-        dialogue_lines = [
-            " ".join(f"{{\\kf{word['centiseconds']}}}{word['text']}" for word in line)
-            for line in lines
-        ]
+        if enable_karaoke:
+            dialogue_lines = [
+                " ".join(f"{{\\kf{word['centiseconds']}}}{word['text']}" for word in line)
+                for line in lines
+            ]
+        else:
+            dialogue_lines = [
+                " ".join(word["text"] for word in line)
+                for line in lines
+            ]
         dialogue_text = r"\N".join(dialogue_lines)
         decisions.append(
             SubtitleLayoutDecision(

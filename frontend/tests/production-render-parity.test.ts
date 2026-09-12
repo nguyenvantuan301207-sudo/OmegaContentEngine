@@ -5,9 +5,13 @@ import test from "node:test";
 import type {
   ProductionRenderCapabilities,
   ProductionRequest,
+  SubtitlePreset,
   SubtitleRenderStyle,
 } from "../src/lib/api.ts";
 import {
+  findMatchingPresetId,
+  getPresetById,
+  getSubtitlePresets,
   hasUnsupportedSubtitleFields,
   resolveArtifactProvenance,
   resolveSubtitleDraft,
@@ -31,6 +35,27 @@ const defaults: SubtitleRenderStyle = {
   max_width_ratio: 0.82,
 };
 
+const boldYellowPreset: SubtitlePreset = {
+  id: "bold_yellow",
+  name: "Bold Yellow Impact",
+  description: "High-contrast bold yellow text with heavy stroke for mobile engagement.",
+  style: {
+    ...defaults,
+    font_size: 52,
+    bold: true,
+    primary_color: "#FFD400",
+    outline_width: 3,
+    margin_v: 90,
+  },
+};
+
+const defaultPreset: SubtitlePreset = {
+  id: "default",
+  name: "Default Classic",
+  description: "Standard white text with dark outline and shadow, bottom-centered.",
+  style: defaults,
+};
+
 const capabilities: ProductionRenderCapabilities = {
   truth_states: ["RENDER_APPLIED", "PREVIEW_ONLY", "UNSUPPORTED"],
   subtitle: {
@@ -41,7 +66,8 @@ const capabilities: ProductionRenderCapabilities = {
       user_editable: name !== "min_font_size",
     })),
     font_families: ["Arial", "DejaVu Sans"],
-    alignments: { "2": "Bottom center", "5": "Center" },
+    alignments: { "2": "Bottom center", "5": "Center", "8": "Top center" },
+    presets: [defaultPreset, boldYellowPreset],
   },
   text_fitting: {
     wrap: true,
@@ -49,8 +75,8 @@ const capabilities: ProductionRenderCapabilities = {
     truncation_fallback: true,
     truncation_provenance: true,
   },
-  video: { fps_mode: "CFR", target_fps: 12, user_editable: false },
-  subtitle_timing_label: "Estimated word timing",
+  video: { fps_mode: "CFR", target_fps: 24, user_editable: false },
+  subtitle_timing_label: "Full-sentence cue timing",
 };
 
 test("subtitle draft defaults come from backend capabilities", () => {
@@ -71,7 +97,7 @@ test("non-default persisted style and artifact provenance remain distinct", () =
       render_settings: { subtitle_style: selected },
       render_provenance: {
         subtitle_style_applied: selected,
-        target_fps: 12,
+        target_fps: 24,
         effective_fps_mode: "CFR",
         text_truncated: true,
         scenes: [{ sequence_index: 1, text_truncated: true }],
@@ -97,11 +123,31 @@ test("Production Studio contains truth labels without fake persistence or FPS co
   assert.match(source, /Draft/);
   assert.match(source, /Render Applied/);
   assert.match(source, /From Artifact/);
-  assert.match(source, /Estimated word timing|subtitle_timing_label/);
+  assert.match(source, /Estimated word timing|Full-sentence cue timing|subtitle_timing_label/);
   assert.match(source, /FPS mode/);
   assert.match(source, /Target FPS/);
+  assert.match(source, /Preset/);
+  assert.match(source, /Save as Channel Default/);
+  assert.match(source, /Channel Default/);
   assert.doesNotMatch(source, /localStorage/);
   assert.doesNotMatch(source, />Save</);
   assert.doesNotMatch(source, /word-accurate/i);
-  assert.doesNotMatch(source, /24 fps|30 fps|60 fps/i);
+  assert.doesNotMatch(source, /30 fps|60 fps/i);
+});
+
+test("subtitle preset resolution and matching identify presets correctly", () => {
+  const presets = getSubtitlePresets(capabilities);
+  assert.equal(presets.length, 2);
+  assert.equal(getPresetById(capabilities, "bold_yellow")?.name, "Bold Yellow Impact");
+  assert.equal(getPresetById(capabilities, "unknown_preset"), undefined);
+
+  // Exact match to default preset
+  assert.equal(findMatchingPresetId(capabilities, defaults), "default");
+
+  // Exact match to bold yellow preset
+  assert.equal(findMatchingPresetId(capabilities, boldYellowPreset.style), "bold_yellow");
+
+  // Divergent custom style returns null (custom configuration)
+  const customDivergent = { ...defaults, font_size: 77, primary_color: "#123456" };
+  assert.equal(findMatchingPresetId(capabilities, customDivergent), null);
 });

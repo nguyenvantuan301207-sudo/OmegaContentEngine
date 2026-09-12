@@ -28,6 +28,7 @@ from omega.application.visual_production_v2_service import (
     VerticalSliceSFXInput,
     VisualProductionV2Service,
 )
+from omega.domain.channel_style import ChannelStyleProfile
 from omega.infrastructure.models import (
     ChannelDNARevision,
     ContentCitation,
@@ -481,7 +482,10 @@ async def test_visual_director_v2_fingerprint(tmp_path: Path, lineage_data):
     svc._browser_runtime_factory = lambda: mock_browser_ctx
 
     res = await svc.render_mission_execution(session, lineage_data["mission_execution"].id, lineage_data["content_request"].id, fps=12)
-    expected_fp = f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2:visual-asset-mode:PEXELS"
+    expected_fp = (
+        f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2:visual-asset-mode:PEXELS"
+        f":style-profile-v1:{ChannelStyleProfile().model_dump_json()}"
+    )
     expected_hash = hashlib.sha256(expected_fp.encode("utf-8")).hexdigest()
     assert res.run_fingerprint == expected_hash
     with open(res.output_path.parent / "manifest.json", encoding="utf-8") as f:
@@ -1060,10 +1064,13 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
     assert manifest_data_silent["scenes"][0]["content_sha256"] != "video-hash"
 
     # Silent fingerprint exact compatibility check
-    fps = 12
+    fps = 24
     script_version_id = req.scripts[0].id
     from omega.application.visual_production_v2_service import VISUAL_DIRECTOR_VERSION
-    expected_silent_fp = f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:visual-asset-mode:PEXELS"
+    expected_silent_fp = (
+        f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:visual-asset-mode:PEXELS"
+        f":style-profile-v1:{ChannelStyleProfile().model_dump_json()}"
+    )
     expected_silent_hash = hashlib.sha256(expected_silent_fp.encode("utf-8")).hexdigest()
     assert res_silent.run_fingerprint == expected_silent_hash
 
@@ -1410,6 +1417,7 @@ async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
         primary_color="#FFD400",
         margin_v=150,
         bold=True,
+        karaoke=True,
     )
     res_enabled = await svc.render_mission_execution(
         session,
@@ -1454,16 +1462,23 @@ async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
     assert manifest_data["scenes"][0]["content_sha256"] == final_muxed_sha
 
     # H: Manifest
+    assert manifest_data["subtitle_enabled"] is True
     assert manifest_data["karaoke_subtitles_enabled"] is True
+    assert manifest_data["subtitle_mode"] == "karaoke"
     assert manifest_data["subtitle_style_applied"] == requested_style.model_dump()
-    assert manifest_data["target_fps"] == 12
+    assert manifest_data["target_fps"] == 24
     assert manifest_data["effective_fps_mode"] == "CFR"
     assert res_enabled.subtitle_style_applied == requested_style
+    assert res_enabled.subtitle_enabled is True
+    assert res_enabled.karaoke_subtitles_enabled is True
+    assert res_enabled.subtitle_mode == "karaoke"
     assert manifest_data["scenes"][0]["subtitle_cue_count"] > 0
 
     # Check disabled manifest
     manifest_disabled = json.loads((res_disabled.output_path.parent / "manifest.json").read_text("utf-8"))
+    assert manifest_disabled["subtitle_enabled"] is False
     assert manifest_disabled["karaoke_subtitles_enabled"] is False
+    assert manifest_disabled["subtitle_mode"] == "sentence"
     assert manifest_disabled["scenes"][0].get("subtitle_cue_count") is None
 
     # I: Failure in subtitle burn
@@ -1485,7 +1500,7 @@ async def test_karaoke_requires_narration(tmp_path: Path, lineage_data):
         narration_provider=None, narration_storage=None,
     )
 
-    with pytest.raises(VerticalSliceError, match="Karaoke subtitles require narration"):
+    with pytest.raises(VerticalSliceError, match="Subtitles require narration"):
         await svc.render_mission_execution(session, m_exec.id, req.id, subtitle_enabled=True)
 
 

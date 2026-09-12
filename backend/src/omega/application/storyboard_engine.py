@@ -61,7 +61,13 @@ class StoryboardEngine:
             VisualStrategy.KINETIC_TEXT,
         }
 
-    def generate_storyboard(self, script_dict: dict[str, Any]) -> StoryboardPlan:
+    def generate_storyboard(
+        self,
+        script_dict: dict[str, Any],
+        pacing: str = "BALANCED",
+    ) -> StoryboardPlan:
+        pacing_norm = str(pacing).upper()
+        target_words = 12 if pacing_norm == "FAST" else 24 if pacing_norm == "RELAXED" else 18
         scenes = []
         sequence_index = 1
 
@@ -86,8 +92,8 @@ class StoryboardEngine:
                 is_last_section = (sec_idx == len(sections) - 1)
                 is_very_last = is_last_statement and is_last_section
 
-                # Create a scene if we reach ~20 words or at the end of the section
-                if current_word_count >= 18 or is_last_statement:
+                # Create a scene if we reach target words or at the end of the section
+                if current_word_count >= target_words or is_last_statement:
                     scene = self._create_scene(
                         sequence_index=sequence_index,
                         section_heading=section_heading,

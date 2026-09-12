@@ -204,6 +204,7 @@ async def test_v2_helper_success(render_service, tmp_path, mock_v2_service):
         voice_profile=req.voice_profile,
         subtitle_enabled=True,
         subtitle_style=SubtitleRenderStyle(),
+        style_profile=None,
     )
 
     assert staging_out.exists()
