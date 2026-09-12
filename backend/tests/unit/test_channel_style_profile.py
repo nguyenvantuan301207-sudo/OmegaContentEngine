@@ -232,4 +232,3 @@ def test_style_palette_affects_template_renderer_css():
     assert doc_default.content_sha256 != doc_custom.content_sha256
     assert "--accent: #FF5722;" in doc_custom.html
     assert "--bg: #1E1E2E;" in doc_custom.html
-
