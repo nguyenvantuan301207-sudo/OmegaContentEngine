@@ -61,3 +61,9 @@ backend/data/
 # ── Local DB snapshots / backups (never commit) ──
 *_pre_v1_decommission.sql
 *_vault_backup.sql
+
+# ── Local Model Weights (never commit) ──
+models/
+backend/models/
+*.onnx
+*.bin

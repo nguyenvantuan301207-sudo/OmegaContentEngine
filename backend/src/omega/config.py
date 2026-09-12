@@ -43,6 +43,16 @@ class Settings(BaseSettings):
     google_redirect_uri: str = "http://localhost:8000/api/v1/publisher/accounts/youtube/callback"
     media_storage_root: str = "storage/media"
 
+    # ── TTS Narration ──
+    tts_provider: str = "local"
+    local_tts_engine: str = "kokoro"
+    local_tts_profile: str = "quality"
+    local_tts_device: str = "auto"
+    local_tts_language: str = "en-US"
+    local_tts_voice: str = "af_heart"
+    local_tts_speed: float = 1.0
+    local_tts_model_dir: str = "/app/models/tts/kokoro"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, v: object) -> list[str]:

@@ -71,6 +71,7 @@ services:
     volumes:
       - ./backend:/app
       - omega-media-data:/app/data
+      - omega-models:/app/models
     healthcheck:
       test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 10s
@@ -112,6 +113,7 @@ services:
     volumes:
       - ./backend:/app
       - omega-media-data:/app/data
+      - omega-models:/app/models
     restart: unless-stopped
 
   # ── Celery Beat Scheduler ──
@@ -160,3 +162,4 @@ services:
 volumes:
   omega-postgres-data:
   omega-media-data:
+  omega-models:
