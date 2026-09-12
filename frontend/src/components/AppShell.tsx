@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Sidebar } from "@/components/Sidebar";
 import { TopBar } from "@/components/TopBar";
+import { applyPreferences, PREFERENCES_EVENT, readPreferences } from "@/lib/preferences";
 
 export function AppShell({ children }: { children: React.ReactNode }) {
     const pathname = usePathname();
@@ -20,8 +21,23 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         };
     }, [navigationOpen]);
 
+    useEffect(() => {
+        const media = window.matchMedia("(prefers-color-scheme: light)");
+        const applyStored = () => applyPreferences(readPreferences());
+        applyStored();
+        window.addEventListener(PREFERENCES_EVENT, applyStored);
+        window.addEventListener("storage", applyStored);
+        media.addEventListener("change", applyStored);
+        return () => {
+            window.removeEventListener(PREFERENCES_EVENT, applyStored);
+            window.removeEventListener("storage", applyStored);
+            media.removeEventListener("change", applyStored);
+        };
+    }, []);
+
     return (
         <div className="app-shell">
+            <a className="skip-link" href="#main-content">Skip to main content</a>
             <Sidebar open={navigationOpen} onClose={() => setNavigationOpen(false)} />
             {navigationOpen && (
                 <button

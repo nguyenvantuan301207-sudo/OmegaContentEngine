@@ -1,213 +1,163 @@
 "use client";
 
-import React, { Suspense, useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { AutonomyLevel, Channel, createMission, getChannels } from "@/lib/api";
-import { CANARY_CHANNEL_ID, CANARY_CHANNEL_NAME } from "@/lib/operator-context";
+import { type AutonomyLevel, type Channel, createMission, getChannels } from "@/lib/api";
+import { useOperatorContext } from "@/lib/operator-context";
+import {
+  classifyChannel,
+  isClassificationInternal,
+  isChannelVisible,
+  getProvenanceBadgeLabel,
+} from "@/lib/channel-classification";
+import { Alert, FormField, LoadingState, PageHeader, PageSection } from "@/components/ui";
 
 function CreateMissionForm() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const initialChannelId = searchParams.get("channel_id") || "";
-
+  const requestedChannelId = searchParams.get("channel_id") || "";
+  const { selectedChannelId, showInternalChannels } = useOperatorContext();
   const [title, setTitle] = useState("");
   const [objective, setObjective] = useState("");
-  const [channelId, setChannelId] = useState<string>(initialChannelId);
-  const [channels, setChannels] = useState<Channel[]>([]);
   const [description, setDescription] = useState("");
+  const [channelId, setChannelId] = useState(requestedChannelId);
+  const [channels, setChannels] = useState<Channel[]>([]);
   const [autonomyLevel, setAutonomyLevel] = useState<AutonomyLevel>("SUPERVISED");
   const [priority, setPriority] = useState(1);
+  const [channelsLoading, setChannelsLoading] = useState(true);
+  const [channelError, setChannelError] = useState<string | null>(null);
+  const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    let active = true;
+    setChannelsLoading(true);
     getChannels("ACTIVE", undefined, 50, 0)
-      .then((data) => setChannels(data))
-      .catch(() => {
-        // Ignore fetch errors for optional dropdown
+      .then((data) => {
+        if (!active) return;
+        setChannels(data);
+        setChannelError(null);
+      })
+      .catch((requestError: unknown) => {
+        if (active) setChannelError(requestError instanceof Error ? requestError.message : "Unable to load active channels.");
+      })
+      .finally(() => {
+        if (active) setChannelsLoading(false);
       });
+    return () => {
+      active = false;
+    };
   }, []);
 
-  // If initialChannelId arrives via URL, ensure it is selected
   useEffect(() => {
-    if (initialChannelId && !channelId) {
-      setChannelId(initialChannelId);
-    }
-  }, [initialChannelId, channelId]);
+    if (!channelId && !requestedChannelId && selectedChannelId) setChannelId(selectedChannelId);
+  }, [channelId, requestedChannelId, selectedChannelId]);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleSubmit = async (event: React.FormEvent) => {
+    event.preventDefault();
     if (!title.trim() || !objective.trim()) {
-      setError("Title and objective are required.");
+      setSubmitError("Mission title and objective are required.");
       return;
     }
 
     setSubmitting(true);
-    setError(null);
-
+    setSubmitError(null);
     try {
       const created = await createMission({
         title: title.trim(),
         objective: objective.trim(),
-        channel_id: channelId ? channelId : undefined,
+        channel_id: channelId || undefined,
         description: description.trim() || undefined,
         autonomy_level: autonomyLevel,
-        priority: Number(priority),
+        priority,
       });
       router.push(`/missions/${created.id}`);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to create mission");
+    } catch (requestError: unknown) {
+      setSubmitError(requestError instanceof Error ? requestError.message : "Failed to create mission.");
       setSubmitting(false);
     }
   };
 
   return (
-    <div className="form-card">
-      {error && (
-        <div style={{ padding: "1rem", background: "var(--status-danger-bg)", border: "1px solid var(--status-danger-border)", borderRadius: "var(--radius-sm)", color: "var(--status-danger)", marginBottom: "1.5rem", fontSize: "0.85rem" }}>
-          {error}
-        </div>
-      )}
+    <>
+      {channelError && <Alert tone="warning" title="Channel list unavailable">{channelError} A standalone mission can still be created.</Alert>}
+      {submitError && <Alert tone="danger" title="Mission could not be created">{submitError}</Alert>}
 
-      <form onSubmit={handleSubmit}>
-        {/* Mission Title */}
-        <div className="form-group">
-          <label className="form-label">Mission Title *</label>
-          <input
-            type="text"
-            required
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="e.g. Q3 Developer Intelligence Campaign"
-            className="input"
-            style={{ width: "100%" }}
-          />
-          <span className="form-helper">Concise, descriptive name identifying this content campaign.</span>
-        </div>
+      <form className="ui-form-shell" onSubmit={handleSubmit} noValidate>
+        <PageSection title="Mission definition" description="State the operational outcome before choosing execution controls.">
+          <FormField id="mission-title" label="Mission title" required>
+            <input className="input" required value={title} onChange={(event) => setTitle(event.target.value)} />
+          </FormField>
+          <FormField id="mission-objective" label="Objective" description="The objective is passed to planning, research and content stages." required>
+            <textarea rows={5} required value={objective} onChange={(event) => setObjective(event.target.value)} />
+          </FormField>
+          <FormField id="mission-description" label="Additional context">
+            <textarea rows={3} value={description} onChange={(event) => setDescription(event.target.value)} />
+          </FormField>
+        </PageSection>
 
-        {/* Operating Channel */}
-        <div className="form-group">
-          <label className="form-label">Operating Channel (Optional)</label>
-          <select
-            value={channelId}
-            onChange={(e) => setChannelId(e.target.value)}
-            className="select"
-            style={{ width: "100%" }}
-          >
-            <option value="">-- Standalone Mission (No Channel Link) --</option>
-            <option value={CANARY_CHANNEL_ID}>
-              ⭐ {CANARY_CHANNEL_NAME} (Canary Fleet - DmYTB)
-            </option>
-            {channels
-              .filter((c) => c.id !== CANARY_CHANNEL_ID)
-              .map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name} (/{c.slug}) — {c.state}
-                </option>
-              ))}
-          </select>
-          <span className="form-helper">
-            Linking a channel pins its active DNA revision and target audience profile at execution time.
-          </span>
-        </div>
-
-        {/* Objective */}
-        <div className="form-group">
-          <label className="form-label">Objective / Core Mandate *</label>
-          <textarea
-            required
-            rows={4}
-            value={objective}
-            onChange={(e) => setObjective(e.target.value)}
-            placeholder="Detail the fundamental goal, topic focus, hook directions, or strategic editorial outcome..."
-          />
-          <span className="form-helper">Provides context to research, topic intelligence, and script generation agents.</span>
-        </div>
-
-        {/* Description */}
-        <div className="form-group">
-          <label className="form-label">Description (Optional)</label>
-          <textarea
-            rows={3}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="Additional background context, target audiences, or channel notes..."
-          />
-        </div>
-
-        {/* Autonomy Level & Priority Grid */}
-        <div className="grid grid-cols-2" style={{ gap: "1.25rem", margin: "1.25rem 0" }}>
-          <div className="form-group" style={{ marginBottom: 0 }}>
-            <label className="form-label">Autonomy Level</label>
-            <select
-              value={autonomyLevel}
-              onChange={(e) => setAutonomyLevel(e.target.value as AutonomyLevel)}
-              className="select"
-              style={{ width: "100%" }}
-            >
-              <option value="SUPERVISED">SUPERVISED (Recommended: Auto-dispatch with approval gates)</option>
-              <option value="ASSISTED">ASSISTED (Human-guided milestones)</option>
-              <option value="MANUAL">MANUAL (Explicit step execution)</option>
+        <PageSection title="Execution context" description="Channel selection pins the active DNA revision when execution begins.">
+          <FormField id="mission-channel" label="Operating channel" description="Leave empty for a standalone mission.">
+            <select className="select" value={channelId} onChange={(event) => setChannelId(event.target.value)} disabled={channelsLoading}>
+              <option value="">{channelsLoading ? "Loading active channels…" : "Standalone mission"}</option>
+              {channels
+                .filter((channel) =>
+                  channel.id === channelId ||
+                  channel.id === requestedChannelId ||
+                  channel.id === selectedChannelId ||
+                  isChannelVisible(channel, showInternalChannels),
+                )
+                .map((channel) => {
+                  const { classification } = classifyChannel(channel);
+                  const isInternal = isClassificationInternal(classification);
+                  const badge = getProvenanceBadgeLabel(classification);
+                  return (
+                    <option key={channel.id} value={channel.id}>
+                      {channel.name} — {channel.state}
+                      {isInternal && badge ? ` [${badge}]` : ""}
+                    </option>
+                  );
+                })}
             </select>
-            <span className="form-helper">Controls approval gates between production and publishing.</span>
+          </FormField>
+          <div className="ui-form-grid">
+            <FormField id="mission-autonomy" label="Autonomy level" required>
+              <select className="select" value={autonomyLevel} onChange={(event) => setAutonomyLevel(event.target.value as AutonomyLevel)}>
+                <option value="MANUAL">Manual</option>
+                <option value="ASSISTED">Assisted</option>
+                <option value="SUPERVISED">Supervised</option>
+                <option value="AUTONOMOUS">Autonomous</option>
+                <option value="STRATEGIC_AUTONOMOUS">Strategic autonomous</option>
+              </select>
+            </FormField>
+            <FormField id="mission-priority" label="Priority" description="1 is standard; 10 is highest priority." required>
+              <input className="input" type="number" min={1} max={10} required value={priority} onChange={(event) => setPriority(Number(event.target.value))} />
+            </FormField>
           </div>
+        </PageSection>
 
-          <div className="form-group" style={{ marginBottom: 0 }}>
-            <label className="form-label">Priority (1 to 10)</label>
-            <input
-              type="number"
-              min={1}
-              max={10}
-              value={priority}
-              onChange={(e) => setPriority(Number(e.target.value))}
-              className="input"
-              style={{ width: "100%" }}
-            />
-            <span className="form-helper">1 = Standard background, 5 = Elevated, 10 = Urgent dispatch.</span>
-          </div>
-        </div>
-
-        {/* Actions */}
-        <div className="form-actions">
-          <Link href="/missions" className="btn btn-secondary">
-            Cancel
-          </Link>
-          <button
-            type="submit"
-            disabled={submitting}
-            className="btn btn-primary"
-          >
-            {submitting ? "Creating Mission..." : "+ Create Draft Mission"}
+        <div className="ui-form-actions">
+          <Link href="/missions" className="btn btn-secondary">Cancel</Link>
+          <button type="submit" className="btn btn-primary" disabled={submitting}>
+            {submitting ? "Creating mission…" : "Create draft mission"}
           </button>
         </div>
       </form>
-    </div>
+    </>
   );
 }
 
 export default function NewMissionPage() {
   return (
-    <div>
-      {/* Header */}
-      <div className="page-header" style={{ maxWidth: "840px", margin: "0 auto 2rem auto" }}>
-        <div>
-          <div style={{ marginBottom: "0.5rem" }}>
-            <Link
-              href="/missions"
-              style={{ fontSize: "0.78rem", color: "var(--accent-secondary)", textDecoration: "none" }}
-            >
-              ← Back to Missions
-            </Link>
-          </div>
-          <h1 className="page-title">Create New Mission</h1>
-          <p className="page-subtitle">
-            Define a high-level goal, optional channel link, and autonomy constraints for the orchestrator.
-          </p>
-        </div>
-      </div>
-
-      <Suspense fallback={<div style={{ textAlign: "center", padding: "3rem", color: "var(--text-muted)" }}>Loading form...</div>}>
+    <div className="ui-page-stack ui-form-page">
+      <PageHeader
+        eyebrow="Missions"
+        title="Create mission"
+        description="Define an objective, operating context and explicit autonomy level."
+        actions={<Link href="/missions" className="btn btn-secondary">Back to missions</Link>}
+      />
+      <Suspense fallback={<LoadingState title="Loading mission form" />}>
         <CreateMissionForm />
       </Suspense>
     </div>

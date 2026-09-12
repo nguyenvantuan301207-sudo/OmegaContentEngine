@@ -1,243 +1,129 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { listPlatformAccounts, listPublishIntents, type PlatformAccount, type PublishIntent } from "@/lib/api";
 import { useOperatorContext } from "@/lib/operator-context";
-import {
-  PlatformAccount,
-  PublishAttempt,
-  PublishIntent,
-  UploadProgress,
-  getPublishAttempt,
-  getUploadProgress,
-  listPlatformAccounts,
-  listPublishIntents,
-} from "@/lib/api";
-import { PublishingStatusCard } from "@/components/PublishingStatusCard";
 import { ChannelContextBar } from "@/components/ChannelContextBar";
+import { PublishingStatusCard } from "@/components/PublishingStatusCard";
+import { Alert, EmptyState, LoadingState, PageHeader, PageSection, StatusBadge, type StatusTone } from "@/components/ui";
+
+function intentTone(state: string): StatusTone {
+  if (state === "PUBLISHED") return "success";
+  if (state === "FAILED" || state === "CANCELLED") return "danger";
+  if (state === "APPROVED" || state === "CLAIMED") return "info";
+  return "neutral";
+}
 
 export default function PublisherPage() {
-  const { selectedChannelId } = useOperatorContext();
-
+  const { selectedChannelId, selectedChannel } = useOperatorContext();
   const [accounts, setAccounts] = useState<PlatformAccount[]>([]);
   const [intents, setIntents] = useState<PublishIntent[]>([]);
   const [selectedIntent, setSelectedIntent] = useState<PublishIntent | null>(null);
-  const [latestAttempt, setLatestAttempt] = useState<PublishAttempt | null>(null);
-  const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const selectIntent = useCallback(async (intent: PublishIntent | null) => {
-    setSelectedIntent(intent);
-    if (intent) {
-      try {
-        const attempt = await getPublishAttempt(intent.id).catch(() => null);
-        setLatestAttempt(attempt);
-        if (attempt) {
-          const prog = await getUploadProgress(attempt.id).catch(() => null);
-          setUploadProgress(prog);
-        } else {
-          setUploadProgress(null);
-        }
-      } catch {
-        setLatestAttempt(null);
-        setUploadProgress(null);
-      }
-    } else {
-      setLatestAttempt(null);
-      setUploadProgress(null);
-    }
-  }, []);
-
   const loadData = useCallback(async () => {
-    if (!selectedChannelId) return;
+    if (!selectedChannelId) {
+      setAccounts([]);
+      setIntents([]);
+      setSelectedIntent(null);
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
-
-      const [accs, intentList] = await Promise.all([
-        listPlatformAccounts(selectedChannelId).catch(() => []),
-        listPublishIntents({ channel_id: selectedChannelId }).catch(() => []),
+      const [accountRecords, intentRecords] = await Promise.all([
+        listPlatformAccounts(selectedChannelId),
+        listPublishIntents({ channel_id: selectedChannelId }),
       ]);
-
-      setAccounts(accs);
-      setIntents(intentList);
-
-      // Check URL query param for intent_id
-      let targetIntent: PublishIntent | null = null;
-      if (typeof window !== "undefined") {
-        const params = new URLSearchParams(window.location.search);
-        const urlIntentId = params.get("intent_id");
-        if (urlIntentId) {
-          targetIntent = intentList.find((i) => i.id === urlIntentId) || null;
-        }
-      }
-
-      const activeIntent = targetIntent || intentList[0] || null;
-      await selectIntent(activeIntent);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load publisher data");
+      setAccounts(accountRecords);
+      setIntents(intentRecords);
+      const requestedIntentId = new URLSearchParams(window.location.search).get("intent_id");
+      setSelectedIntent(intentRecords.find((intent) => intent.id === requestedIntentId) || intentRecords[0] || null);
+    } catch (requestError: unknown) {
+      setError(requestError instanceof Error ? requestError.message : "Failed to load publishing state.");
     } finally {
       setLoading(false);
     }
-  }, [selectedChannelId, selectIntent]);
+  }, [selectedChannelId]);
 
   useEffect(() => {
-    loadData();
+    void loadData();
   }, [loadData]);
 
-  const activeAccount = accounts.find((a) => a.status === "ACTIVE") || accounts[0] || null;
+  const activeAccount = accounts.find((account) => account.status === "ACTIVE") || accounts[0] || null;
 
   return (
-    <div style={{ maxWidth: "1200px", margin: "0 auto", padding: "1.5rem" }}>
-      {/* Universal Channel Context Bar */}
+    <div className="ui-page-stack">
       <ChannelContextBar currentTab="publisher" />
+      <PageHeader
+        eyebrow="Operations"
+        title="Publish studio"
+        description={selectedChannel ? `Account readiness, approvals and publish intents for ${selectedChannel.name}.` : "Select a channel to inspect publishing state."}
+        actions={<button type="button" className="btn btn-secondary" onClick={() => void loadData()} disabled={loading}>Refresh</button>}
+      />
 
-      {/* Page Header */}
-      <div className="page-header" style={{ marginBottom: "1.5rem" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.25rem" }}>
-            <h1 className="page-title">☁ Publisher Cockpit</h1>
-            <span className="badge badge-active">OMEGA-011</span>
-          </div>
-          <p className="page-subtitle">
-            OAuth account management, Guardian readiness gates, chunked resumable upload, and video verification.
-          </p>
-        </div>
-      </div>
+      {error && <Alert tone="danger" title="Publishing state unavailable" actions={<button type="button" className="btn btn-secondary btn-sm" onClick={() => void loadData()}>Retry</button>}>{error}</Alert>}
 
-      {error && (
-        <div
-          style={{
-            padding: "0.75rem 1rem",
-            background: "var(--status-danger-bg)",
-            border: "1px solid var(--status-danger-border)",
-            borderRadius: "var(--radius-sm)",
-            fontSize: "0.82rem",
-            color: "var(--status-danger)",
-            marginBottom: "1.5rem",
-          }}
-        >
-          {error}
-        </div>
-      )}
+      {loading ? <LoadingState title="Loading publisher" /> : !selectedChannelId ? (
+        <EmptyState title="No channel selected" description="Select an available channel before managing publication." />
+      ) : !error && (
+        <>
+          <PageSection title="Publishing controls" description="Actions operate on the explicitly selected persisted intent.">
+            <PublishingStatusCard
+              channelId={selectedChannelId}
+              account={activeAccount}
+              latestIntent={selectedIntent}
+              latestAttempt={null}
+              uploadProgress={null}
+              onRefresh={loadData}
+            />
+          </PageSection>
 
-      {/* Main Publishing Status Card */}
-      {selectedChannelId && (
-        <div style={{ marginBottom: "1.5rem" }}>
-          <PublishingStatusCard
-            channelId={selectedChannelId}
-            account={activeAccount}
-            latestIntent={selectedIntent}
-            latestAttempt={latestAttempt}
-            uploadProgress={uploadProgress}
-            onRefresh={loadData}
-          />
-        </div>
-      )}
-
-      {/* Publish Intent History Table */}
-      <div className="card" style={{ padding: "1.25rem" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-          <div>
-            <h3 style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)" }}>
-              Publication Intent History ({intents.length})
-            </h3>
-            <p style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>
-              Select any intent below to inspect Guardian readiness, approval status, and execution details.
-            </p>
-          </div>
-          <button onClick={loadData} disabled={loading} className="btn btn-secondary btn-sm" style={{ fontSize: "0.75rem" }}>
-            ↻ Refresh History
-          </button>
-        </div>
-
-        {intents.length === 0 ? (
-          <div
-            style={{
-              textAlign: "center",
-              padding: "2rem 1rem",
-              color: "var(--text-muted)",
-              fontSize: "0.82rem",
-              background: "var(--bg-input)",
-              borderRadius: "var(--radius-sm)",
-              border: "1px solid var(--border-subtle)",
-            }}
-          >
-            No publication intents created for this channel yet. Prepare a video render in Production Workspace to initiate a publish intent.
-          </div>
-        ) : (
-          <div className="table-container">
-            <table className="table" style={{ width: "100%" }}>
-              <thead>
-                <tr>
-                  <th>Title & Revision</th>
-                  <th>State</th>
-                  <th>Privacy</th>
-                  <th>Task ID</th>
-                  <th>Created</th>
-                  <th>Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {intents.map((intent) => {
-                  const isSelected = selectedIntent?.id === intent.id;
-                  return (
-                    <tr
-                      key={intent.id}
-                      onClick={() => selectIntent(intent)}
-                      style={{
-                        cursor: "pointer",
-                        background: isSelected ? "var(--bg-card-hover)" : undefined,
-                      }}
-                    >
-                      <td>
-                        <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "var(--text-primary)" }}>
-                          {intent.title} {isSelected && <span style={{ color: "var(--accent-secondary)", fontSize: "0.72rem" }}>★ Active</span>}
-                        </div>
-                        <div className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
-                          v{intent.revision_number} • Media: {intent.media_artifact_id.substring(0, 8)}...
-                        </div>
-                      </td>
-                      <td>
-                        <span className={`badge ${intent.state === "PUBLISHED" ? "badge-success" : intent.state === "FAILED" ? "badge-failed" : "badge-active"}`}>
-                          {intent.state}
-                        </span>
-                      </td>
-                      <td>
-                        <span className="badge badge-neutral text-mono" style={{ fontSize: "0.7rem" }}>
-                          {intent.requested_privacy_status}
-                        </span>
-                      </td>
-                      <td>
-                        <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
-                          {intent.task_id.substring(0, 8)}...
-                        </span>
-                      </td>
-                      <td>
-                        <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
-                          {new Date(intent.created_at).toLocaleDateString()}
-                        </span>
-                      </td>
-                      <td>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            selectIntent(intent);
-                          }}
-                          className={`btn btn-sm ${isSelected ? "btn-primary" : "btn-secondary"}`}
-                          style={{ fontSize: "0.72rem", padding: "0.2rem 0.5rem" }}
-                        >
-                          {isSelected ? "Inspecting" : "Select"}
-                        </button>
-                      </td>
+          <PageSection title="Publish intents" description={`${intents.length} persisted intent${intents.length === 1 ? "" : "s"} for this channel.`}>
+            {intents.length === 0 ? (
+              <EmptyState title="No publish intents" description="Prepare a production artifact before creating a publish intent." />
+            ) : (
+              <div className="table-container ui-table-card">
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>Intent</th>
+                      <th>State</th>
+                      <th>Privacy</th>
+                      <th>Created</th>
+                      <th><span className="sr-only">Actions</span></th>
                     </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
+                  </thead>
+                  <tbody>
+                    {intents.map((intent) => {
+                      const selected = selectedIntent?.id === intent.id;
+                      return (
+                        <tr key={intent.id} aria-selected={selected}>
+                          <td data-label="Intent">
+                            <strong className="ui-table-title">{intent.title}</strong>
+                            <span className="ui-table-subtitle text-mono">Revision {intent.revision_number} · {intent.id}</span>
+                          </td>
+                          <td data-label="State"><StatusBadge tone={intentTone(intent.state)}>{intent.state}</StatusBadge></td>
+                          <td data-label="Privacy">{intent.requested_privacy_status}</td>
+                          <td data-label="Created"><time dateTime={intent.created_at}>{new Date(intent.created_at).toLocaleString()}</time></td>
+                          <td className="ui-table-action">
+                            <button type="button" className={`btn btn-sm ${selected ? "btn-primary" : "btn-secondary"}`} onClick={() => setSelectedIntent(intent)} aria-pressed={selected}>
+                              {selected ? "Selected" : "Select"}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </PageSection>
+        </>
+      )}
     </div>
   );
 }

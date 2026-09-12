@@ -1,0 +1,10 @@
+node_modules
+.next
+coverage
+*.log
+npm-debug.log*
+.env*
+.git
+.DS_Store
+screenshots
+test-results

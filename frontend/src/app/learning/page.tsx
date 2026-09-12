@@ -1,35 +1,30 @@
 "use client";
 
-import React from "react";
 import { useOperatorContext } from "@/lib/operator-context";
 import { LearningInsightsCard } from "@/components/LearningInsightsCard";
 import { ChannelContextBar } from "@/components/ChannelContextBar";
+import { EmptyState, LoadingState, PageHeader, PageSection, StatusBadge } from "@/components/ui";
 
 export default function LearningPage() {
-  const { selectedChannelId } = useOperatorContext();
+  const { selectedChannel, selectedChannelId, channelsLoading } = useOperatorContext();
 
   return (
-    <div style={{ maxWidth: "1200px", margin: "0 auto", padding: "1.5rem" }}>
-      {/* Universal Channel Context Bar */}
+    <div className="ui-page-stack">
       <ChannelContextBar currentTab="learning" />
-
-      {/* Page Header */}
-      <div className="page-header" style={{ marginBottom: "1.5rem" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.25rem" }}>
-            <h1 className="page-title">🧠 Learning & Knowledge Engine</h1>
-            <span className="badge badge-active">OMEGA-013</span>
-          </div>
-          <p className="page-subtitle">
-            Continuous cohort observation, Bayesian baseline modeling, empirical hypothesis validation, and institutional memory.
-          </p>
-        </div>
-      </div>
-
-      {/* Learning Insights Card */}
-      {selectedChannelId && (
-        <LearningInsightsCard channelId={selectedChannelId} />
-      )}
+      <PageHeader
+        eyebrow="Intelligence"
+        title="OMEGA learnings"
+        description={selectedChannel ? `Persisted knowledge and hypothesis evidence for ${selectedChannel.name}.` : "Select a channel to inspect learning evidence."}
+      />
+      <PageSection
+        title="Channel learning state"
+        description="Insights remain traceable to persisted observations and validated hypotheses."
+        actions={selectedChannel && <StatusBadge tone={selectedChannel.state === "ACTIVE" ? "success" : "warning"}>{selectedChannel.state}</StatusBadge>}
+      >
+        {channelsLoading ? <LoadingState title="Loading channel context" /> : selectedChannelId ? (
+          <div className="ui-route-card"><LearningInsightsCard channelId={selectedChannelId} /></div>
+        ) : <EmptyState title="No channel selected" description="Select an available channel to load learning evidence." />}
+      </PageSection>
     </div>
   );
 }

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -30,6 +30,12 @@ class ContentRequestStatus(enum.StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+# Historical interactive requests may contain this retired value.  Keeping it
+# in the read type makes those records observable without reintroducing it as
+# a writable lifecycle transition.
+ContentRequestReadStatus = ContentRequestStatus | Literal["APPROVED"]
 
 
 class ContentOutcome(enum.StrEnum):
@@ -378,7 +384,7 @@ class ContentGenerationRequestResponse(BaseModel):
     channel_dna_revision_id: UUID
     mission_execution_id: UUID | None = None
     mode: ContentGenerationMode
-    status: ContentRequestStatus
+    status: ContentRequestReadStatus
     outcome: ContentOutcome | None = None
     content_type: ContentType
     target_duration_seconds: int

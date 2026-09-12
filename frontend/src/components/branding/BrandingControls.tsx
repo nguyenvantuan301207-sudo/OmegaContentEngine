@@ -297,7 +297,7 @@ function RangeField({ label, helper, value, min, max, step, suffix, error, onCha
     return (
         <div className="branding-range-field">
             <div className="flex-between">
-                <label className="form-label">{label}</label>
+                <span className="form-label">{label}</span>
                 <output className="branding-range-output">{Math.round(value * 100)}{suffix} <small>({value.toFixed(2)})</small></output>
             </div>
             <small className="branding-range-helper">{helper} Domain: {min.toFixed(2)}–{max.toFixed(2)}.</small>

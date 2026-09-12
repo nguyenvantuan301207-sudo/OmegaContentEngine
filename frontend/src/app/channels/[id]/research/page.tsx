@@ -1,16 +1,8 @@
 "use client";
 
-import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
+import { use, useCallback, useEffect, useState } from "react";
 import {
-  Channel,
-  PrimarySourceStatus,
-  ResearchBrief,
-  ResearchClaim,
-  ResearchConflict,
-  ResearchRequest,
-  ResearchSource,
-  TopicCandidate,
   addResearchSource,
   createResearchRequest,
   getChannel,
@@ -21,798 +13,769 @@ import {
   listResearchRequests,
   listResearchSources,
   runResearchPipeline,
+  type Channel,
+  type PrimarySourceStatus,
+  type ResearchBrief,
+  type ResearchClaim,
+  type ResearchConflict,
+  type ResearchRequest,
+  type ResearchSource,
+  type TopicCandidate,
 } from "@/lib/api";
-import { useOperatorContext } from "@/lib/operator-context";
 import { ChannelContextBar } from "@/components/ChannelContextBar";
+import {
+  Alert,
+  Dialog,
+  EmptyState,
+  ErrorState,
+  FormField,
+  LoadingState,
+  PageHeader,
+  PageSection,
+  StatusBadge,
+} from "@/components/ui";
+import {
+  EntityList,
+  EntityListButton,
+  TechnicalDetails,
+  WorkflowStatusSummary,
+  WorkflowTabs,
+  statusTone,
+} from "@/components/workflow/WorkflowPrimitives";
+import { useOperatorContext } from "@/lib/operator-context";
 
-type Tab = "requests" | "brief" | "sources" | "claims" | "conflicts";
+type ResearchView = "overview" | "brief" | "claims" | "conflicts";
 
 export default function ResearchEnginePage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const resolvedParams = use(params);
-  const channelId = resolvedParams.id;
+  const { id: channelId } = use(params);
   const { setSelectedChannelId } = useOperatorContext();
-
   const [channel, setChannel] = useState<Channel | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("requests");
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  // Core Data
   const [requests, setRequests] = useState<ResearchRequest[]>([]);
-  const [selectedRequestId, setSelectedRequestId] = useState<string | null>(null);
-  const [currentBrief, setCurrentBrief] = useState<ResearchBrief | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [topics, setTopics] = useState<TopicCandidate[]>([]);
   const [sources, setSources] = useState<ResearchSource[]>([]);
   const [claims, setClaims] = useState<ResearchClaim[]>([]);
   const [conflicts, setConflicts] = useState<ResearchConflict[]>([]);
-  const [eligibleTopics, setEligibleTopics] = useState<TopicCandidate[]>([]);
-
-  // Action states
-  const [actionLoading, setActionLoading] = useState(false);
-  const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showSourceModal, setShowSourceModal] = useState(false);
-
-  // Form States
-  const [selectedTopicId, setSelectedTopicId] = useState("");
-  const [researchQuestion, setResearchQuestion] = useState("");
-  const [researchScope, setResearchScope] = useState("");
-
+  const [brief, setBrief] = useState<ResearchBrief | null>(null);
+  const [view, setView] = useState<ResearchView>("overview");
+  const [loading, setLoading] = useState(true);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [sourceOpen, setSourceOpen] = useState(false);
+  const [topicId, setTopicId] = useState("");
+  const [question, setQuestion] = useState("");
+  const [scope, setScope] = useState("");
   const [sourceTitle, setSourceTitle] = useState("");
-  const [sourcePublisher, setSourcePublisher] = useState("");
+  const [publisher, setPublisher] = useState("");
   const [sourceUrl, setSourceUrl] = useState("");
-  const [sourceExcerpt, setSourceExcerpt] = useState("");
-  const [sourcePrimaryStatus, setSourcePrimaryStatus] = useState<PrimarySourceStatus>("UNKNOWN");
+  const [excerpt, setExcerpt] = useState("");
+  const [primaryStatus, setPrimaryStatus] =
+    useState<PrimarySourceStatus>("UNKNOWN");
+
+  const loadDetails = useCallback(
+    async (request: ResearchRequest) => {
+      setDetailsLoading(true);
+      setDetailError(null);
+      const results = await Promise.allSettled([
+        listResearchSources(channelId, request.id),
+        listResearchClaims(channelId, request.id),
+        listResearchConflicts(channelId, request.id),
+        getResearchBrief(channelId, request.id),
+      ]);
+      const [sourceResult, claimResult, conflictResult, briefResult] = results;
+      setSources(sourceResult.status === "fulfilled" ? sourceResult.value : []);
+      setClaims(claimResult.status === "fulfilled" ? claimResult.value : []);
+      setConflicts(
+        conflictResult.status === "fulfilled" ? conflictResult.value : [],
+      );
+      setBrief(briefResult.status === "fulfilled" ? briefResult.value : null);
+      const failures = [sourceResult, claimResult, conflictResult].filter(
+        (result) => result.status === "rejected",
+      );
+      if (briefResult.status === "rejected" && request.status === "SUCCEEDED")
+        failures.push(briefResult);
+      if (failures.length)
+        setDetailError(
+          `${failures.length} research detail request${failures.length === 1 ? "" : "s"} failed. Refresh to retry.`,
+        );
+      setDetailsLoading(false);
+    },
+    [channelId],
+  );
 
   const loadData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    setSelectedChannelId(channelId);
     try {
-      setLoading(true);
-      setSelectedChannelId(channelId);
-      const [chanData, reqsData, topicsData] = await Promise.all([
-        getChannel(channelId).catch(() => null),
-        listResearchRequests(channelId).catch(() => []),
-        listCandidates(channelId).catch(() => []),
+      const [channelData, requestData, candidateData] = await Promise.all([
+        getChannel(channelId),
+        listResearchRequests(channelId),
+        listCandidates(channelId),
       ]);
-      setChannel(chanData);
-      setRequests(reqsData);
-
-      const eligible = topicsData.filter(
-        (t) => t.status === "EVALUATED" || t.status === "RECOMMENDED" || t.status === "SELECTED"
+      const eligible = candidateData.filter((candidate) =>
+        ["EVALUATED", "RECOMMENDED", "SELECTED"].includes(candidate.status),
       );
-      setEligibleTopics(eligible);
-      if (eligible.length > 0 && !selectedTopicId) {
-        setSelectedTopicId(eligible[0].id);
+      setChannel(channelData);
+      setRequests(requestData);
+      setTopics(eligible);
+      const selected =
+        requestData.find((request) => request.id === selectedId) ||
+        requestData[0];
+      setSelectedId(selected?.id || null);
+      if (selected) await loadDetails(selected);
+      else {
+        setSources([]);
+        setClaims([]);
+        setConflicts([]);
+        setBrief(null);
       }
-
-      if (reqsData.length > 0 && !selectedRequestId) {
-        setSelectedRequestId(reqsData[0].id);
-      }
-      setError(null);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load research data");
+      if (!topicId && eligible[0]) setTopicId(eligible[0].id);
+    } catch (reason: unknown) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Failed to load research workflow",
+      );
     } finally {
       setLoading(false);
     }
-  }, [channelId, selectedRequestId, selectedTopicId, setSelectedChannelId]);
-
-  const loadRequestDetails = useCallback(
-    async (reqId: string) => {
-      try {
-        const [srcs, clms, cnflcts] = await Promise.all([
-          listResearchSources(channelId, reqId).catch(() => []),
-          listResearchClaims(channelId, reqId).catch(() => []),
-          listResearchConflicts(channelId, reqId).catch(() => []),
-        ]);
-        setSources(srcs);
-        setClaims(clms);
-        setConflicts(cnflcts);
-
-        try {
-          const brief = await getResearchBrief(channelId, reqId);
-          setCurrentBrief(brief);
-        } catch {
-          setCurrentBrief(null);
-        }
-      } catch {
-        // Ignored for partial loads
-      }
-    },
-    [channelId]
-  );
+  }, [channelId, loadDetails, selectedId, setSelectedChannelId, topicId]);
 
   useEffect(() => {
-    loadData();
+    void loadData();
   }, [loadData]);
+  const selected =
+    requests.find((request) => request.id === selectedId) || null;
+  const archived = channel?.state === "ARCHIVED";
 
-  useEffect(() => {
-    if (selectedRequestId) {
-      loadRequestDetails(selectedRequestId);
-    }
-  }, [selectedRequestId, loadRequestDetails]);
-
-  async function handleCreateRequest(e: React.FormEvent) {
-    e.preventDefault();
-    if (!selectedTopicId) return;
-
+  async function chooseRequest(request: ResearchRequest) {
+    setSelectedId(request.id);
+    await loadDetails(request);
+  }
+  async function perform(
+    action: () => Promise<unknown>,
+    fallback: string,
+    refresh = true,
+  ) {
+    setBusy(true);
+    setError(null);
     try {
-      setActionLoading(true);
-      const newReq = await createResearchRequest(channelId, {
-        topic_candidate_id: selectedTopicId,
-        research_question: researchQuestion.trim() || undefined,
-        scope: researchScope.trim() || undefined,
+      await action();
+      if (refresh) await loadData();
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : fallback);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function createRequest(event: React.FormEvent) {
+    event.preventDefault();
+    if (!topicId) return;
+    await perform(async () => {
+      const created = await createResearchRequest(channelId, {
+        topic_candidate_id: topicId,
+        research_question: question.trim() || undefined,
+        scope: scope.trim() || undefined,
       });
-      setShowCreateModal(false);
-      setResearchQuestion("");
-      setResearchScope("");
-      setSelectedRequestId(newReq.id);
-      await loadData();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to create research request");
-    } finally {
-      setActionLoading(false);
-    }
+      setCreateOpen(false);
+      setQuestion("");
+      setScope("");
+      setSelectedId(created.id);
+    }, "Failed to create research request");
+  }
+  async function addSource(event: React.FormEvent) {
+    event.preventDefault();
+    if (
+      !selected ||
+      !sourceTitle.trim() ||
+      !publisher.trim() ||
+      !excerpt.trim()
+    )
+      return;
+    await perform(
+      async () => {
+        await addResearchSource(channelId, selected.id, {
+          title: sourceTitle.trim(),
+          publisher: publisher.trim(),
+          url: sourceUrl.trim() || undefined,
+          content_excerpt: excerpt.trim(),
+          primary_source_status: primaryStatus,
+        });
+        setSourceOpen(false);
+        setSourceTitle("");
+        setPublisher("");
+        setSourceUrl("");
+        setExcerpt("");
+        setPrimaryStatus("UNKNOWN");
+        await loadDetails(selected);
+      },
+      "Failed to add research source",
+      false,
+    );
+  }
+  async function runResearch() {
+    if (!selected) return;
+    await perform(async () => {
+      const result = await runResearchPipeline(channelId, selected.id);
+      setBrief(result);
+      setView("brief");
+    }, "Research pipeline failed");
   }
 
-  async function handleAddSource(e: React.FormEvent) {
-    e.preventDefault();
-    if (!selectedRequestId || !sourceTitle || !sourcePublisher || !sourceExcerpt) return;
-
-    try {
-      setActionLoading(true);
-      await addResearchSource(channelId, selectedRequestId, {
-        title: sourceTitle.trim(),
-        publisher: sourcePublisher.trim(),
-        url: sourceUrl.trim() || undefined,
-        content_excerpt: sourceExcerpt.trim(),
-        primary_source_status: sourcePrimaryStatus,
-      });
-      setShowSourceModal(false);
-      setSourceTitle("");
-      setSourcePublisher("");
-      setSourceUrl("");
-      setSourceExcerpt("");
-      setSourcePrimaryStatus("UNKNOWN");
-      await loadRequestDetails(selectedRequestId);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to add source");
-    } finally {
-      setActionLoading(false);
-    }
-  }
-
-  async function handleRunResearch(reqId: string) {
-    try {
-      setActionLoading(true);
-      const brief = await runResearchPipeline(channelId, reqId);
-      setCurrentBrief(brief);
-      setActiveTab("brief");
-      await loadData();
-      await loadRequestDetails(reqId);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to execute research pipeline");
-    } finally {
-      setActionLoading(false);
-    }
-  }
-
-  const getStatusBadgeClass = (status: string) => {
-    switch (status) {
-      case "SUCCEEDED":
-        return "badge-success";
-      case "RUNNING":
-        return "badge-active";
-      case "PENDING":
-        return "badge-warning";
-      case "FAILED":
-        return "badge-failed";
-      default:
-        return "badge-draft";
-    }
-  };
-
-  const getConfidenceBadgeClass = (band: string) => {
-    switch (band) {
-      case "VERY_HIGH":
-      case "HIGH":
-        return "badge-success";
-      case "MEDIUM":
-        return "badge-active";
-      case "LOW":
-        return "badge-warning";
-      default:
-        return "badge-neutral";
-    }
-  };
-
-  const selectedRequest = requests.find((r) => r.id === selectedRequestId);
-
-  const isArchived = channel?.state === "ARCHIVED";
-
+  const status = selected?.status || "EMPTY";
+  const outcome = brief?.outcome || selected?.outcome || null;
   return (
-    <div style={{ maxWidth: "1200px", margin: "0 auto", padding: "1.5rem" }}>
-      {/* Channel Context Bar with Pipeline Tabs */}
+    <div className="workflow-page ui-page-stack">
       <ChannelContextBar currentTab="research" />
-
-      {/* Page Header */}
-      <div className="page-header" style={{ marginBottom: "1.5rem" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.25rem" }}>
-            <h1 className="page-title">🔬 Research Engine</h1>
-            <span className="badge badge-active">OMEGA-005</span>
-          </div>
-          <p className="page-subtitle">
-            Deterministic multi-source evidence extraction, independence scoring, contradiction analysis, and ResearchBriefs.
-          </p>
-        </div>
-
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          <button
-            onClick={() => setShowCreateModal(true)}
-            disabled={eligibleTopics.length === 0 || isArchived}
-            title={isArchived ? "Activate this channel before creating new research requests." : eligibleTopics.length === 0 ? "Select an evaluated topic first" : "New Research Request"}
-            className="btn btn-primary btn-sm"
-            style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}
-          >
-            <span>+</span> New Research Request
-          </button>
-        </div>
-      </div>
-
-      {error && (
-        <div
-          style={{
-            padding: "0.75rem 1rem",
-            background: "var(--status-danger-bg)",
-            border: "1px solid var(--status-danger-border)",
-            borderRadius: "var(--radius-sm)",
-            fontSize: "0.82rem",
-            color: "var(--status-danger)",
-            marginBottom: "1.5rem",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="btn btn-secondary btn-sm" style={{ padding: "0.15rem 0.45rem", fontSize: "0.72rem" }}>
-            ✕
-          </button>
-        </div>
-      )}
-
-      {loading && !channel && (
-        <div className="card" style={{ padding: "3rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.9rem" }}>
-          Loading Research Engine...
-        </div>
-      )}
-
-      {/* Main Research Content Workspace */}
-      <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: "1.5rem", alignItems: "start" }}>
-        {/* Left Column: Research Requests List */}
-        <div className="card" style={{ padding: "1.25rem" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-            <h3 style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)" }}>
-              Requests ({requests.length})
-            </h3>
-            {eligibleTopics.length === 0 && (
-              <Link href={`/channels/${channelId}/topics`} className="btn btn-secondary btn-sm" style={{ fontSize: "0.72rem", padding: "0.2rem 0.45rem" }}>
-                Evaluate Topics →
-              </Link>
-            )}
-          </div>
-
-          {requests.length === 0 ? (
-            <div
-              style={{
-                textAlign: "center",
-                padding: "2rem 1rem",
-                color: "var(--text-muted)",
-                fontSize: "0.82rem",
-                background: "var(--bg-input)",
-                borderRadius: "var(--radius-sm)",
-                border: "1px solid var(--border-subtle)",
-              }}
+      <PageHeader
+        eyebrow="Channel workflow · Step 2"
+        title="Research evidence"
+        description="Build a traceable evidence base, surface conflicts, and produce a decision-ready research brief."
+        actions={
+          <>
+            <button
+              className="btn btn-primary"
+              type="button"
+              disabled={archived || topics.length === 0}
+              onClick={() => setCreateOpen(true)}
             >
-              No research requests created yet. Select an evaluated topic to create a research request.
-            </div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
-              {requests.map((req) => {
-                const isSelected = req.id === selectedRequestId;
-                return (
-                  <div
-                    key={req.id}
-                    onClick={() => setSelectedRequestId(req.id)}
-                    style={{
-                      padding: "0.75rem 0.85rem",
-                      borderRadius: "var(--radius-sm)",
-                      background: isSelected ? "var(--bg-card-hover)" : "var(--bg-input)",
-                      border: isSelected ? "1px solid var(--accent-primary)" : "1px solid var(--border-subtle)",
-                      cursor: "pointer",
-                      transition: "all 0.15s ease",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
-                      <span className={`badge ${getStatusBadgeClass(req.status)}`} style={{ fontSize: "0.68rem" }}>
-                        {req.status}
-                      </span>
-                      <span className="text-mono" style={{ fontSize: "0.68rem", color: "var(--text-muted)" }}>
-                        {new Date(req.created_at).toLocaleDateString()}
-                      </span>
-                    </div>
-                    <div style={{ fontSize: "0.82rem", fontWeight: 600, color: isSelected ? "var(--accent-secondary)" : "var(--text-primary)", lineHeight: 1.3 }}>
-                      {req.research_question || `Request ${req.id.slice(0, 8)}`}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-
-        {/* Right Column: Active Request Workspace */}
-        {selectedRequest ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-            {/* Request Summary & Action Toolbar */}
-            <div className="card" style={{ padding: "1.25rem" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "1rem", marginBottom: "0.75rem" }}>
-                <div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.35rem" }}>
-                    <span className={`badge ${getStatusBadgeClass(selectedRequest.status)}`}>
-                      {selectedRequest.status}
-                    </span>
-                    <span className="text-mono" style={{ fontSize: "0.72rem", color: "var(--text-muted)" }}>
-                      ID: {selectedRequest.id}
-                    </span>
-                  </div>
-                  <h2 style={{ fontSize: "1.2rem", fontWeight: 700, color: "var(--text-primary)" }}>
-                    {selectedRequest.research_question || `Research Request ${selectedRequest.id.slice(0, 8)}`}
-                  </h2>
-                </div>
-
-                <div style={{ display: "flex", gap: "0.5rem" }}>
-                  <button
-                    onClick={() => setShowSourceModal(true)}
-                    disabled={isArchived}
-                    title={isArchived ? "Activate this channel before adding research sources." : "Add Research Source"}
-                    className="btn btn-secondary btn-sm"
-                  >
-                    + Add Source
-                  </button>
-                  <button
-                    onClick={() => handleRunResearch(selectedRequest.id)}
-                    disabled={actionLoading || sources.length === 0 || isArchived}
-                    title={isArchived ? "Activate this channel before executing research." : sources.length === 0 ? "Add at least one source first" : "Execute Research Pipeline"}
-                    className="btn btn-primary btn-sm"
-                  >
-                    {actionLoading ? "Running Pipeline..." : "⚡ Execute Research Pipeline"}
-                  </button>
-                </div>
-              </div>
-
-              {selectedRequest.research_question && (
-                <div style={{ padding: "0.75rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)", fontSize: "0.82rem", color: "var(--text-secondary)" }}>
-                  <strong style={{ color: "var(--text-primary)" }}>Core Question:</strong> {selectedRequest.research_question}
-                </div>
-              )}
-            </div>
-
-            {/* Tab Navigation */}
-            <div className="card" style={{ padding: "1.25rem" }}>
-              <div className="tab-group" style={{ marginBottom: "1.25rem" }}>
-                <button
-                  onClick={() => setActiveTab("requests")}
-                  className={`tab-item ${activeTab === "requests" ? "active" : ""}`}
-                >
-                  Overview & Sources ({sources.length})
-                </button>
-                <button
-                  onClick={() => setActiveTab("claims")}
-                  className={`tab-item ${activeTab === "claims" ? "active" : ""}`}
-                >
-                  Fact Claims ({claims.length})
-                </button>
-                <button
-                  onClick={() => setActiveTab("conflicts")}
-                  className={`tab-item ${activeTab === "conflicts" ? "active" : ""}`}
-                >
-                  Conflicts ({conflicts.length})
-                </button>
-                <button
-                  onClick={() => setActiveTab("brief")}
-                  className={`tab-item ${activeTab === "brief" ? "active" : ""}`}
-                >
-                  Research Brief {currentBrief ? "✓" : ""}
-                </button>
-              </div>
-
-              {/* Tab: Overview & Sources */}
-              {activeTab === "requests" && (
-                <div>
-                  <h4 style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.75rem" }}>
-                    Sources & Extraction Base ({sources.length})
-                  </h4>
-                  {sources.length === 0 ? (
-                    <div
-                      style={{
-                        textAlign: "center",
-                        padding: "2.5rem 1rem",
-                        color: "var(--text-muted)",
-                        fontSize: "0.85rem",
-                        background: "var(--bg-input)",
-                        borderRadius: "var(--radius-sm)",
-                        border: "1px solid var(--border-subtle)",
-                      }}
-                    >
-                      <p style={{ marginBottom: "0.75rem" }}>No sources ingested for this research request yet.</p>
+              New request
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => void loadData()}
+            >
+              Refresh
+            </button>
+          </>
+        }
+      />
+      {archived ? (
+        <Alert tone="warning" title="Channel archived">
+          Research mutations are disabled until the channel is active.
+        </Alert>
+      ) : null}
+      {error ? (
+        <ErrorState
+          title="Research workflow unavailable"
+          description={error}
+          action={
+            <button
+              className="btn btn-secondary btn-sm"
+              type="button"
+              onClick={() => void loadData()}
+            >
+              Retry
+            </button>
+          }
+        />
+      ) : null}
+      <WorkflowStatusSummary
+        metrics={[
+          { label: "Request", value: status, status },
+          {
+            label: "Outcome",
+            value: outcome || "Not available",
+            status: outcome,
+          },
+          { label: "Sources", value: sources.length },
+          {
+            label: "Verified claims",
+            value: claims.filter((claim) => claim.is_verified).length,
+          },
+          {
+            label: "Open conflicts",
+            value: conflicts.filter((conflict) => conflict.status === "OPEN")
+              .length,
+          },
+        ]}
+      />
+      {loading ? (
+        <LoadingState
+          title="Loading research workflow"
+          description="Retrieving requests and eligible topics."
+        />
+      ) : requests.length === 0 ? (
+        <EmptyState
+          title="No research requests"
+          description={
+            topics.length
+              ? "Create a request from an evaluated topic."
+              : "Evaluate and select a topic before beginning research."
+          }
+          action={
+            topics.length ? (
+              <button
+                className="btn btn-primary"
+                type="button"
+                onClick={() => setCreateOpen(true)}
+              >
+                Create research request
+              </button>
+            ) : (
+              <Link
+                className="btn btn-primary"
+                href={`/channels/${channelId}/topics`}
+              >
+                Open topics
+              </Link>
+            )
+          }
+        />
+      ) : (
+        <div className="workflow-layout">
+          <EntityList
+            title="Research requests"
+            description={`${requests.length} request${requests.length === 1 ? "" : "s"}`}
+          >
+            {requests.map((request) => (
+              <EntityListButton
+                key={request.id}
+                selected={request.id === selectedId}
+                title={
+                  request.research_question ||
+                  `Request ${request.id.slice(0, 8)}`
+                }
+                status={request.status}
+                meta={new Date(request.created_at).toLocaleDateString()}
+                onClick={() => void chooseRequest(request)}
+              />
+            ))}
+          </EntityList>
+          <div className="workflow-detail">
+            {selected ? (
+              <>
+                <PageSection
+                  title={selected.research_question || "Research request"}
+                  description={
+                    selected.scope || "No explicit research scope was supplied."
+                  }
+                  actions={
+                    <div className="ui-inline-actions">
                       <button
-                        onClick={() => setShowSourceModal(true)}
-                        disabled={isArchived}
-                        title={isArchived ? "Activate this channel before adding research sources." : "Add First Source Excerpt"}
-                        className="btn btn-primary btn-sm"
+                        className="btn btn-secondary btn-sm"
+                        type="button"
+                        disabled={archived}
+                        onClick={() => setSourceOpen(true)}
                       >
-                        + Add First Source Excerpt
+                        Add source
+                      </button>
+                      <button
+                        className="btn btn-primary btn-sm"
+                        type="button"
+                        disabled={busy || archived || sources.length === 0}
+                        onClick={() => void runResearch()}
+                      >
+                        {busy ? "Working…" : "Run research"}
                       </button>
                     </div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                      {sources.map((src) => (
-                        <div
-                          key={src.id}
-                          style={{
-                            padding: "0.85rem 1rem",
-                            background: "var(--bg-input)",
-                            borderRadius: "var(--radius-sm)",
-                            border: "1px solid var(--border-subtle)",
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
-                            <div style={{ fontWeight: 600, fontSize: "0.9rem", color: "var(--text-primary)" }}>
-                              {src.title}
+                  }
+                >
+                  <TechnicalDetails data={selected} />
+                </PageSection>
+                {detailError ? (
+                  <ErrorState
+                    title="Some research details failed"
+                    description={detailError}
+                    action={
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        type="button"
+                        onClick={() => void loadDetails(selected)}
+                      >
+                        Retry details
+                      </button>
+                    }
+                  />
+                ) : null}
+                <WorkflowTabs
+                  label="Research details"
+                  active={view}
+                  onChange={setView}
+                  tabs={[
+                    { id: "overview", label: "Sources", count: sources.length },
+                    { id: "brief", label: "Brief", count: brief ? 1 : 0 },
+                    { id: "claims", label: "Claims", count: claims.length },
+                    {
+                      id: "conflicts",
+                      label: "Conflicts",
+                      count: conflicts.length,
+                    },
+                  ]}
+                />
+                {detailsLoading ? (
+                  <LoadingState title="Loading request details" />
+                ) : view === "overview" ? (
+                  <PageSection
+                    title="Sources and independence"
+                    description="Source quality and independence clusters are shown directly; excerpts remain readable."
+                  >
+                    {sources.length === 0 ? (
+                      <EmptyState
+                        title="No research sources"
+                        description="Add at least one source before running the research pipeline."
+                      />
+                    ) : (
+                      <div className="workflow-card-grid">
+                        {sources.map((source) => (
+                          <article className="workflow-card" key={source.id}>
+                            <div className="workflow-card-header">
+                              <h3>{source.title}</h3>
+                              <StatusBadge
+                                tone={statusTone(source.primary_source_status)}
+                              >
+                                {source.primary_source_status}
+                              </StatusBadge>
                             </div>
-                            <div style={{ display: "flex", gap: "0.4rem" }}>
-                              <span className="badge badge-neutral" style={{ fontSize: "0.68rem" }}>
-                                {src.publisher}
-                              </span>
-                              <span className="badge badge-active" style={{ fontSize: "0.68rem" }}>
-                                {src.primary_source_status}
-                              </span>
+                            <p className="workflow-copy">
+                              {source.content_excerpt}
+                            </p>
+                            <div className="workflow-data-list">
+                              <div className="workflow-data-row">
+                                <span>Publisher</span>
+                                <strong>{source.publisher}</strong>
+                              </div>
+                              <div className="workflow-data-row">
+                                <span>Quality</span>
+                                <strong>
+                                  {source.quality_score.toFixed(2)}
+                                </strong>
+                              </div>
+                              <div className="workflow-data-row">
+                                <span>Independence cluster</span>
+                                <strong>
+                                  {source.independence_cluster_id ||
+                                    "Not assigned"}
+                                </strong>
+                              </div>
                             </div>
+                            {source.url ? (
+                              <a
+                                href={source.url}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                Open source
+                              </a>
+                            ) : null}
+                            <TechnicalDetails data={source} />
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </PageSection>
+                ) : view === "brief" ? (
+                  <PageSection
+                    title="Research brief"
+                    description="The pipeline outcome is explicit; partial or insufficient evidence is not presented as success."
+                  >
+                    {brief ? (
+                      <article className="workflow-card">
+                        <div className="workflow-card-header">
+                          <div>
+                            <h3>{brief.title}</h3>
+                            <p className="workflow-copy">{brief.summary}</p>
                           </div>
-                          {src.url && (
-                            <a
-                              href={src.url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{ fontSize: "0.75rem", color: "var(--accent-secondary)", textDecoration: "underline", display: "inline-block", marginBottom: "0.35rem" }}
-                            >
-                              {src.url} ↗
-                            </a>
-                          )}
-                          <p style={{ fontSize: "0.82rem", color: "var(--text-muted)", lineHeight: 1.4, fontStyle: "italic" }}>
-                            &ldquo;{src.content_excerpt}&rdquo;
-                          </p>
+                          <StatusBadge tone={statusTone(brief.outcome)}>
+                            {brief.outcome}
+                          </StatusBadge>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Tab: Fact Claims */}
-              {activeTab === "claims" && (
-                <div>
-                  <h4 style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.75rem" }}>
-                    Verified Fact Claims ({claims.length})
-                  </h4>
-                  {claims.length === 0 ? (
-                    <div style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
-                      No claims extracted yet. Run the research pipeline to extract deterministic claims from sources.
-                    </div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                      {claims.map((claim) => (
-                        <div
-                          key={claim.id}
-                          style={{
-                            padding: "0.85rem 1rem",
-                            background: "var(--bg-input)",
-                            borderRadius: "var(--radius-sm)",
-                            border: "1px solid var(--border-subtle)",
-                          }}
-                        >
-                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.35rem" }}>
-                            <span style={{ fontSize: "0.88rem", fontWeight: 600, color: "var(--text-primary)" }}>
-                              {claim.claim_text}
-                            </span>
-                            <span className={`badge ${getConfidenceBadgeClass(claim.confidence_band)}`}>
-                              {claim.confidence_band} ({Math.round(claim.confidence_score * 100)}%)
-                            </span>
-                          </div>
-                          <div style={{ display: "flex", gap: "1rem", fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                            <span>Claim Type: <strong>{claim.claim_type}</strong></span>
-                            <span>Verified: <strong>{claim.is_verified ? "Yes" : "No"}</strong></span>
-                            <span>Supporting Sources: <strong>{claim.supporting_sources_count}</strong></span>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Tab: Conflicts */}
-              {activeTab === "conflicts" && (
-                <div>
-                  <h4 style={{ fontSize: "0.9rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.75rem" }}>
-                    Contradiction & Conflict Log ({conflicts.length})
-                  </h4>
-                  {conflicts.length === 0 ? (
-                    <div style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
-                      ✓ No evidentiary contradictions detected among ingested sources.
-                    </div>
-                  ) : (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                      {conflicts.map((cnf) => (
-                        <div
-                          key={cnf.id}
-                          style={{
-                            padding: "0.85rem 1rem",
-                            background: "var(--status-warning-bg)",
-                            border: "1px solid var(--status-warning-border)",
-                            borderRadius: "var(--radius-sm)",
-                          }}
-                        >
-                          <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "var(--status-warning)", marginBottom: "0.25rem" }}>
-                            Conflict: {cnf.conflict_type} (Severity: {cnf.severity})
-                          </div>
-                          <p style={{ fontSize: "0.82rem", color: "var(--text-primary)" }}>{cnf.description}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Tab: Research Brief */}
-              {activeTab === "brief" && (
-                <div>
-                  {currentBrief ? (
-                    <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <WorkflowStatusSummary
+                          metrics={[
+                            {
+                              label: "Confidence",
+                              value: `${Math.round(brief.overall_confidence * 100)}%`,
+                            },
+                            {
+                              label: "Verified",
+                              value: brief.verified_claims.length,
+                            },
+                            {
+                              label: "Uncertain",
+                              value: brief.uncertain_claims.length,
+                            },
+                            {
+                              label: "Contradictions",
+                              value: brief.contradictions.length,
+                            },
+                          ]}
+                        />
                         <div>
-                          <span className="badge badge-success" style={{ marginBottom: "0.35rem" }}>
-                            Research Brief Ready (v{currentBrief.version})
-                          </span>
-                          <h3 style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--text-primary)" }}>
-                            {currentBrief.title}
-                          </h3>
+                          <h3>Key facts</h3>
+                          {brief.key_facts.length ? (
+                            <ul className="ui-check-list">
+                              {brief.key_facts.map((fact) => (
+                                <li key={fact}>{fact}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="workflow-copy">
+                              No key facts recorded.
+                            </p>
+                          )}
                         </div>
-                        {isArchived ? (
-                          <button
-                            disabled
-                            title="Activate this channel before proceeding to content generation."
-                            className="btn btn-primary btn-sm"
-                          >
-                            Proceed to Content Engine →
-                          </button>
-                        ) : (
-                          <Link
-                            href={`/channels/${channelId}/content`}
-                            className="btn btn-primary btn-sm"
-                          >
-                            Proceed to Content Engine →
-                          </Link>
-                        )}
-                      </div>
-
-                      <div style={{ padding: "1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
-                        <h4 style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text-secondary)", marginBottom: "0.5rem" }}>
-                          Synthesized Core Summary
-                        </h4>
-                        <div style={{ fontSize: "0.85rem", color: "var(--text-primary)", lineHeight: 1.6 }}>
-                          {currentBrief.summary || "No narrative summary generated."}
-                        </div>
-                      </div>
-                    </div>
-                  ) : (
-                    <div style={{ textAlign: "center", padding: "2.5rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
-                      <p style={{ marginBottom: "0.75rem" }}>Research brief not generated yet for this request.</p>
-                      <button
-                        onClick={() => handleRunResearch(selectedRequest.id)}
-                        disabled={actionLoading || sources.length === 0}
-                        className="btn btn-primary btn-sm"
-                      >
-                        Run Research Pipeline to Generate Brief
-                      </button>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </div>
-        ) : (
-          <div className="card" style={{ padding: "3rem 1.5rem", textAlign: "center", color: "var(--text-muted)" }}>
-            <p style={{ fontSize: "0.95rem", marginBottom: "0.75rem" }}>No research request selected.</p>
-            <p style={{ fontSize: "0.82rem" }}>Select a research request on the left or create a new request above.</p>
-          </div>
-        )}
-      </div>
-
-      {/* Modal: Create Research Request */}
-      {showCreateModal && (
-        <div className="modal-backdrop">
-          <div className="modal-card" style={{ maxWidth: "540px" }}>
-            <div className="modal-header">
-              <h3 style={{ fontSize: "1rem", fontWeight: 700, color: "var(--text-primary)" }}>
-                New Research Request
-              </h3>
-              <button onClick={() => setShowCreateModal(false)} className="btn btn-secondary btn-sm" style={{ padding: "0.2rem 0.5rem" }}>
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateRequest}>
-              <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                <div className="form-group">
-                  <label className="form-label">Eligible Topic Candidate *</label>
-                  <select
-                    value={selectedTopicId}
-                    onChange={(e) => setSelectedTopicId(e.target.value)}
-                    className="form-select"
-                    required
+                        {brief.open_questions.length ? (
+                          <Alert tone="warning" title="Open questions">
+                            <ul>
+                              {brief.open_questions.map((item) => (
+                                <li key={item}>{item}</li>
+                              ))}
+                            </ul>
+                          </Alert>
+                        ) : null}
+                        <TechnicalDetails data={brief} />
+                      </article>
+                    ) : (
+                      <EmptyState
+                        title="No research brief"
+                        description={
+                          selected.status === "FAILED"
+                            ? "The research request failed before producing a brief."
+                            : selected.status === "SUCCEEDED"
+                              ? "The request completed but its brief could not be loaded."
+                              : "Run the research pipeline after adding sources."
+                        }
+                      />
+                    )}
+                  </PageSection>
+                ) : view === "claims" ? (
+                  <PageSection
+                    title="Claims"
+                    description="Verification, confidence, and source agreement are visible without opening raw payloads."
                   >
-                    {eligibleTopics.map((t) => (
-                      <option key={t.id} value={t.id}>
-                        {t.title} [{t.status}]
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Research Question</label>
-                  <input
-                    type="text"
-                    value={researchQuestion}
-                    onChange={(e) => setResearchQuestion(e.target.value)}
-                    placeholder="e.g. What are the top 3 architectural bottlenecks in async python?"
-                    className="form-input"
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Scope & Guidance</label>
-                  <textarea
-                    value={researchScope}
-                    onChange={(e) => setResearchScope(e.target.value)}
-                    placeholder="Focus on real production benchmarks, avoid promotional blogs."
-                    className="form-textarea"
-                    rows={3}
-                  />
-                </div>
-              </div>
-
-              <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  className="btn btn-secondary btn-sm"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={actionLoading || !selectedTopicId}
-                  className="btn btn-primary btn-sm"
-                >
-                  {actionLoading ? "Creating..." : "Create Request"}
-                </button>
-              </div>
-            </form>
+                    {claims.length === 0 ? (
+                      <EmptyState title="No claims extracted" />
+                    ) : (
+                      <div className="workflow-card-grid">
+                        {claims.map((claim) => (
+                          <article className="workflow-card" key={claim.id}>
+                            <div className="workflow-card-header">
+                              <h3>{claim.claim_text}</h3>
+                              <StatusBadge
+                                tone={
+                                  claim.is_verified
+                                    ? "success"
+                                    : statusTone(claim.confidence_band)
+                                }
+                              >
+                                {claim.is_verified
+                                  ? "VERIFIED"
+                                  : claim.confidence_band}
+                              </StatusBadge>
+                            </div>
+                            <div className="workflow-data-list">
+                              <div className="workflow-data-row">
+                                <span>Independent sources</span>
+                                <strong>
+                                  {claim.independent_sources_count}
+                                </strong>
+                              </div>
+                              <div className="workflow-data-row">
+                                <span>Supports / contradicts</span>
+                                <strong>
+                                  {claim.supporting_sources_count} /{" "}
+                                  {claim.contradicting_sources_count}
+                                </strong>
+                              </div>
+                              <div className="workflow-data-row">
+                                <span>Confidence</span>
+                                <strong>
+                                  {Math.round(claim.confidence_score * 100)}%
+                                </strong>
+                              </div>
+                            </div>
+                            <TechnicalDetails data={claim} />
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </PageSection>
+                ) : (
+                  <PageSection
+                    title="Evidence conflicts"
+                    description="Open contradictions remain prominent until explicitly resolved or dismissed."
+                  >
+                    {conflicts.length === 0 ? (
+                      <EmptyState
+                        title="No conflicts detected"
+                        description="No contradictory evidence is recorded for this request."
+                      />
+                    ) : (
+                      <div className="workflow-card-grid">
+                        {conflicts.map((conflict) => (
+                          <article
+                            className={`workflow-card ${conflict.severity === "HIGH" ? "workflow-error-card" : ""}`}
+                            key={conflict.id}
+                          >
+                            <div className="workflow-card-header">
+                              <h3>{conflict.conflict_type}</h3>
+                              <StatusBadge
+                                tone={
+                                  conflict.status === "OPEN"
+                                    ? "danger"
+                                    : "neutral"
+                                }
+                              >
+                                {conflict.severity} · {conflict.status}
+                              </StatusBadge>
+                            </div>
+                            <p className="workflow-copy">
+                              {conflict.description}
+                            </p>
+                            <TechnicalDetails data={conflict} />
+                          </article>
+                        ))}
+                      </div>
+                    )}
+                  </PageSection>
+                )}
+              </>
+            ) : null}
           </div>
         </div>
       )}
-
-      {/* Modal: Add Source */}
-      {showSourceModal && (
-        <div className="modal-backdrop">
-          <div className="modal-card" style={{ maxWidth: "560px" }}>
-            <div className="modal-header">
-              <h3 style={{ fontSize: "1rem", fontWeight: 700, color: "var(--text-primary)" }}>
-                Add Research Source
-              </h3>
-              <button onClick={() => setShowSourceModal(false)} className="btn btn-secondary btn-sm" style={{ padding: "0.2rem 0.5rem" }}>
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleAddSource}>
-              <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
-                <div className="form-group">
-                  <label className="form-label">Source Title *</label>
-                  <input
-                    type="text"
-                    value={sourceTitle}
-                    onChange={(e) => setSourceTitle(e.target.value)}
-                    placeholder="e.g. FastAPI Async Database Concurrency Benchmarks 2026"
-                    className="form-input"
-                    required
-                  />
-                </div>
-
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "0.75rem" }}>
-                  <div className="form-group">
-                    <label className="form-label">Publisher *</label>
-                    <input
-                      type="text"
-                      value={sourcePublisher}
-                      onChange={(e) => setSourcePublisher(e.target.value)}
-                      placeholder="e.g. Tiangolo / Official Docs"
-                      className="form-input"
-                      required
-                    />
-                  </div>
-                  <div className="form-group">
-                    <label className="form-label">Primary Source Status</label>
-                    <select
-                      value={sourcePrimaryStatus}
-                      onChange={(e) => setSourcePrimaryStatus(e.target.value as PrimarySourceStatus)}
-                      className="form-select"
-                    >
-                      <option value="PRIMARY">PRIMARY (Authoritative)</option>
-                      <option value="SECONDARY">SECONDARY (Synthesis)</option>
-                      <option value="UNKNOWN">UNKNOWN</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">URL (Optional)</label>
-                  <input
-                    type="url"
-                    value={sourceUrl}
-                    onChange={(e) => setSourceUrl(e.target.value)}
-                    placeholder="https://..."
-                    className="form-input"
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Content Excerpt *</label>
-                  <textarea
-                    value={sourceExcerpt}
-                    onChange={(e) => setSourceExcerpt(e.target.value)}
-                    placeholder="Paste the factual excerpt from the source here..."
-                    className="form-textarea"
-                    rows={4}
-                    required
-                  />
-                </div>
-              </div>
-
-              <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-                <button
-                  type="button"
-                  onClick={() => setShowSourceModal(false)}
-                  className="btn btn-secondary btn-sm"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={actionLoading}
-                  className="btn btn-primary btn-sm"
-                >
-                  {actionLoading ? "Adding..." : "Add Source"}
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
-      )}
+      <Dialog
+        open={createOpen}
+        title="Create research request"
+        description="Choose an evaluated topic and define the operator research goal."
+        onClose={() => setCreateOpen(false)}
+        actions={
+          <>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setCreateOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary"
+              type="submit"
+              form="research-request-form"
+              disabled={busy || !topicId}
+            >
+              Create request
+            </button>
+          </>
+        }
+      >
+        <form
+          id="research-request-form"
+          className="workflow-dialog-form"
+          onSubmit={createRequest}
+        >
+          <FormField id="research-topic" label="Topic" required>
+            <select
+              className="select"
+              value={topicId}
+              onChange={(event) => setTopicId(event.target.value)}
+            >
+              {topics.map((topic) => (
+                <option value={topic.id} key={topic.id}>
+                  {topic.title}
+                </option>
+              ))}
+            </select>
+          </FormField>
+          <FormField id="research-question" label="Research question">
+            <input
+              className="input"
+              value={question}
+              onChange={(event) => setQuestion(event.target.value)}
+            />
+          </FormField>
+          <FormField id="research-scope" label="Scope">
+            <textarea
+              className="input"
+              value={scope}
+              onChange={(event) => setScope(event.target.value)}
+            />
+          </FormField>
+        </form>
+      </Dialog>
+      <Dialog
+        open={sourceOpen}
+        title="Add research source"
+        description="Store an operator-provided source excerpt without masking its provenance."
+        onClose={() => setSourceOpen(false)}
+        actions={
+          <>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              onClick={() => setSourceOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              className="btn btn-primary"
+              type="submit"
+              form="research-source-form"
+              disabled={busy}
+            >
+              Add source
+            </button>
+          </>
+        }
+      >
+        <form
+          id="research-source-form"
+          className="workflow-dialog-form"
+          onSubmit={addSource}
+        >
+          <FormField id="source-title" label="Title" required>
+            <input
+              className="input"
+              value={sourceTitle}
+              onChange={(event) => setSourceTitle(event.target.value)}
+            />
+          </FormField>
+          <FormField id="source-publisher" label="Publisher" required>
+            <input
+              className="input"
+              value={publisher}
+              onChange={(event) => setPublisher(event.target.value)}
+            />
+          </FormField>
+          <FormField id="source-url" label="URL">
+            <input
+              className="input"
+              type="url"
+              value={sourceUrl}
+              onChange={(event) => setSourceUrl(event.target.value)}
+            />
+          </FormField>
+          <FormField id="source-primary" label="Primary source status">
+            <select
+              className="select"
+              value={primaryStatus}
+              onChange={(event) =>
+                setPrimaryStatus(event.target.value as PrimarySourceStatus)
+              }
+            >
+              <option value="UNKNOWN">Unknown</option>
+              <option value="CLAIMED">Claimed</option>
+              <option value="CONFIRMED">Confirmed</option>
+            </select>
+          </FormField>
+          <FormField id="source-excerpt" label="Source excerpt" required>
+            <textarea
+              className="input"
+              value={excerpt}
+              onChange={(event) => setExcerpt(event.target.value)}
+            />
+          </FormField>
+        </form>
+      </Dialog>
     </div>
   );
 }

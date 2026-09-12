@@ -1,190 +1,145 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
-import { useOperatorContext } from "@/lib/operator-context";
+import { useCallback, useEffect, useState } from "react";
 import {
-  ChannelAnalyticsSummary,
-  PublishIntent,
-  VideoAnalyticsSummary,
   getChannelAnalytics,
   getVideoAnalytics,
   listPublishIntents,
+  type ChannelAnalyticsSummary,
+  type PublishIntent,
+  type VideoAnalyticsSummary,
 } from "@/lib/api";
+import { useOperatorContext } from "@/lib/operator-context";
 import { AnalyticsPerformanceCard } from "@/components/AnalyticsPerformanceCard";
 import { ChannelContextBar } from "@/components/ChannelContextBar";
+import { Alert, EmptyState, LoadingState, PageHeader, PageSection } from "@/components/ui";
 
 export default function AnalyticsPage() {
-  const { selectedChannelId } = useOperatorContext();
-
+  const { selectedChannelId, selectedChannel } = useOperatorContext();
   const [channelAnalytics, setChannelAnalytics] = useState<ChannelAnalyticsSummary | null>(null);
   const [videoAnalytics, setVideoAnalytics] = useState<VideoAnalyticsSummary | null>(null);
-  const [publishedIntents, setPublishedIntents] = useState<PublishIntent[]>([]);
-  const [selectedIntentId, setSelectedIntentId] = useState<string>("");
+  const [intents, setIntents] = useState<PublishIntent[]>([]);
+  const [selectedIntentId, setSelectedIntentId] = useState("");
   const [loading, setLoading] = useState(true);
+  const [videoLoading, setVideoLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [videoError, setVideoError] = useState<string | null>(null);
+
+  const selectIntent = useCallback(async (intentId: string) => {
+    setSelectedIntentId(intentId);
+    setVideoError(null);
+    if (!intentId) {
+      setVideoAnalytics(null);
+      return;
+    }
+    setVideoLoading(true);
+    try {
+      setVideoAnalytics(await getVideoAnalytics(intentId));
+    } catch (requestError: unknown) {
+      setVideoAnalytics(null);
+      setVideoError(requestError instanceof Error ? requestError.message : "Video analytics are unavailable.");
+    } finally {
+      setVideoLoading(false);
+    }
+  }, []);
 
   const loadData = useCallback(async () => {
-    if (!selectedChannelId) return;
+    if (!selectedChannelId) {
+      setLoading(false);
+      setChannelAnalytics(null);
+      setIntents([]);
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
-
-      const [cAnalytics, intents] = await Promise.all([
-        getChannelAnalytics(selectedChannelId).catch(() => null),
-        listPublishIntents({ channel_id: selectedChannelId }).catch(() => []),
+      const [analytics, publishIntents] = await Promise.all([
+        getChannelAnalytics(selectedChannelId),
+        listPublishIntents({ channel_id: selectedChannelId }),
       ]);
-
-      setChannelAnalytics(cAnalytics);
-      setPublishedIntents(intents);
-
-      const activeIntent = intents.find((i) => i.state === "PUBLISHED") || intents[0];
-      if (activeIntent) {
-        setSelectedIntentId(activeIntent.id);
-        const vAnalytics = await getVideoAnalytics(activeIntent.id).catch(() => null);
-        setVideoAnalytics(vAnalytics);
-      } else {
-        setSelectedIntentId("");
-        setVideoAnalytics(null);
-      }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load analytics data");
+      setChannelAnalytics(analytics);
+      setIntents(publishIntents);
+      const activeIntent = publishIntents.find((intent) => intent.state === "PUBLISHED") || publishIntents[0];
+      await selectIntent(activeIntent?.id || "");
+    } catch (requestError: unknown) {
+      setError(requestError instanceof Error ? requestError.message : "Failed to load analytics.");
     } finally {
       setLoading(false);
     }
-  }, [selectedChannelId]);
+  }, [selectIntent, selectedChannelId]);
 
   useEffect(() => {
-    loadData();
+    void loadData();
   }, [loadData]);
 
-  const handleSelectVideo = async (intentId: string) => {
-    setSelectedIntentId(intentId);
-    try {
-      const vAnalytics = await getVideoAnalytics(intentId).catch(() => null);
-      setVideoAnalytics(vAnalytics);
-    } catch {
-      setVideoAnalytics(null);
-    }
-  };
-
   return (
-    <div style={{ maxWidth: "1200px", margin: "0 auto", padding: "1.5rem" }}>
-      {/* Universal Channel Context Bar */}
+    <div className="ui-page-stack">
       <ChannelContextBar currentTab="analytics" />
+      <PageHeader
+        eyebrow="Intelligence"
+        title="Performance intelligence"
+        description={selectedChannel ? `Authoritative channel and published-content analytics for ${selectedChannel.name}.` : "Select a channel to inspect analytics."}
+        actions={<button type="button" className="btn btn-secondary" onClick={() => void loadData()} disabled={loading}>Refresh</button>}
+      />
 
-      {/* Page Header */}
-      <div className="page-header" style={{ marginBottom: "1.5rem" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.25rem" }}>
-            <h1 className="page-title">📊 Channel & Content Analytics</h1>
-            <span className="badge badge-active">OMEGA-012</span>
-          </div>
-          <p className="page-subtitle">
-            Authoritative YouTube Data API v3 and Analytics API v2 polling, multi-window performance curves, and quality metrics.
-          </p>
-        </div>
-      </div>
+      {error && <Alert tone="danger" title="Analytics unavailable" actions={<button type="button" className="btn btn-secondary btn-sm" onClick={() => void loadData()}>Retry</button>}>{error}</Alert>}
 
-      {error && (
-        <div
-          style={{
-            padding: "0.75rem 1rem",
-            background: "var(--status-danger-bg)",
-            border: "1px solid var(--status-danger-border)",
-            borderRadius: "var(--radius-sm)",
-            fontSize: "0.82rem",
-            color: "var(--status-danger)",
-            marginBottom: "1.5rem",
-          }}
-        >
-          {error}
-        </div>
+      {loading ? <LoadingState title="Loading analytics" /> : !selectedChannelId ? (
+        <EmptyState title="No channel selected" description="Select an available channel before loading analytics." />
+      ) : !error && (
+        <>
+          <PageSection title="Channel snapshot" description="Lifetime values returned by the channel analytics endpoint.">
+            {channelAnalytics ? (
+              <div className="dash-metrics-grid">
+                <div className="dash-metric-card">
+                  <div className="metric-k">Total Views</div>
+                  <div className="metric-v">{channelAnalytics.total_views?.toLocaleString() ?? "—"}</div>
+                  <div className="metric-sub">Lifetime audience impressions</div>
+                </div>
+                <div className="dash-metric-card">
+                  <div className="metric-k">Subscribers</div>
+                  <div className="metric-v">{channelAnalytics.subscriber_count?.toLocaleString() ?? "—"}</div>
+                  <div className="metric-sub" style={{ color: "var(--success)" }}>Channel community size</div>
+                </div>
+                <div className="dash-metric-card">
+                  <div className="metric-k">Public Videos</div>
+                  <div className="metric-v">{channelAnalytics.video_count?.toLocaleString() ?? "—"}</div>
+                  <div className="metric-sub">Published catalog</div>
+                </div>
+                <div className="dash-metric-card">
+                  <div className="metric-k">Watch Time</div>
+                  <div className="metric-v">
+                    {channelAnalytics.aggregate_watch_time_seconds == null ? "—" : `${(channelAnalytics.aggregate_watch_time_seconds / 3600).toFixed(1)}h`}
+                  </div>
+                  <div className="metric-sub">Cumulative viewer engagement</div>
+                </div>
+              </div>
+            ) : <EmptyState title="No channel analytics" description="The analytics service returned no channel summary." />}
+          </PageSection>
+
+          <PageSection title="Published content performance" description="Select a persisted publish intent to inspect its measured performance.">
+            {intents.length === 0 ? (
+              <EmptyState title="No publish intents" description="No published content is available for analytics." />
+            ) : (
+              <>
+                <div className="ui-filter-field ui-select-field">
+                  <label htmlFor="analytics-intent">Content item</label>
+                  <select id="analytics-intent" className="select" value={selectedIntentId} onChange={(event) => void selectIntent(event.target.value)}>
+                    {intents.map((intent) => <option key={intent.id} value={intent.id}>{intent.title} · {intent.state} · revision {intent.revision_number}</option>)}
+                  </select>
+                </div>
+                {videoError && <Alert tone="danger" title="Video analytics unavailable">{videoError}</Alert>}
+                {videoLoading ? <LoadingState title="Loading content analytics" /> : !videoError && (
+                  <div className="ui-chart-container">
+                    <AnalyticsPerformanceCard analytics={videoAnalytics} onRefresh={() => void selectIntent(selectedIntentId)} />
+                  </div>
+                )}
+              </>
+            )}
+          </PageSection>
+        </>
       )}
-
-      {/* Section 1: Channel-Level High-Level KPIs */}
-      <div
-        className="card"
-        style={{
-          padding: "1.25rem",
-          marginBottom: "1.5rem",
-        }}
-      >
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--border-subtle)", paddingBottom: "0.75rem", marginBottom: "1rem" }}>
-          <h3 style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)" }}>
-            Channel Lifetime Snapshot
-          </h3>
-          <button onClick={loadData} disabled={loading} className="btn btn-secondary btn-sm" style={{ fontSize: "0.75rem" }}>
-            ↻ Refresh Metrics
-          </button>
-        </div>
-
-        {channelAnalytics ? (
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))",
-              gap: "0.85rem",
-            }}
-          >
-            <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
-              <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Total Views</span>
-              <p style={{ fontSize: "1.35rem", fontWeight: 700, color: "var(--text-primary)", marginTop: "0.2rem" }}>
-                {channelAnalytics.total_views !== undefined && channelAnalytics.total_views !== null ? channelAnalytics.total_views.toLocaleString() : "—"}
-              </p>
-            </div>
-            <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
-              <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Subscribers</span>
-              <p style={{ fontSize: "1.35rem", fontWeight: 700, color: "var(--accent-secondary)", marginTop: "0.2rem" }}>
-                {channelAnalytics.subscriber_count !== undefined && channelAnalytics.subscriber_count !== null ? channelAnalytics.subscriber_count.toLocaleString() : "—"}
-              </p>
-            </div>
-            <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
-              <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Public Videos</span>
-              <p style={{ fontSize: "1.35rem", fontWeight: 700, color: "var(--text-primary)", marginTop: "0.2rem" }}>
-                {channelAnalytics.video_count !== undefined && channelAnalytics.video_count !== null ? channelAnalytics.video_count : "—"}
-              </p>
-            </div>
-            <div style={{ padding: "0.85rem 1rem", background: "var(--bg-input)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border-subtle)" }}>
-              <span style={{ fontSize: "0.72rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 600 }}>Total Watch Time</span>
-              <p style={{ fontSize: "1.35rem", fontWeight: 700, color: "var(--status-success)", marginTop: "0.2rem" }}>
-                {channelAnalytics.aggregate_watch_time_seconds !== undefined && channelAnalytics.aggregate_watch_time_seconds !== null ? `${(channelAnalytics.aggregate_watch_time_seconds / 3600).toFixed(1)} hrs` : "—"}
-              </p>
-            </div>
-          </div>
-        ) : (
-          <div style={{ textAlign: "center", padding: "1.5rem", color: "var(--text-muted)", fontSize: "0.85rem" }}>
-            No channel-level metrics synced yet. Connect an active YouTube account to pull subscriber and view metrics.
-          </div>
-        )}
-      </div>
-
-      {/* Section 2: Individual Video Performance Tracker */}
-      <div style={{ marginBottom: "1.5rem" }}>
-        {publishedIntents.length > 0 && (
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem", flexWrap: "wrap" }}>
-            <label style={{ fontSize: "0.85rem", fontWeight: 600, color: "var(--text-secondary)" }}>
-              Select Published Content Item:
-            </label>
-            <select
-              value={selectedIntentId}
-              onChange={(e) => handleSelectVideo(e.target.value)}
-              className="form-select"
-              style={{ minWidth: "320px", fontSize: "0.85rem", padding: "0.4rem 0.75rem" }}
-            >
-              {publishedIntents.map((intent) => (
-                <option key={intent.id} value={intent.id}>
-                  {intent.title} [{intent.state}] (v{intent.revision_number})
-                </option>
-              ))}
-            </select>
-          </div>
-        )}
-
-        <AnalyticsPerformanceCard
-          analytics={videoAnalytics}
-          onRefresh={() => handleSelectVideo(selectedIntentId)}
-        />
-      </div>
     </div>
   );
 }

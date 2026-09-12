@@ -1,16 +1,29 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
-  GuardianCheck,
-  GuardianConsolidatedStatus,
-  GuardianException,
   getMissionGuardianStatus,
-  listMissionGuardianChecks,
   listGuardianExceptions,
+  listMissionGuardianChecks,
   triggerSafeResume,
+  type GuardianCheck,
+  type GuardianConsolidatedStatus,
+  type GuardianException,
 } from "@/lib/api";
 import { formatCurrencyUsd } from "@/lib/formatters";
+import {
+  Alert,
+  EmptyState,
+  ErrorState,
+  LoadingState,
+  PageSection,
+  StatusBadge,
+} from "@/components/ui";
+import {
+  TechnicalDetails,
+  WorkflowStatusSummary,
+  statusTone,
+} from "@/components/workflow/WorkflowPrimitives";
 
 export function GuardianPanel({
   missionId,
@@ -25,163 +38,167 @@ export function GuardianPanel({
   const [checks, setChecks] = useState<GuardianCheck[]>([]);
   const [exceptions, setExceptions] = useState<GuardianException[]>([]);
   const [loading, setLoading] = useState(true);
-  const [actionLoading, setActionLoading] = useState(false);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const loadGuardianData = useCallback(async () => {
+  const load = useCallback(async () => {
+    setError(null);
     try {
-      const [st, chk, exc] = await Promise.all([
-        getMissionGuardianStatus(missionId).catch(() => null),
-        listMissionGuardianChecks(missionId).catch(() => []),
-        listGuardianExceptions(true).catch(() => []),
+      const [nextStatus, nextChecks, nextExceptions] = await Promise.all([
+        getMissionGuardianStatus(missionId),
+        listMissionGuardianChecks(missionId),
+        listGuardianExceptions(true),
       ]);
-      setStatus(st);
-      setChecks(chk);
-      setExceptions(exc);
-      setErrorMsg(null);
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : "Failed to load Guardian data");
+      setStatus(nextStatus);
+      setChecks(nextChecks);
+      setExceptions(nextExceptions);
+    } catch (reason: unknown) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Guardian data could not be loaded.",
+      );
     } finally {
       setLoading(false);
     }
   }, [missionId]);
 
   useEffect(() => {
-    loadGuardianData();
-    const interval = setInterval(loadGuardianData, 5000);
-    return () => clearInterval(interval);
-  }, [loadGuardianData]);
+    void load();
+    const timer = window.setInterval(() => void load(), 5000);
+    return () => window.clearInterval(timer);
+  }, [load]);
 
-  const handleSafeResume = async () => {
+  async function safeResume() {
+    setBusy(true);
+    setError(null);
     try {
-      setActionLoading(true);
-      setErrorMsg(null);
       await triggerSafeResume(missionId);
-      await loadGuardianData();
-      if (onStateChanged) onStateChanged();
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : "Safe Resume failed");
+      await load();
+      onStateChanged?.();
+    } catch (reason: unknown) {
+      setError(
+        reason instanceof Error ? reason.message : "Safe resume failed.",
+      );
     } finally {
-      setActionLoading(false);
+      setBusy(false);
     }
-  };
-
-  if (loading && !status) {
-    return (
-      <div style={{ textAlign: "center", padding: "1.5rem", color: "var(--text-muted)", fontSize: "0.82rem", fontFamily: "var(--font-mono)" }}>
-        Loading Guardian Safety & Quality Subsystem...
-      </div>
-    );
   }
 
-  const gateState = status?.overall_gate_state || "OPEN";
-  const isBlocked = gateState === "BLOCKED";
-  const isRestricted = gateState === "RESTRICTED";
-
+  if (loading && !status)
+    return (
+      <LoadingState
+        title="Loading Guardian controls"
+        description="Retrieving invariant checks and active exceptions."
+      />
+    );
+  const gate = status?.overall_gate_state || "UNKNOWN";
   return (
-    <div className="card" style={{ borderColor: isBlocked ? "var(--status-danger-border)" : isRestricted ? "var(--status-warning-border)" : "var(--border-subtle)" }}>
-      {/* Status Banner */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: "1rem", marginBottom: "1rem" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <span className="section-title">Guardian Control Plane</span>
-            <span className={`badge ${isBlocked ? "badge-failed" : isRestricted ? "badge-waiting" : "badge-succeeded"}`}>
-              {isBlocked ? "GATE BLOCKED" : isRestricted ? "RESTRICTED (WARNINGS)" : "ALL GATES OPEN"}
-            </span>
-          </div>
-          <p style={{ fontSize: "0.8rem", color: "var(--text-secondary)", marginTop: "0.2rem" }}>
-            Deterministic invariant control plane protecting dispatch, rendering, and external side effects.
-          </p>
-        </div>
-
-        {isPaused && (
+    <PageSection
+      title="Guardian control plane"
+      description="Deterministic invariant checks protect dispatch, rendering, and external side effects."
+      actions={
+        isPaused ? (
           <button
-            disabled={actionLoading}
-            onClick={handleSafeResume}
-            className="btn btn-success btn-sm"
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={busy}
+            onClick={() => void safeResume()}
           >
-            {actionLoading ? "Verifying..." : "⚡ Safe Resume Recheck"}
+            {busy ? "Verifying…" : "Safe resume recheck"}
           </button>
-        )}
-      </div>
-
-      {errorMsg && (
-        <div style={{ padding: "0.75rem", background: "var(--status-danger-bg)", border: "1px solid var(--status-danger-border)", borderRadius: "var(--radius-sm)", color: "var(--status-danger)", fontSize: "0.8rem", marginBottom: "1rem" }}>
-          {errorMsg}
+        ) : undefined
+      }
+    >
+      {error ? (
+        <ErrorState
+          title="Guardian status unavailable"
+          description={error}
+          action={
+            <button
+              type="button"
+              className="btn btn-secondary btn-sm"
+              onClick={() => void load()}
+            >
+              Retry
+            </button>
+          }
+        />
+      ) : null}
+      {gate === "BLOCKED" ? (
+        <Alert tone="danger" title="Guardian blocked">
+          One or more invariant checks prevent continuation.
+        </Alert>
+      ) : gate === "RESTRICTED" ? (
+        <Alert tone="warning" title="Guardian restricted">
+          Continuation is constrained by active warnings.
+        </Alert>
+      ) : (
+        <Alert tone="success" title="Guardian gates open">
+          No blocking invariant is currently reported.
+        </Alert>
+      )}
+      <WorkflowStatusSummary
+        metrics={[
+          {
+            label: "Gate",
+            value: gate,
+            status: gate === "OPEN" ? "SUCCEEDED" : gate,
+          },
+          { label: "Epoch", value: `v${status?.guardian_epoch ?? 1}` },
+          {
+            label: "Budget",
+            value: `${formatCurrencyUsd(status?.accumulated_cost_usd, "$0.00")} / ${formatCurrencyUsd(status?.budget_ceiling_usd, "$50.00")}`,
+          },
+          { label: "Open findings", value: status?.open_findings_count ?? 0 },
+          { label: "Active exceptions", value: exceptions.length },
+        ]}
+      />
+      {checks.length === 0 ? (
+        <EmptyState
+          title="No Guardian checks"
+          description="No evaluated invariant checks are available for this mission."
+        />
+      ) : (
+        <div className="ui-table-card table-container">
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Checkpoint</th>
+                <th>Decision</th>
+                <th>Rationale</th>
+                <th>Timestamp</th>
+              </tr>
+            </thead>
+            <tbody>
+              {checks.slice(0, 8).map((check) => {
+                const action = check.decision?.action || check.status;
+                return (
+                  <tr key={check.id}>
+                    <td data-label="Checkpoint" className="workflow-id">
+                      {check.checkpoint}
+                    </td>
+                    <td data-label="Decision">
+                      <StatusBadge tone={statusTone(String(action))}>
+                        {String(action)}
+                      </StatusBadge>
+                    </td>
+                    <td data-label="Rationale">
+                      {check.decision?.reason || "Passed invariant"}
+                    </td>
+                    <td data-label="Timestamp">
+                      <time dateTime={check.created_at}>
+                        {new Date(check.created_at).toLocaleTimeString()}
+                      </time>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
-
-      {/* Metrics Bar */}
-      <div className="grid grid-cols-4" style={{ padding: "0.75rem 0", borderTop: "1px solid var(--border-subtle)", borderBottom: "1px solid var(--border-subtle)", marginBottom: "1rem" }}>
-        <div>
-          <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 700 }}>Epoch</div>
-          <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>
-            v{status?.guardian_epoch ?? 1}
-          </div>
-        </div>
-        <div>
-          <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 700 }}>Accumulated Cost</div>
-          <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>
-            {formatCurrencyUsd(status?.accumulated_cost_usd, "$0.00")} / {formatCurrencyUsd(status?.budget_ceiling_usd, "$50.00")}
-          </div>
-        </div>
-        <div>
-          <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 700 }}>Open Findings</div>
-          <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>
-            {status?.open_findings_count ?? 0}
-          </div>
-        </div>
-        <div>
-          <div style={{ fontSize: "0.7rem", color: "var(--text-muted)", textTransform: "uppercase", fontWeight: 700 }}>Active Exceptions</div>
-          <div style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-primary)", fontFamily: "var(--font-mono)" }}>
-            {exceptions.length}
-          </div>
-        </div>
-      </div>
-
-      {/* Checks Table */}
-      {checks.length > 0 && (
-        <div style={{ marginTop: "0.5rem" }}>
-          <div className="section-title" style={{ marginBottom: "0.5rem" }}>Evaluated Invariant Checks ({checks.length})</div>
-          <div className="table-container">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th style={{ width: "22%" }}>Checkpoint</th>
-                  <th style={{ width: "16%" }}>Decision</th>
-                  <th style={{ width: "42%" }}>Rationale</th>
-                  <th style={{ width: "20%", textAlign: "right" }}>Timestamp</th>
-                </tr>
-              </thead>
-              <tbody>
-                {checks.slice(0, 8).map((chk) => {
-                  const decisionAction = chk.decision?.action || chk.status;
-                  const isAllow = decisionAction === "ALLOW";
-                  const isWarn = decisionAction === "WARN";
-                  return (
-                    <tr key={chk.id}>
-                      <td className="text-mono" style={{ fontSize: "0.75rem", color: "var(--text-primary)" }}>
-                        {chk.checkpoint}
-                      </td>
-                      <td>
-                        <span className={`badge ${isAllow ? "badge-succeeded" : isWarn ? "badge-waiting" : "badge-failed"}`}>
-                          {String(decisionAction)}
-                        </span>
-                      </td>
-                      <td style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>
-                        {chk.decision?.reason || "Passed invariant"}
-                      </td>
-                      <td style={{ textAlign: "right", fontSize: "0.75rem", fontFamily: "var(--font-mono)", color: "var(--text-muted)" }}>
-                        {new Date(chk.created_at).toLocaleTimeString()}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-    </div>
+      <TechnicalDetails data={{ status, exceptions }} />
+    </PageSection>
   );
 }

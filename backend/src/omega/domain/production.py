@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -28,6 +28,12 @@ class ProductionRequestStatus(enum.StrEnum):
     SUCCEEDED = "SUCCEEDED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+
+
+# Historical interactive requests may contain this retired value.  Keeping it
+# in the read type makes those records observable without reintroducing it as
+# a writable lifecycle transition.
+ProductionRequestReadStatus = ProductionRequestStatus | Literal["APPROVED"]
 
 
 class ProductionOutcome(enum.StrEnum):
@@ -286,7 +292,7 @@ class ProductionRequestResponse(BaseModel):
     channel_dna_revision_id: UUID
     mission_execution_id: UUID | None = None
     mode: ProductionMode
-    status: ProductionRequestStatus
+    status: ProductionRequestReadStatus
     outcome: ProductionOutcome | None = None
     target_width: int
     target_height: int

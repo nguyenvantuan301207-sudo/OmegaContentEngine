@@ -1,604 +1,457 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import {
-  Channel,
-  getChannel,
-  getChannelCount,
-  getChannels,
-  listPlatformAccounts,
-  PlatformAccount,
-} from "@/lib/api";
-import { CANARY_CHANNEL_ID, useOperatorContext } from "@/lib/operator-context";
-
-interface ChannelWithAccount {
-  channel: Channel;
-  account: PlatformAccount | null;
-  isCanary: boolean;
-}
+import { getChannelCount, getChannels, type Channel } from "@/lib/api";
+import { useOperatorContext } from "@/lib/operator-context";
+import { Alert, EmptyState, LoadingState, StatusBadge } from "@/components/ui";
+import { statusTone } from "@/lib/presentation";
+import { classifyChannel } from "@/lib/channel-classification";
 
 export default function ChannelsPage() {
-  const { mode } = useOperatorContext();
-  const [channelsData, setChannelsData] = useState<ChannelWithAccount[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const {
+    mode,
+    selectedChannelId,
+    setSelectedChannelId,
+    showInternalChannels,
+    setShowInternalChannels,
+  } = useOperatorContext();
 
-  // Search & Filter State
-  const [searchQuery, setSearchQuery] = useState("");
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
+  const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [statusFilter, setStatusFilter] = useState("ALL");
-
-  // Pagination State (1-indexed)
+  const [status, setStatus] = useState("ALL");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(24);
   const [totalCount, setTotalCount] = useState(0);
-  const [goToPageInput, setGoToPageInput] = useState("");
+  const [lifecycleCounts, setLifecycleCounts] = useState<{
+    persisted: number;
+    active: number;
+    draft: number;
+    archived: number;
+  } | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  // Initialize from URL parameters on first mount
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const params = new URLSearchParams(window.location.search);
-    const qParam = params.get("q");
-    const statusParam = params.get("status");
-    const pageParam = params.get("page");
-    const limitParam = params.get("limit");
-
-    if (qParam) {
-      setSearchQuery(qParam);
-      setDebouncedSearch(qParam);
-    }
-    if (statusParam) {
-      setStatusFilter(statusParam);
-    }
-    if (pageParam) {
-      const parsedPage = parseInt(pageParam, 10);
-      if (!isNaN(parsedPage) && parsedPage >= 1) {
-        setPage(parsedPage);
+    let isMounted = true;
+    void Promise.all([
+      getChannelCount(undefined),
+      getChannelCount("ACTIVE"),
+      getChannelCount("DRAFT"),
+      getChannelCount("ARCHIVED"),
+    ]).then(([persisted, active, draft, archived]) => {
+      if (isMounted) {
+        setLifecycleCounts({ persisted, active, draft, archived });
       }
-    }
-    if (limitParam) {
-      const parsedLimit = parseInt(limitParam, 10);
-      if ([24, 50, 100].includes(parsedLimit)) {
-        setPageSize(parsedLimit);
-      }
-    }
+    }).catch(() => {});
+    return () => { isMounted = false; };
   }, []);
 
-  // Debounce search query changes
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedSearch(searchQuery);
+    const timeout = window.setTimeout(() => {
+      setDebouncedSearch(search.trim());
+      setPage(1);
     }, 300);
-    return () => clearTimeout(timer);
-  }, [searchQuery]);
+    return () => window.clearTimeout(timeout);
+  }, [search]);
 
-  // Sync state with URL query parameters
   useEffect(() => {
-    if (typeof window === "undefined") return;
     const params = new URLSearchParams();
-    if (debouncedSearch.trim()) params.set("q", debouncedSearch.trim());
-    if (statusFilter !== "ALL") params.set("status", statusFilter);
+    if (debouncedSearch) params.set("q", debouncedSearch);
+    if (status !== "ALL" && mode === "DEVELOPMENT") params.set("status", status);
     if (page > 1) params.set("page", String(page));
     if (pageSize !== 24) params.set("limit", String(pageSize));
+    window.history.replaceState(null, "", params.size ? `/channels?${params}` : "/channels");
+  }, [debouncedSearch, mode, page, pageSize, status]);
 
-    const newUrl = params.toString() ? `/channels?${params.toString()}` : "/channels";
-    window.history.replaceState(null, "", newUrl);
-  }, [debouncedSearch, statusFilter, page, pageSize]);
-
-  // Reset page to 1 when search or status filter or pageSize changes
-  const handleSearchChange = (val: string) => {
-    setSearchQuery(val);
-    setPage(1);
-  };
-
-  const handleStatusFilterChange = (val: string) => {
-    setStatusFilter(val);
-    setPage(1);
-  };
-
-  const handlePageSizeChange = (val: number) => {
-    setPageSize(val);
-    setPage(1);
-  };
-
-  const loadData = useCallback(async () => {
+  const loadChannels = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
+      const state = mode === "OPERATOR" ? "ACTIVE" : status === "ALL" ? undefined : status;
+      const offset = (page - 1) * pageSize;
+      const [records, count] = await Promise.all([
+        getChannels(state, undefined, pageSize, offset, debouncedSearch || undefined),
+        getChannelCount(state, undefined, debouncedSearch || undefined),
+      ]);
+      setChannels(records);
+      setTotalCount(count);
 
-      if (mode === "OPERATOR") {
-        // In Operator Mode: Fetch Canary Channel
-        const [canaryChan, canaryAccounts] = await Promise.all([
-          getChannel(CANARY_CHANNEL_ID).catch(() => null),
-          listPlatformAccounts(CANARY_CHANNEL_ID).catch(() => []),
-        ]);
-
-        const items: ChannelWithAccount[] = [];
-        if (canaryChan) {
-          const activeAccount =
-            canaryAccounts.find((a) => a.status === "ACTIVE") || canaryAccounts[0] || null;
-          items.push({
-            channel: canaryChan,
-            account: activeAccount,
-            isCanary: true,
-          });
-        }
-
-        setChannelsData(items);
-        setTotalCount(items.length);
+      if (records.length > 0) {
+        setSelectedChannel((current) => {
+          if (current && records.some((r) => r.id === current.id)) {
+            return records.find((r) => r.id === current.id) || current;
+          }
+          if (selectedChannelId) {
+            const match = records.find((r) => r.id === selectedChannelId);
+            if (match) return match;
+          }
+          return records[0];
+        });
       } else {
-        // In Development Mode: Server-side search & pagination
-        const stateParam = statusFilter !== "ALL" ? statusFilter : undefined;
-        const offset = (page - 1) * pageSize;
-
-        const [apiChannels, count] = await Promise.all([
-          getChannels(stateParam, undefined, pageSize, offset, debouncedSearch),
-          getChannelCount(stateParam, undefined, debouncedSearch),
-        ]);
-
-        const enhanced: ChannelWithAccount[] = apiChannels.map((c) => ({
-          channel: c,
-          account: null,
-          isCanary: c.id === CANARY_CHANNEL_ID,
-        }));
-
-        setChannelsData(enhanced);
-        setTotalCount(count);
+        setSelectedChannel(null);
       }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load channels");
+    } catch (requestError: unknown) {
+      setError(requestError instanceof Error ? requestError.message : "Failed to load channels.");
     } finally {
       setLoading(false);
     }
-  }, [mode, page, pageSize, statusFilter, debouncedSearch]);
+  }, [debouncedSearch, mode, page, pageSize, selectedChannelId, status]);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
+    void loadChannels();
+  }, [loadChannels]);
+
+  const handleSelect = (channel: Channel) => {
+    setSelectedChannel(channel);
+    void setSelectedChannelId(channel.id);
+  };
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize));
 
-  // Compute pagination numbered range with compact window & ellipsis
-  const getPaginationPages = (): (number | "...")[] => {
-    if (totalPages <= 7) {
-      return Array.from({ length: totalPages }, (_, i) => i + 1);
-    }
-    if (page <= 4) {
-      return [1, 2, 3, 4, 5, "...", totalPages];
-    }
-    if (page >= totalPages - 3) {
-      return [1, "...", totalPages - 4, totalPages - 3, totalPages - 2, totalPages - 1, totalPages];
-    }
-    return [1, "...", page - 1, page, page + 1, "...", totalPages];
-  };
+  // Classify all loaded channels
+  const classifiedChannels = useMemo(() => {
+    return channels.map((ch) => ({
+      channel: ch,
+      provenance: classifyChannel(ch),
+    }));
+  }, [channels]);
 
-  const handleGoToPage = (e: React.FormEvent) => {
-    e.preventDefault();
-    const target = parseInt(goToPageInput, 10);
-    if (!isNaN(target) && target >= 1 && target <= totalPages) {
-      setPage(target);
-      setGoToPageInput("");
-    }
-  };
+  // Filter based on product visibility policy:
+  // Normal mode (showInternalChannels === false): show REAL_USER + UNKNOWN only
+  // (Keep selectedChannel addressable even if internal)
+  // Internal mode (showInternalChannels === true): show all
+  const displayChannels = useMemo(() => {
+    return classifiedChannels.filter(({ channel, provenance }) => {
+      if (showInternalChannels) return true;
+      if (channel.id === selectedChannelId) return true;
+      return !provenance.isInternal;
+    });
+  }, [classifiedChannels, showInternalChannels, selectedChannelId]);
 
-  const getBadgeClass = (state: string) => {
-    switch (state) {
-      case "ACTIVE":
-        return "badge-active";
-      case "PAUSED":
-        return "badge-paused";
-      case "ARCHIVED":
-        return "badge-failed";
-      case "DRAFT":
-      default:
-        return "badge-draft";
-    }
-  };
-
-  const startRecord = totalCount === 0 ? 0 : (page - 1) * pageSize + 1;
-  const endRecord = Math.min(page * pageSize, totalCount);
+  const hiddenInternalCount = classifiedChannels.length - displayChannels.length;
+  const selectedProvenance = selectedChannel ? classifyChannel(selectedChannel) : null;
 
   return (
-    <div style={{ display: "flex", flexDirection: "column", gap: "1.25rem" }}>
-      {/* Page Header */}
-      <div className="page-header">
+    <div className="ui-page-stack" style={{ maxWidth: "1400px", margin: "0 auto" }}>
+      {/* HEADER */}
+      <div className="page-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", marginBottom: "16px", flexWrap: "wrap" }}>
         <div>
-          <h1 className="page-title">Channel Fleet Workspaces</h1>
-          <p className="page-subtitle">
-            Autonomous channel identities, target audience profiles, brand voice, and DNA revisions.
-          </p>
+          <div className="title" style={{ fontSize: "24px", fontWeight: 800, letterSpacing: "-0.03em" }}>
+            Channels
+          </div>
+          <div className="sub" style={{ color: "var(--muted)", fontSize: "13px", marginTop: "4px" }}>
+            Channel workspace registry, DNA strategy, platform settings, and publishing policies.
+          </div>
         </div>
-        <div style={{ display: "flex", gap: "0.75rem", alignItems: "center" }}>
-          <button
-            type="button"
-            onClick={() => loadData()}
-            className="btn btn-secondary"
-            disabled={loading}
-          >
-            ↻ Refresh
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          {/* INTERNAL VISIBILITY TOGGLE */}
+          <div style={{ display: "inline-flex", alignItems: "center", gap: "8px", background: "var(--panel)", border: "1px solid var(--line)", borderRadius: "8px", padding: "6px 12px" }}>
+            <span style={{ fontSize: "12px", color: "var(--text-secondary)", fontWeight: 500 }}>
+              Show internal / test
+            </span>
+            <button
+              type="button"
+              className={`switch ${showInternalChannels ? "on" : ""}`}
+              aria-pressed={showInternalChannels}
+              onClick={() => setShowInternalChannels(!showInternalChannels)}
+              aria-label="Toggle internal channels visibility"
+            />
+          </div>
+
+          <button type="button" className="btn" onClick={() => void loadChannels()} disabled={loading} style={{ fontSize: "12px", padding: "8px 12px" }}>
+            Refresh
           </button>
-          <Link href="/channels/new" className="btn btn-primary">
-            + New Channel
+          <Link href="/channels/new" className="btn primary" style={{ fontSize: "12px", padding: "8px 14px", fontWeight: 700 }}>
+            ＋ Create Channel
           </Link>
         </div>
       </div>
 
-      {/* Dev Mode Notice Banner */}
-      {mode === "DEVELOPMENT" && (
-        <div className="banner-dev-mode">
-          <div>
-            <strong>DEVELOPMENT MODE ACTIVE:</strong> Showing fleet database records with global server-side search across all pages.
-          </div>
-          <span className="badge badge-warning">RAW FIXTURES</span>
-        </div>
+      {showInternalChannels && (
+        <Alert tone="info" title="Internal / Test Mode Active">
+          Internal test fixtures, historical canaries, and diagnostic channels are visible with provenance badges.
+        </Alert>
       )}
 
-      {/* Filter and Search Bar */}
-      <div className="filter-bar" style={{ display: "flex", gap: "1rem", flexWrap: "wrap", alignItems: "center" }}>
-        <div className="search-input-wrapper" style={{ flex: 1, minWidth: "260px" }}>
-          <span className="search-icon">🔍</span>
-          <input
-            type="text"
-            className="input"
-            placeholder="Search all channels by name, slug, or UUID across fleet..."
-            value={searchQuery}
-            onChange={(e) => handleSearchChange(e.target.value)}
-          />
-          {searchQuery && (
-            <button
-              onClick={() => handleSearchChange("")}
-              className="btn btn-secondary btn-sm"
-              style={{
-                position: "absolute",
-                right: "8px",
-                top: "50%",
-                transform: "translateY(-50%)",
-                padding: "0.15rem 0.4rem",
-                fontSize: "0.75rem",
-              }}
-              title="Clear search"
-            >
-              ✕
-            </button>
-          )}
-        </div>
-
-        {mode === "DEVELOPMENT" && (
-          <div style={{ display: "flex", gap: "0.75rem", alignItems: "center", flexWrap: "wrap" }}>
-            <select
-              className="select"
-              value={statusFilter}
-              onChange={(e) => handleStatusFilterChange(e.target.value)}
-              style={{ minWidth: "130px" }}
-            >
-              <option value="ALL">All States</option>
-              <option value="ACTIVE">ACTIVE</option>
-              <option value="DRAFT">DRAFT</option>
-              <option value="PAUSED">PAUSED</option>
-              <option value="ARCHIVED">ARCHIVED</option>
-            </select>
-
-            <div style={{ display: "flex", alignItems: "center", gap: "0.4rem" }}>
-              <span style={{ fontSize: "0.78rem", color: "var(--text-muted)" }}>Per page:</span>
-              <select
-                className="select"
-                value={pageSize}
-                onChange={(e) => handlePageSizeChange(parseInt(e.target.value, 10))}
-                style={{ fontSize: "0.8rem", padding: "0.35rem 0.6rem" }}
-              >
-                <option value={24}>24</option>
-                <option value={50}>50</option>
-                <option value={100}>100</option>
-              </select>
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Result Metrics Bar */}
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "0.82rem", color: "var(--text-secondary)" }}>
-        <div>
-          {loading ? (
-            <span>Searching fleet...</span>
-          ) : (
-            <span>
-              Showing <strong>{startRecord}–{endRecord}</strong> of <strong>{totalCount}</strong> channels
-              {debouncedSearch && <span> matching &ldquo;{debouncedSearch}&rdquo;</span>}
-              {statusFilter !== "ALL" && <span> (Status: {statusFilter})</span>}
-            </span>
-          )}
-        </div>
-        {mode === "DEVELOPMENT" && totalPages > 1 && (
-          <div style={{ color: "var(--text-muted)", fontSize: "0.78rem" }}>
-            Page {page} of {totalPages}
-          </div>
-        )}
-      </div>
-
-      {/* Error Alert */}
       {error && (
-        <div
-          style={{
-            padding: "1rem",
-            background: "var(--status-danger-bg)",
-            border: "1px solid var(--status-danger-border)",
-            borderRadius: "var(--radius-sm)",
-            color: "var(--status-danger)",
-            fontSize: "0.85rem",
-          }}
-        >
+        <Alert tone="danger" title="Channels unavailable" actions={<button type="button" className="btn btn-secondary btn-sm" onClick={() => void loadChannels()}>Retry</button>}>
           {error}
-        </div>
+        </Alert>
       )}
 
-      {/* Main Channel Cards Grid */}
-      {loading ? (
-        <div style={{ textAlign: "center", padding: "4rem 0", color: "var(--text-muted)", fontSize: "0.9rem" }}>
-          Loading channel workspaces...
+      {/* FILTER BAR */}
+      <div className="ui-filter-bar" role="search" style={{ marginBottom: "14px", background: "var(--panel)", border: "1px solid var(--line)", borderRadius: "10px", padding: "10px 14px" }}>
+        <div className="ui-filter-field ui-filter-grow">
+          <label htmlFor="channel-search" style={{ fontSize: "10px", textTransform: "uppercase", color: "var(--muted)", letterSpacing: "0.08em" }}>Search Channels</label>
+          <input
+            id="channel-search"
+            className="input"
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search by name, slug or platform..."
+            style={{ background: "var(--bg-input)", border: "1px solid var(--line)", color: "var(--text)" }}
+          />
         </div>
-      ) : channelsData.length === 0 ? (
-        <div className="empty-state">
-          <div className="empty-state-icon">⊞</div>
-          <h3>No Channels Found</h3>
-          <p>
-            {debouncedSearch
-              ? `No channels found matching "${debouncedSearch}"${statusFilter !== "ALL" ? ` with status ${statusFilter}` : ""}.`
-              : mode === "OPERATOR"
-              ? "No operational channels match your filter criteria. Switch to Development Mode to view test fixtures or create a new channel."
-              : "No development channels found for this query."}
-          </p>
-          {debouncedSearch && (
-            <button
-              onClick={() => handleSearchChange("")}
-              className="btn btn-secondary"
-              style={{ marginTop: "0.5rem" }}
-            >
-              Clear Search Query
-            </button>
-          )}
-        </div>
-      ) : (
-        <div className="grid-cards">
-          {channelsData.map(({ channel: c, account, isCanary }) => (
-            <div key={c.id} className="card" style={{ display: "flex", flexDirection: "column" }}>
-              {/* Card Top */}
-              <div className="card-header">
-                <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                  <span style={{ fontSize: "1.25rem" }}>
-                    {c.platform === "YOUTUBE" ? "▶" : "◈"}
-                  </span>
-                  <span
-                    className="text-secondary"
-                    style={{
-                      fontSize: "0.75rem",
-                      fontWeight: 700,
-                      textTransform: "uppercase",
-                      letterSpacing: "0.06em",
-                    }}
-                  >
-                    {c.platform}
-                  </span>
-                </div>
-                <div style={{ display: "flex", gap: "0.4rem" }}>
-                  {isCanary && <span className="badge badge-canary">CANARY FLEET</span>}
-                  <span className={`badge ${getBadgeClass(c.state)}`}>{c.state}</span>
-                </div>
-              </div>
-
-              {/* Channel Identity */}
-              <div style={{ marginBottom: "1rem" }}>
-                <h3
-                  style={{
-                    fontSize: "1.15rem",
-                    fontWeight: 700,
-                    color: "var(--text-primary)",
-                    marginBottom: "0.25rem",
-                  }}
-                >
-                  {c.name}
-                </h3>
-                <div className="text-mono text-muted" style={{ fontSize: "0.75rem" }}>
-                  slug: /{c.slug}
-                </div>
-              </div>
-
-              {/* Metadata Fields */}
-              <div
-                style={{
-                  display: "flex",
-                  flexDirection: "column",
-                  gap: "0.45rem",
-                  fontSize: "0.82rem",
-                  background: "var(--bg-secondary)",
-                  padding: "0.75rem",
-                  borderRadius: "var(--radius-sm)",
-                  marginBottom: "1rem",
-                }}
-              >
-                <div className="flex-between">
-                  <span className="text-muted">Niche:</span>
-                  <span style={{ fontWeight: 600 }}>{c.dna?.content_strategy?.niche || "General"}</span>
-                </div>
-                <div className="flex-between">
-                  <span className="text-muted">Language:</span>
-                  <span className="text-mono">{c.primary_language || "en"}</span>
-                </div>
-                <div className="flex-between">
-                  <span className="text-muted">Connected Account:</span>
-                  {account ? (
-                    <span style={{ color: "var(--status-success)", fontWeight: 600 }}>
-                      ● {account.account_display_name} ({account.status})
-                    </span>
-                  ) : isCanary ? (
-                    <span style={{ color: "var(--status-success)", fontWeight: 600 }}>
-                      ● DmYTB (ACTIVE)
-                    </span>
-                  ) : (
-                    <span className="text-muted">Not Connected</span>
-                  )}
-                </div>
-                <div className="flex-between">
-                  <span className="text-muted">Created:</span>
-                  <span className="text-mono text-muted">
-                    {new Date(c.created_at).toLocaleDateString()}
-                  </span>
-                </div>
-              </div>
-
-              {/* Card Footer Actions */}
-              <div
-                style={{
-                  marginTop: "auto",
-                  display: "flex",
-                  gap: "0.5rem",
-                  paddingTop: "0.75rem",
-                  borderTop: "1px solid var(--border-subtle)",
-                }}
-              >
-                <Link
-                  href={`/channels/${c.id}`}
-                  className="btn btn-secondary btn-sm"
-                  style={{ flex: 1, textAlign: "center" }}
-                >
-                  Workspace →
-                </Link>
-                <Link
-                  href={`/missions/new?channel_id=${c.id}`}
-                  className="btn btn-primary btn-sm"
-                  style={{ flex: 1, textAlign: "center" }}
-                >
-                  + Mission
-                </Link>
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {/* Enhanced Pagination Controls */}
-      {mode === "DEVELOPMENT" && totalPages > 1 && (
-        <div
-          className="card"
-          style={{
-            padding: "0.85rem 1.25rem",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            flexWrap: "wrap",
-            gap: "1rem",
-          }}
-        >
-          {/* Left: First & Prev Buttons */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
-            <button
-              type="button"
-              disabled={page === 1 || loading}
-              onClick={() => setPage(1)}
-              className="btn btn-secondary btn-sm"
-              style={{ padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
-              title="First Page"
-            >
-              « First
-            </button>
-            <button
-              type="button"
-              disabled={page === 1 || loading}
-              onClick={() => setPage((p) => Math.max(1, p - 1))}
-              className="btn btn-secondary btn-sm"
-              style={{ padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
-              title="Previous Page"
-            >
-              ‹ Prev
-            </button>
+        {(mode === "DEVELOPMENT" || showInternalChannels) && (
+          <div className="ui-filter-field">
+            <label htmlFor="channel-status" style={{ fontSize: "10px", textTransform: "uppercase", color: "var(--muted)", letterSpacing: "0.08em" }}>Status</label>
+            <select id="channel-status" className="select" value={status} onChange={(event) => { setStatus(event.target.value); setPage(1); }}>
+              <option value="ALL">All states</option>
+              <option value="ACTIVE">Active</option>
+              <option value="DRAFT">Draft</option>
+              <option value="PAUSED">Paused</option>
+              <option value="ARCHIVED">Archived</option>
+            </select>
           </div>
+        )}
+        <div className="ui-filter-field">
+          <label htmlFor="channel-page-size" style={{ fontSize: "10px", textTransform: "uppercase", color: "var(--muted)", letterSpacing: "0.08em" }}>Rows</label>
+          <select id="channel-page-size" className="select" value={pageSize} onChange={(event) => { setPageSize(Number(event.target.value)); setPage(1); }}>
+            <option value={24}>24</option>
+            <option value={50}>50</option>
+            <option value={100}>100</option>
+          </select>
+        </div>
+      </div>
 
-          {/* Center: Numbered Page Window */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.3rem", flexWrap: "wrap" }}>
-            {getPaginationPages().map((pageNum, idx) => {
-              if (pageNum === "...") {
-                return (
+      {loading ? (
+        <LoadingState title="Loading channels" />
+      ) : displayChannels.length === 0 ? (
+        <EmptyState
+          title={channels.length > 0 ? "No product channels in this view" : "No channels found"}
+          description={
+            channels.length > 0
+              ? `${channels.length} internal/test channels are present on this page, but hidden in normal mode.`
+              : debouncedSearch
+              ? "No channel matches the current search and filters."
+              : "No channel records are available in this view."
+          }
+          action={
+            channels.length > 0 && !showInternalChannels ? (
+              <button type="button" className="btn btn-secondary" onClick={() => setShowInternalChannels(true)}>
+                Show internal/test channels
+              </button>
+            ) : debouncedSearch ? (
+              <button type="button" className="btn btn-secondary" onClick={() => setSearch("")}>
+                Clear search
+              </button>
+            ) : (
+              <Link href="/channels/new" className="btn btn-primary">
+                Create channel
+              </Link>
+            )
+          }
+        />
+      ) : (
+        /* HYBRID PRODUCT WORKSPACE BROWSER (LEFT LIST + RIGHT DETAIL) */
+        <div className="channels-browser-grid">
+          {/* LEFT: COMPACT REGISTRY LIST */}
+          <div className="channel-registry-list">
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "4px 8px", fontSize: "11px", color: "var(--muted)", flexWrap: "wrap", gap: "6px" }}>
+              <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", flexWrap: "wrap" }}>
+                <span>
+                  <strong>{displayChannels.length} shown</strong>
+                  {hiddenInternalCount > 0 ? ` · ${hiddenInternalCount} internal hidden` : ""}
+                  {` · ${totalCount.toLocaleString()} ${mode === "OPERATOR" ? "active" : "persisted"}`}
+                </span>
+                {lifecycleCounts && (
                   <span
-                    key={`ellipsis-${idx}`}
+                    title={`Authoritative lifecycle counts:\n• ${lifecycleCounts.persisted.toLocaleString()} persisted\n• ${lifecycleCounts.active.toLocaleString()} active\n• ${lifecycleCounts.draft.toLocaleString()} draft\n• ${lifecycleCounts.archived.toLocaleString()} archived`}
                     style={{
-                      padding: "0.3rem 0.5rem",
-                      color: "var(--text-muted)",
-                      fontSize: "0.85rem",
+                      cursor: "help",
+                      fontSize: "10px",
+                      color: "var(--muted)",
+                      padding: "0 5px",
+                      borderRadius: "4px",
+                      border: "1px solid var(--line)",
+                      background: "var(--bg-tertiary)",
+                      userSelect: "none",
                     }}
+                    aria-label="Lifecycle breakdown info"
                   >
-                    …
+                    ℹ {lifecycleCounts.persisted.toLocaleString()} persisted
                   </span>
-                );
-              }
-              const isActive = page === pageNum;
+                )}
+              </span>
+              <span>Select to inspect</span>
+            </div>
+
+            {displayChannels.map(({ channel: ch, provenance }) => {
+              const isSelected = selectedChannel?.id === ch.id;
               return (
-                <button
-                  key={`page-${pageNum}`}
-                  type="button"
-                  onClick={() => setPage(pageNum as number)}
-                  disabled={loading}
-                  className={`btn btn-sm ${isActive ? "btn-primary" : "btn-secondary"}`}
-                  style={{
-                    padding: "0.3rem 0.65rem",
-                    fontSize: "0.8rem",
-                    minWidth: "32px",
-                    fontWeight: isActive ? 700 : 500,
-                  }}
+                <div
+                  key={ch.id}
+                  className={`channel-registry-row${isSelected ? " selected" : ""}`}
+                  onClick={() => handleSelect(ch)}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") handleSelect(ch); }}
                 >
-                  {pageNum}
-                </button>
+                  <div className="channel-row-left">
+                    <div className="channel-avatar-mark">
+                      {ch.name.slice(0, 2).toUpperCase()}
+                    </div>
+                    <div className="channel-row-meta">
+                      <div style={{ display: "flex", alignItems: "center", gap: "6px" }}>
+                        <strong className="channel-row-name">{ch.name}</strong>
+                        {provenance.isInternal && (
+                          <StatusBadge tone={provenance.tone === "purple" ? "info" : provenance.tone}>{provenance.badgeLabel}</StatusBadge>
+                        )}
+                        {!provenance.isInternal && provenance.classification === "UNKNOWN" && (
+                          <StatusBadge tone="neutral">UNCLASSIFIED</StatusBadge>
+                        )}
+                      </div>
+                      <span className="channel-row-sub">
+                        {ch.platform} · /{ch.slug}
+                      </span>
+                    </div>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                    <StatusBadge tone={statusTone(ch.state)}>{ch.state}</StatusBadge>
+                    <span style={{ fontSize: "12px", color: "var(--soft)" }}>›</span>
+                  </div>
+                </div>
               );
             })}
+
+            {totalPages > 1 && (
+              <nav className="ui-pagination" aria-label="Channel pages" style={{ marginTop: "12px" }}>
+                <button type="button" className="btn btn-secondary btn-sm" disabled={page === 1} onClick={() => setPage((current) => Math.max(1, current - 1))}>Previous</button>
+                <span style={{ fontSize: "12px" }}>Page {page} of {totalPages}</span>
+                <button type="button" className="btn btn-secondary btn-sm" disabled={page >= totalPages} onClick={() => setPage((current) => Math.min(totalPages, current + 1))}>Next</button>
+              </nav>
+            )}
           </div>
 
-          {/* Right: Next & Last Buttons + Go to page Input */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
-              <button
-                type="button"
-                disabled={page >= totalPages || loading}
-                onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
-                className="btn btn-secondary btn-sm"
-                style={{ padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
-                title="Next Page"
-              >
-                Next ›
-              </button>
-              <button
-                type="button"
-                disabled={page >= totalPages || loading}
-                onClick={() => setPage(totalPages)}
-                className="btn btn-secondary btn-sm"
-                style={{ padding: "0.3rem 0.6rem", fontSize: "0.78rem" }}
-                title="Last Page"
-              >
-                Last »
-              </button>
+          {/* RIGHT: SELECTED CHANNEL WORKSPACE SUMMARY */}
+          {selectedChannel ? (
+            <div className="channel-detail-card">
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px", borderBottom: "1px solid var(--line)", paddingBottom: "14px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+                  <div
+                    className="channel-avatar-mark"
+                    style={{
+                      width: "44px",
+                      height: "44px",
+                      fontSize: "16px",
+                      background: "linear-gradient(135deg, var(--accent), #5147df)",
+                      color: "#fff",
+                    }}
+                  >
+                    {selectedChannel.name.slice(0, 2).toUpperCase()}
+                  </div>
+                  <div>
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
+                      <h2 style={{ fontSize: "18px", fontWeight: 800, margin: 0, color: "var(--text)" }}>
+                        {selectedChannel.name}
+                      </h2>
+                      {selectedProvenance?.isInternal && (
+                        <StatusBadge tone={selectedProvenance.tone === "purple" ? "info" : selectedProvenance.tone}>{selectedProvenance.badgeLabel}</StatusBadge>
+                      )}
+                    </div>
+                    <span className="small muted">
+                      {selectedChannel.platform} · {selectedChannel.primary_language}-{selectedChannel.target_region}
+                    </span>
+                  </div>
+                </div>
+                <StatusBadge tone={statusTone(selectedChannel.state)}>
+                  {selectedChannel.state}
+                </StatusBadge>
+              </div>
+
+              {selectedProvenance?.isInternal && (
+                <div style={{ marginTop: "12px" }}>
+                  <Alert tone="info" title={`Internal Provenance: ${selectedProvenance.label}`}>
+                    {selectedProvenance.evidence}
+                  </Alert>
+                </div>
+              )}
+
+              <div style={{ marginTop: "16px", display: "grid", gridTemplateColumns: "1fr 1fr", gap: "12px" }}>
+                <div style={{ background: "var(--bg-tertiary)", border: "1px solid var(--line)", borderRadius: "8px", padding: "10px 12px" }}>
+                  <div style={{ fontSize: "10px", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Default Language
+                  </div>
+                  <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--text)", marginTop: "3px" }}>
+                    {selectedChannel.primary_language || "English"}
+                  </div>
+                </div>
+                <div style={{ background: "var(--bg-tertiary)", border: "1px solid var(--line)", borderRadius: "8px", padding: "10px 12px" }}>
+                  <div style={{ fontSize: "10px", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                    Timezone
+                  </div>
+                  <div style={{ fontSize: "13px", fontWeight: 600, color: "var(--text)", marginTop: "3px" }}>
+                    {selectedChannel.timezone || "UTC"}
+                  </div>
+                </div>
+              </div>
+
+              <div style={{ marginTop: "12px" }}>
+                <div style={{ fontSize: "10px", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: "6px" }}>
+                  Channel DNA &amp; Strategy
+                </div>
+                <div style={{ background: "var(--bg-tertiary)", border: "1px solid var(--line)", borderRadius: "8px", padding: "12px", fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.5 }}>
+                  {selectedChannel.dna?.content_strategy?.niche || selectedChannel.description || "Evidence-first, concise, modern narrative tone."}
+                </div>
+              </div>
+
+              {/* PUBLISHING CONFIGURATION */}
+              <div style={{ marginTop: "14px", borderTop: "1px solid var(--line)", paddingTop: "12px" }}>
+                <div style={{ fontSize: "11px", fontWeight: 700, color: "var(--text)", marginBottom: "8px" }}>
+                  Publishing Configuration
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: "1px solid var(--line)", fontSize: "12px", color: "var(--muted)" }}>
+                  <span>Target Region</span>
+                  <span style={{ color: "var(--text)", fontWeight: 600 }}>{selectedChannel.target_region || "US"}</span>
+                </div>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0", borderBottom: "1px solid var(--line)", fontSize: "12px", color: "var(--muted)" }}>
+                  <span>Slug Path</span>
+                  <span className="text-mono" style={{ color: "var(--text)", fontSize: "11px" }}>/{selectedChannel.slug}</span>
+                </div>
+              </div>
+
+              {/* ACTION BUTTONS */}
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "8px", marginTop: "18px" }}>
+                <Link
+                  href={`/channels/${selectedChannel.id}`}
+                  className="btn primary"
+                  style={{ textAlign: "center", fontWeight: 700, fontSize: "13px" }}
+                >
+                  Open Workspace
+                </Link>
+                <Link
+                  href={`/channels/${selectedChannel.id}/production`}
+                  className="btn"
+                  style={{ textAlign: "center", fontSize: "13px" }}
+                >
+                  Production Studio
+                </Link>
+              </div>
+
+              {/* SECONDARY DISCLOSURE TECHNICAL ID & LINEAGE */}
+              <details style={{ marginTop: "14px", fontSize: "11px", color: "var(--soft)" }}>
+                <summary style={{ cursor: "pointer" }}>Technical Details &amp; Lineage</summary>
+                <div style={{ marginTop: "6px", background: "var(--bg-input)", color: "var(--text)", padding: "8px 10px", borderRadius: "6px", fontSize: "11px", border: "1px solid var(--line)" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
+                    <span className="muted">Classification Enum:</span>
+                    <code className="text-mono" style={{ fontSize: "10px" }}>{selectedProvenance?.classification}</code>
+                  </div>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span className="muted">Channel ID:</span>
+                    <code className="text-mono" style={{ fontSize: "10px" }}>{selectedChannel.id}</code>
+                  </div>
+                </div>
+              </details>
             </div>
-
-            {/* Direct Jump Input */}
-            <form onSubmit={handleGoToPage} style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}>
-              <span style={{ fontSize: "0.75rem", color: "var(--text-muted)" }}>Go to:</span>
-              <input
-                type="number"
-                min={1}
-                max={totalPages}
-                placeholder={String(page)}
-                value={goToPageInput}
-                onChange={(e) => setGoToPageInput(e.target.value)}
-                className="input"
-                style={{ width: "52px", padding: "0.25rem 0.4rem", fontSize: "0.78rem", textAlign: "center" }}
-              />
-              <button
-                type="submit"
-                disabled={!goToPageInput || loading}
-                className="btn btn-secondary btn-sm"
-                style={{ padding: "0.25rem 0.5rem", fontSize: "0.75rem" }}
-              >
-                Go
-              </button>
-            </form>
-          </div>
+          ) : (
+            <div className="card" style={{ padding: "32px 20px", textAlign: "center", color: "var(--muted)" }}>
+              Select a channel from the registry to view workspace details.
+            </div>
+          )}
         </div>
       )}
     </div>

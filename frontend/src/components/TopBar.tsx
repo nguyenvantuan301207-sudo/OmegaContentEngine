@@ -1,14 +1,28 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
+import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { getHealth } from "@/lib/api";
 import { useOperatorContext } from "@/lib/operator-context";
+import { getProvenanceBadgeLabel } from "@/lib/channel-classification";
+import { Breadcrumbs } from "@/components/ui";
+import { getBreadcrumbs } from "@/lib/navigation";
+import { CommandPalette } from "@/components/CommandPalette";
 
 export function TopBar({ onNavigationToggle, navigationOpen }: { onNavigationToggle?: () => void; navigationOpen?: boolean }) {
   const pathname = usePathname();
-  const { mode, toggleMode, canaryChannelName, selectedChannel } = useOperatorContext();
+  const {
+    mode,
+    toggleMode,
+    selectedChannel,
+    channels,
+    selectedChannelClassification,
+    isSelectedChannelInternal,
+  } = useOperatorContext();
+  const badgeLabel = getProvenanceBadgeLabel(selectedChannelClassification);
   const [healthStatus, setHealthStatus] = useState<string>("loading");
+  const [cmdOpen, setCmdOpen] = useState(false);
 
   useEffect(() => {
     let isMounted = true;
@@ -33,79 +47,131 @@ export function TopBar({ onNavigationToggle, navigationOpen }: { onNavigationTog
     };
   }, []);
 
-  const getBreadcrumb = () => {
-    if (pathname === "/") return { section: "Overview", page: "System Telemetry" };
-    if (pathname === "/channels") return { section: "Fleet", page: "Channels & Workspaces" };
-    if (pathname.startsWith("/channels/")) return { section: "Channels", page: canaryChannelName };
-    if (pathname === "/missions") return { section: "Orchestration", page: "Missions Registry" };
-    if (pathname.startsWith("/missions/")) return { section: "Missions", page: "Mission Inspection" };
-    return { section: "Console", page: "Workspace" };
-  };
+  // Global Ctrl+K / Cmd+K listener
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setCmdOpen((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, []);
 
-  const breadcrumb = getBreadcrumb();
+  const routeChannelId = pathname.match(/^\/channels\/([^/]+)/)?.[1];
+  const routeChannelName = routeChannelId
+    ? channels.find((channel) => channel.id === routeChannelId)?.name
+    : selectedChannel?.name;
+  const breadcrumbs = getBreadcrumbs(pathname, routeChannelName);
 
   return (
-    <header className="app-topbar">
-      <div className="topbar-left">
-        <button
-          type="button"
-          className="mobile-menu-button"
-          onClick={onNavigationToggle}
-          aria-label={navigationOpen ? "Close navigation" : "Open navigation"}
-          aria-expanded={navigationOpen}
-        >
-          <span aria-hidden="true">{navigationOpen ? "×" : "☰"}</span>
-        </button>
-        <div className="topbar-workspace-mark" aria-hidden="true">OC</div>
-        <div className="topbar-breadcrumb">
-          <span className="topbar-breadcrumb-item">{breadcrumb.section}</span>
-          <span className="text-muted">/</span>
-          <span className="topbar-breadcrumb-item active">{breadcrumb.page}</span>
-        </div>
-      </div>
-
-      <div className="topbar-right">
-        {selectedChannel && (
-          <div className="topbar-pill topbar-channel" title={`Selected channel: ${selectedChannel.name}`}>
-            <span className="text-muted">CHANNEL</span>
-            <span>{selectedChannel.name}</span>
+    <>
+      <header className="topbar app-topbar">
+        <div className="topbar-left">
+          <button
+            type="button"
+            className="mobile-menu-button icon-btn"
+            onClick={onNavigationToggle}
+            aria-label={navigationOpen ? "Close navigation" : "Open navigation"}
+            aria-expanded={navigationOpen}
+          >
+            <span aria-hidden="true">{navigationOpen ? "×" : "☰"}</span>
+          </button>
+          <button
+            type="button"
+            className="icon-btn cmd-trigger-btn"
+            id="cmdBtn"
+            onClick={() => setCmdOpen(true)}
+            title="Open command palette (Ctrl+K)"
+            aria-label="Open command palette"
+          >
+            ⌘
+          </button>
+          <div
+            className="search topbar-search-bar"
+            onClick={() => setCmdOpen(true)}
+            role="button"
+            tabIndex={0}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                setCmdOpen(true);
+              }
+            }}
+            aria-label="Search OMEGA (Ctrl+K)"
+          >
+            <span aria-hidden="true">⌕</span>
+            <span className="search-placeholder">Search missions, channels, routes...</span>
+            <kbd className="kbd">Ctrl+K</kbd>
           </div>
-        )}
-
-        {/* System Health Heartbeat */}
-        <div className="topbar-pill" title={`System status: ${healthStatus}`}>
-          <span className={`pulse-dot ${healthStatus}`} />
-          <span className="text-mono">
-            {healthStatus === "healthy" ? "HEALTHY" : healthStatus === "warning" ? "DEGRADED" : healthStatus === "loading" ? "CHECKING" : "OFFLINE"}
-          </span>
+          <div className="topbar-breadcrumbs-wrap">
+            <Breadcrumbs items={breadcrumbs} />
+          </div>
         </div>
 
-        {/* Autonomy Mode */}
-        <div className="topbar-pill topbar-supervision">
-          <span className="text-muted">MODE</span>
-          <span className="topbar-accent-text">SUPERVISED</span>
-        </div>
+        <div className="top-spacer" />
 
-        {/* Approvals Counter */}
-        <div className="topbar-pill topbar-approvals" title="Pending Guardian & Editorial Approvals">
-          <span className="text-muted">APPROVALS</span>
-          <span className="topbar-success-text">0 READY</span>
-        </div>
+        <div className="topbar-right">
+          {selectedChannel && (
+            <Link
+              href={`/channels/${selectedChannel.id}`}
+              className="pill topbar-channel-pill"
+              title={`Workspace: ${selectedChannel.name}${isSelectedChannelInternal ? ` (${selectedChannelClassification})` : ""} (Click to manage)`}
+            >
+              <span className="pill-prefix">WORKSPACE</span>
+              <b>{selectedChannel.name}</b>
+              {isSelectedChannelInternal && badgeLabel && (
+                <span
+                  style={{
+                    fontSize: "10px",
+                    padding: "1px 5px",
+                    borderRadius: "4px",
+                    background: "rgba(245, 158, 11, 0.15)",
+                    color: "var(--warning, #f59e0b)",
+                    border: "1px solid rgba(245, 158, 11, 0.3)",
+                    fontWeight: 700,
+                    letterSpacing: "0.04em",
+                  }}
+                  title={`Internal channel (${selectedChannelClassification})`}
+                >
+                  {badgeLabel}
+                </span>
+              )}
+              <span className="pill-arrow">▾</span>
+            </Link>
+          )}
 
-        {/* Operator vs Development Mode Toggle */}
-        <button
-          type="button"
-          onClick={toggleMode}
-          className={`mode-toggle-btn ${mode === "OPERATOR" ? "operator" : "development"}`}
-          title={
-            mode === "OPERATOR"
-              ? "Currently showing only verified Canary and Operational records. Click to view all Development fixtures."
-              : "Currently displaying all development and test fixtures. Click to return to clean Operator Mode."
-          }
-        >
-          <span>{mode === "OPERATOR" ? "Operator" : "Dev data"}</span>
-        </button>
-      </div>
-    </header>
+          {/* System Health Heartbeat */}
+          <div className="pill topbar-health-pill" title={`System status: ${healthStatus}`}>
+            <span className={`dot pulse-dot ${healthStatus}`} aria-hidden="true" />
+            <span>
+              {healthStatus === "healthy" ? "Healthy" : healthStatus === "warning" ? "Degraded" : healthStatus === "loading" ? "Checking" : "Offline"}
+            </span>
+          </div>
+
+          {/* Mode Toggle */}
+          <button
+            type="button"
+            onClick={toggleMode}
+            className={`pill mode-toggle-btn ${mode === "OPERATOR" ? "operator" : "development"}`}
+            title={
+              mode === "OPERATOR"
+                ? "Currently showing operational records for the selected workspace."
+                : "Currently displaying all development fixtures."
+            }
+          >
+            <span>{mode === "OPERATOR" ? "Operator" : "Dev data"}</span>
+          </button>
+
+          {/* Operator Avatar */}
+          <div className="avatar" title="Operator Profile" aria-label="Operator">
+            OP
+          </div>
+        </div>
+      </header>
+
+      <CommandPalette open={cmdOpen} onClose={() => setCmdOpen(false)} />
+    </>
   );
 }

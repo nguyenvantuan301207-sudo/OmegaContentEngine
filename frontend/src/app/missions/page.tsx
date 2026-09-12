@@ -1,281 +1,239 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { getMissions, Mission } from "@/lib/api";
-import { useOperatorContext, CANARY_CHANNEL_ID } from "@/lib/operator-context";
+import { getMissions, type Mission } from "@/lib/api";
+import { useOperatorContext } from "@/lib/operator-context";
+import { Alert, MissionCard } from "@/components/ui";
 
 export default function MissionsPage() {
-  const { mode } = useOperatorContext();
+  const { mode, channels } = useOperatorContext();
   const [missions, setMissions] = useState<Mission[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [search, setSearch] = useState("");
+  const [channelFilter, setChannelFilter] = useState<string>("ALL");
   const [stateFilter, setStateFilter] = useState("ALL");
   const [autonomyFilter, setAutonomyFilter] = useState("ALL");
   const [page, setPage] = useState(0);
-  const pageSize = 25;
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const pageSize = 24;
 
-  const fetchMissions = useCallback(async () => {
+  const loadMissions = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
-      setLoading(true);
-      setError(null);
-
-      // In Operator Mode: we fetch the latest batch and filter for the active canary channel
-      // In Development Mode: we fetch the paginated records
-      const fetchLimit = mode === "OPERATOR" ? 100 : pageSize;
-      const fetchOffset = mode === "OPERATOR" ? 0 : page * pageSize;
-
-      const data = await getMissions(fetchLimit, fetchOffset);
-
-      if (mode === "OPERATOR") {
-        const canaryMissions = data.filter((m) => m.channel_id === CANARY_CHANNEL_ID);
-        setMissions(canaryMissions);
-      } else {
-        setMissions(data);
-      }
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load missions");
+      const limit = 100;
+      const offset = mode === "DEVELOPMENT" ? page * pageSize : 0;
+      const records = await getMissions(limit, offset);
+      setMissions(records);
+    } catch (requestError: unknown) {
+      setError(requestError instanceof Error ? requestError.message : "Failed to load missions.");
     } finally {
       setLoading(false);
     }
   }, [mode, page]);
 
   useEffect(() => {
-    fetchMissions();
-  }, [fetchMissions]);
+    void loadMissions();
+  }, [loadMissions]);
 
-  const filteredMissions = missions.filter((m) => {
-    if (stateFilter !== "ALL" && m.state !== stateFilter) return false;
-    if (autonomyFilter !== "ALL" && m.autonomy_level !== autonomyFilter) return false;
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
+  const channelMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const ch of channels) {
+      map.set(ch.id, ch.name);
+    }
+    return map;
+  }, [channels]);
+
+  const filteredMissions = useMemo(() => {
+    return missions.filter((mission) => {
+      if (channelFilter !== "ALL" && mission.channel_id !== channelFilter) return false;
+      if (stateFilter !== "ALL" && mission.state !== stateFilter) return false;
+      if (autonomyFilter !== "ALL" && mission.autonomy_level !== autonomyFilter) return false;
+      if (!search.trim()) return true;
+      const query = search.toLowerCase();
       return (
-        m.title.toLowerCase().includes(q) ||
-        m.objective.toLowerCase().includes(q) ||
-        m.id.toLowerCase().includes(q)
+        mission.title.toLowerCase().includes(query) ||
+        mission.objective.toLowerCase().includes(query) ||
+        mission.id.toLowerCase().includes(query)
       );
-    }
-    return true;
-  });
-
-  const getBadgeClass = (state: string) => {
-    switch (state) {
-      case "SUCCEEDED":
-        return "badge-succeeded";
-      case "RUNNING":
-        return "badge-running";
-      case "READY":
-        return "badge-ready";
-      case "WAITING_APPROVAL":
-        return "badge-waiting";
-      case "FAILED":
-        return "badge-failed";
-      case "PAUSED":
-        return "badge-paused";
-      case "DRAFT":
-      default:
-        return "badge-draft";
-    }
-  };
+    });
+  }, [autonomyFilter, channelFilter, missions, search, stateFilter]);
 
   return (
-    <div>
-      {/* Page Header */}
-      <div className="page-header">
+    <div className="ui-page-stack" style={{ maxWidth: "1400px", margin: "0 auto" }}>
+      {/* HEADER matching prototype */}
+      <div className="page-head" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "16px", marginBottom: "16px" }}>
         <div>
-          <h1 className="page-title">Missions Orchestration Registry</h1>
-          <p className="page-subtitle">
-            Autonomous DAG planning, execution lifecycle tracking, and publisher handoffs.
-          </p>
+          <div className="title" style={{ fontSize: "24px", fontWeight: 800, letterSpacing: "-0.03em" }}>
+            Missions
+          </div>
+          <div className="sub" style={{ color: "var(--muted)", fontSize: "13px", marginTop: "4px" }}>
+            Autonomous workflow execution, multi-stage pipelines, QA verification, and lineage tracking.
+          </div>
         </div>
-        <div style={{ display: "flex", gap: "0.75rem" }}>
-          <button
-            type="button"
-            onClick={fetchMissions}
-            className="btn btn-secondary"
-          >
-            ↻ Refresh
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          <button type="button" className="btn" onClick={() => void loadMissions()} disabled={loading} style={{ fontSize: "12px", padding: "8px 12px" }}>
+            Refresh
           </button>
-          <Link href="/missions/new" className="btn btn-primary">
-            + Create Mission
+          <Link href="/missions/new" className="btn primary" style={{ fontSize: "12px", padding: "8px 14px", fontWeight: 700 }}>
+            ＋ New Mission
           </Link>
         </div>
       </div>
 
-      {/* Dev Mode Notice Banner */}
       {mode === "DEVELOPMENT" && (
-        <div className="banner-dev-mode">
-          <div>
-            <strong>DEVELOPMENT MODE ACTIVE:</strong> Showing all database test missions (Page {page + 1}, {pageSize} items/page). Automated smoke runs and test fixtures are listed.
-          </div>
-          <span className="badge badge-warning">RAW FIXTURES</span>
-        </div>
+        <Alert tone="warning" title="Development data visible">
+          The registry includes development and test records.
+        </Alert>
       )}
 
-      {/* Filter and Search Bar */}
-      <div className="filter-bar">
-        <div className="search-input-wrapper">
-          <span className="search-icon">🔍</span>
+      {error && (
+        <Alert tone="danger" title="Missions unavailable" actions={<button type="button" className="btn btn-secondary btn-sm" onClick={() => void loadMissions()}>Retry</button>}>
+          {error}
+        </Alert>
+      )}
+
+      {/* FILTER BAR */}
+      <div
+        className="ui-filter-bar"
+        role="search"
+        style={{
+          marginBottom: "14px",
+          background: "#0f151e",
+          border: "1px solid var(--line)",
+          borderRadius: "10px",
+          padding: "10px 14px",
+          display: "flex",
+          gap: "10px",
+          flexWrap: "wrap",
+        }}
+      >
+        <div className="ui-filter-field ui-filter-grow" style={{ minWidth: "220px" }}>
+          <label htmlFor="mission-search" style={{ fontSize: "10px", textTransform: "uppercase", color: "var(--muted)", letterSpacing: "0.08em" }}>
+            Search Missions
+          </label>
           <input
-            type="text"
+            id="mission-search"
             className="input"
-            placeholder="Search missions by title, objective, or ID..."
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            type="search"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search by title, objective or ID..."
+            style={{ background: "#111823", border: "1px solid var(--line)" }}
           />
         </div>
 
-        <select
-          className="select"
-          value={stateFilter}
-          onChange={(e) => setStateFilter(e.target.value)}
-        >
-          <option value="ALL">All States</option>
-          <option value="DRAFT">DRAFT</option>
-          <option value="READY">READY</option>
-          <option value="RUNNING">RUNNING</option>
-          <option value="WAITING_APPROVAL">WAITING_APPROVAL</option>
-          <option value="SUCCEEDED">SUCCEEDED</option>
-          <option value="FAILED">FAILED</option>
-          <option value="PAUSED">PAUSED</option>
-        </select>
+        <div className="ui-filter-field" style={{ minWidth: "160px" }}>
+          <label htmlFor="mission-channel" style={{ fontSize: "10px", textTransform: "uppercase", color: "var(--muted)", letterSpacing: "0.08em" }}>
+            Channel
+          </label>
+          <select
+            id="mission-channel"
+            className="select"
+            value={channelFilter}
+            onChange={(event) => setChannelFilter(event.target.value)}
+            style={{ background: "#111823", border: "1px solid var(--line)" }}
+          >
+            <option value="ALL">All Channels ({missions.length})</option>
+            {channels.map((ch) => {
+              const count = missions.filter((m) => m.channel_id === ch.id).length;
+              return (
+                <option key={ch.id} value={ch.id}>
+                  {ch.name} ({count})
+                </option>
+              );
+            })}
+          </select>
+        </div>
 
-        <select
-          className="select"
-          value={autonomyFilter}
-          onChange={(e) => setAutonomyFilter(e.target.value)}
-        >
-          <option value="ALL">All Autonomy</option>
-          <option value="SUPERVISED">SUPERVISED</option>
-          <option value="AUTONOMOUS">AUTONOMOUS</option>
-          <option value="MANUAL">MANUAL</option>
-        </select>
+        <div className="ui-filter-field">
+          <label htmlFor="mission-state" style={{ fontSize: "10px", textTransform: "uppercase", color: "var(--muted)", letterSpacing: "0.08em" }}>
+            State
+          </label>
+          <select
+            id="mission-state"
+            className="select"
+            value={stateFilter}
+            onChange={(event) => setStateFilter(event.target.value)}
+            style={{ background: "#111823", border: "1px solid var(--line)" }}
+          >
+            <option value="ALL">All states</option>
+            {["READY", "RUNNING", "WAITING_APPROVAL", "PAUSED", "SUCCEEDED", "FAILED", "CANCELLED"].map((state) => (
+              <option key={state} value={state}>{state}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="ui-filter-field">
+          <label htmlFor="mission-autonomy-filter" style={{ fontSize: "10px", textTransform: "uppercase", color: "var(--muted)", letterSpacing: "0.08em" }}>
+            Autonomy
+          </label>
+          <select
+            id="mission-autonomy-filter"
+            className="select"
+            value={autonomyFilter}
+            onChange={(event) => setAutonomyFilter(event.target.value)}
+            style={{ background: "#111823", border: "1px solid var(--line)" }}
+          >
+            <option value="ALL">All levels</option>
+            {["MANUAL", "ASSISTED", "SUPERVISED", "AUTONOMOUS", "STRATEGIC_AUTONOMOUS"].map((level) => (
+              <option key={level} value={level}>{level.replaceAll("_", " ")}</option>
+            ))}
+          </select>
+        </div>
       </div>
 
-      {/* Error Alert */}
-      {error && (
-        <div style={{ padding: "1rem", background: "var(--status-danger-bg)", border: "1px solid var(--status-danger-border)", borderRadius: "var(--radius-sm)", color: "var(--status-danger)", marginBottom: "1.5rem", fontSize: "0.85rem" }}>
-          {error}
-        </div>
-      )}
-
-      {/* Missions Table / List */}
+      {/* MISSIONS GRID MATCHING PROTOTYPE .missions (3 COLUMNS) */}
       {loading ? (
-        <div style={{ textAlign: "center", padding: "4rem 0", color: "var(--text-muted)", fontSize: "0.9rem" }}>
-          Loading missions registry...
-        </div>
+        <div style={{ padding: "40px", textAlign: "center", color: "var(--muted)" }}>Loading missions...</div>
       ) : filteredMissions.length === 0 ? (
-        <div className="empty-state">
-          <div className="empty-state-icon">⚡</div>
-          <h3>No Missions Found</h3>
-          <p>
-            {mode === "OPERATOR"
-              ? "No operational missions match your filters for the Canary Channel. Switch to Development Mode to view test missions or launch Canary Mission #2."
-              : "No development missions match the current query."}
+        <div
+          className="card"
+          style={{
+            padding: "36px 20px",
+            textAlign: "center",
+            maxWidth: "480px",
+            margin: "20px auto",
+            border: "1px solid var(--line)",
+            borderRadius: "var(--radius)",
+          }}
+        >
+          <div style={{ fontSize: "28px", marginBottom: "8px" }}>🎯</div>
+          <h3 style={{ fontSize: "15px", fontWeight: 700, color: "var(--text-primary)", margin: 0 }}>No missions found</h3>
+          <p style={{ fontSize: "12px", color: "var(--muted)", margin: "6px 0 16px" }}>
+            {search || channelFilter !== "ALL" || stateFilter !== "ALL"
+              ? "No mission matches your active filters."
+              : "No mission records currently exist for this workspace."}
           </p>
-          <Link href="/missions/new" className="btn btn-primary">
-            Create First Mission
+          <Link href="/missions/new" className="btn primary btn-sm" style={{ fontWeight: 700 }}>
+            ＋ Create Mission
           </Link>
         </div>
       ) : (
-        <div className="table-container">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th style={{ width: "32%" }}>Mission / Objective</th>
-                <th style={{ width: "16%" }}>Channel</th>
-                <th style={{ width: "14%" }}>State</th>
-                <th style={{ width: "12%" }}>Autonomy</th>
-                <th style={{ width: "14%" }}>Created</th>
-                <th style={{ width: "12%", textAlign: "right" }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredMissions.map((m) => {
-                const isCanary = m.channel_id === CANARY_CHANNEL_ID;
-                return (
-                  <tr key={m.id}>
-                    <td>
-                      <div style={{ fontWeight: 600, color: "var(--text-primary)", marginBottom: "0.2rem" }}>
-                        {m.title}
-                      </div>
-                      <div style={{ fontSize: "0.78rem", color: "var(--text-secondary)", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>
-                        {m.objective}
-                      </div>
-                    </td>
-                    <td>
-                      {isCanary ? (
-                        <span className="badge badge-canary">DmYTB Canary</span>
-                      ) : m.channel_id ? (
-                        <span className="text-mono text-muted" style={{ fontSize: "0.75rem" }}>
-                          {m.channel_id.slice(0, 8)}...
-                        </span>
-                      ) : (
-                        <span className="text-muted" style={{ fontSize: "0.75rem" }}>Standalone</span>
-                      )}
-                    </td>
-                    <td>
-                      <span className={`badge ${getBadgeClass(m.state)}`}>
-                        {m.state}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="text-mono" style={{ fontSize: "0.8rem", color: "var(--text-secondary)" }}>
-                        {m.autonomy_level}
-                      </span>
-                    </td>
-                    <td>
-                      <span className="text-mono text-muted" style={{ fontSize: "0.78rem" }}>
-                        {new Date(m.created_at).toLocaleString(undefined, {
-                          month: "short",
-                          day: "numeric",
-                          hour: "2-digit",
-                          minute: "2-digit",
-                        })}
-                      </span>
-                    </td>
-                    <td style={{ textAlign: "right" }}>
-                      <Link
-                        href={`/missions/${m.id}`}
-                        className="btn btn-secondary btn-sm"
-                      >
-                        Inspect DAG →
-                      </Link>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(340px, 1fr))",
+            gap: "14px",
+          }}
+        >
+          {filteredMissions.map((mission) => (
+            <MissionCard
+              key={mission.id}
+              mission={mission}
+              channelName={mission.channel_id ? channelMap.get(mission.channel_id) : undefined}
+            />
+          ))}
         </div>
       )}
 
-      {/* Development Mode Pagination Controls */}
-      {mode === "DEVELOPMENT" && (
-        <div className="pagination-controls">
-          <span>
-            Page {page + 1} ({filteredMissions.length} records shown)
-          </span>
-          <div style={{ display: "flex", gap: "0.5rem" }}>
-            <button
-              type="button"
-              disabled={page === 0 || loading}
-              onClick={() => setPage((p) => Math.max(0, p - 1))}
-              className="btn btn-secondary btn-sm"
-            >
-              ← Previous
-            </button>
-            <button
-              type="button"
-              disabled={filteredMissions.length < pageSize || loading}
-              onClick={() => setPage((p) => p + 1)}
-              className="btn btn-secondary btn-sm"
-            >
-              Next →
-            </button>
-          </div>
-        </div>
+      {mode === "DEVELOPMENT" && !loading && !error && missions.length >= pageSize && (
+        <nav className="ui-pagination" aria-label="Mission pages" style={{ marginTop: "16px" }}>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={page === 0} onClick={() => setPage((current) => Math.max(0, current - 1))}>Previous</button>
+          <span>Page {page + 1}</span>
+          <button type="button" className="btn btn-secondary btn-sm" disabled={missions.length < pageSize} onClick={() => setPage((current) => current + 1)}>Next</button>
+        </nav>
       )}
     </div>
   );

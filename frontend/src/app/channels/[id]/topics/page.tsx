@@ -1,10 +1,7 @@
 "use client";
 
-import { use, useCallback, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Channel,
-  TopicCandidate,
-  TopicMemory,
   archiveTopicCandidate,
   createTopicCandidate,
   evaluateTopicBatch,
@@ -15,688 +12,606 @@ import {
   getTopicRecommendations,
   rejectTopicCandidate,
   selectTopicCandidate,
+  type Channel,
+  type TopicCandidate,
+  type TopicMemory,
 } from "@/lib/api";
 import { useOperatorContext } from "@/lib/operator-context";
 import { ChannelContextBar } from "@/components/ChannelContextBar";
+import {
+  Alert,
+  ConfirmDialog,
+  Dialog,
+  EmptyState,
+  ErrorState,
+  FormField,
+  LoadingState,
+  PageHeader,
+  PageSection,
+  StatusBadge,
+} from "@/components/ui";
+import {
+  TechnicalDetails,
+  WorkflowStatusSummary,
+  WorkflowTabs,
+  statusTone,
+} from "@/components/workflow/WorkflowPrimitives";
+
+type TopicView = "recommendations" | "candidates" | "memory";
+
+function CandidateCard({
+  candidate,
+  busy,
+  archived,
+  onEvaluate,
+  onSelect,
+  onReject,
+  onArchive,
+}: {
+  candidate: TopicCandidate;
+  busy: boolean;
+  archived: boolean;
+  onEvaluate: () => void;
+  onSelect: () => void;
+  onReject: () => void;
+  onArchive: () => void;
+}) {
+  return (
+    <article className="workflow-card">
+      <div className="workflow-card-header">
+        <div>
+          <h3>{candidate.title}</h3>
+          <p className="workflow-copy">
+            {candidate.summary || "No candidate summary supplied."}
+          </p>
+        </div>
+        <StatusBadge tone={statusTone(candidate.status)}>
+          {candidate.status}
+        </StatusBadge>
+      </div>
+      <div className="workflow-chip-list" aria-label="Candidate classification">
+        <span className="workflow-chip">
+          {candidate.source_type.replaceAll("_", " ")}
+        </span>
+        <span className="workflow-chip">
+          {candidate.duplicate_status.replaceAll("_", " ")}
+        </span>
+        {candidate.keywords.slice(0, 4).map((keyword) => (
+          <span className="workflow-chip" key={keyword}>
+            {keyword}
+          </span>
+        ))}
+      </div>
+      {candidate.final_score !== null ? (
+        <div className="workflow-score">
+          <label>
+            <span>Final score</span>
+            <strong>{candidate.final_score.toFixed(1)}</strong>
+          </label>
+          <meter min="0" max="100" value={candidate.final_score}>
+            {candidate.final_score}
+          </meter>
+        </div>
+      ) : (
+        <Alert tone="warning" title="Not evaluated">
+          Score this candidate before selecting it.
+        </Alert>
+      )}
+      {candidate.reasons.length ? (
+        <ul className="ui-check-list">
+          {candidate.reasons.map((reason) => (
+            <li key={reason}>{reason}</li>
+          ))}
+        </ul>
+      ) : null}
+      <div className="workflow-action-bar">
+        <div className="ui-inline-actions">
+          {candidate.status === "DISCOVERED" ? (
+            <button
+              className="btn btn-secondary btn-sm"
+              type="button"
+              disabled={busy || archived}
+              onClick={onEvaluate}
+            >
+              Evaluate
+            </button>
+          ) : null}
+          {["EVALUATED", "RECOMMENDED"].includes(candidate.status) ? (
+            <button
+              className="btn btn-primary btn-sm"
+              type="button"
+              disabled={busy || archived}
+              onClick={onSelect}
+            >
+              Select topic
+            </button>
+          ) : null}
+          {!["REJECTED", "ARCHIVED"].includes(candidate.status) ? (
+            <button
+              className="btn btn-secondary btn-sm"
+              type="button"
+              disabled={busy || archived}
+              onClick={onReject}
+            >
+              Reject
+            </button>
+          ) : null}
+          {candidate.status !== "ARCHIVED" ? (
+            <button
+              className="btn btn-secondary btn-sm"
+              type="button"
+              disabled={busy || archived}
+              onClick={onArchive}
+            >
+              Archive
+            </button>
+          ) : null}
+        </div>
+      </div>
+      <TechnicalDetails
+        label="Scoring and metadata"
+        data={{
+          id: candidate.id,
+          score_breakdown: candidate.score_breakdown,
+          similarity_score: candidate.similarity_score,
+          angles: candidate.angles,
+          metadata: candidate.metadata,
+        }}
+      />
+    </article>
+  );
+}
 
 export default function ChannelTopicsPage({
   params,
 }: {
   params: Promise<{ id: string }>;
 }) {
-  const resolvedParams = use(params);
-  const channelId = resolvedParams.id;
+  const { id: channelId } = use(params);
   const { setSelectedChannelId } = useOperatorContext();
-
   const [channel, setChannel] = useState<Channel | null>(null);
-  const [activeTab, setActiveTab] = useState<"recommendations" | "candidates" | "memory">("recommendations");
+  const [view, setView] = useState<TopicView>("recommendations");
   const [recommendations, setRecommendations] = useState<TopicCandidate[]>([]);
   const [candidates, setCandidates] = useState<TopicCandidate[]>([]);
   const [memories, setMemories] = useState<TopicMemory[]>([]);
-  const [searchMemory, setSearchMemory] = useState("");
+  const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [actionLoading, setActionLoading] = useState(false);
-
-  // Ingestion Modal State
-  const [showIngestModal, setShowIngestModal] = useState(false);
+  const [showIngest, setShowIngest] = useState(false);
+  const [rejectCandidate, setRejectCandidate] = useState<TopicCandidate | null>(
+    null,
+  );
+  const [archiveCandidate, setArchiveCandidate] =
+    useState<TopicCandidate | null>(null);
+  const [rejectReason, setRejectReason] = useState("Off-strategy");
   const [newTitle, setNewTitle] = useState("");
   const [newSummary, setNewSummary] = useState("");
   const [newKeywords, setNewKeywords] = useState("");
   const [newAngle, setNewAngle] = useState("");
-  const [ingestError, setIngestError] = useState<string | null>(null);
+  const [formError, setFormError] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    setSelectedChannelId(channelId);
     try {
-      setLoading(true);
-      setSelectedChannelId(channelId);
-      const [chanData, recsData, candsData, memsData] = await Promise.all([
-        getChannel(channelId).catch(() => null),
-        getTopicRecommendations(channelId, 50.0, 20).catch(() => []),
-        getTopicCandidates(channelId).catch(() => []),
-        getTopicMemory(channelId, searchMemory || undefined).catch(() => []),
-      ]);
-      setChannel(chanData);
-      setRecommendations(recsData);
-      setCandidates(candsData);
-      setMemories(memsData);
-      setError(null);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load topic intelligence data");
+      const [channelData, recommendationData, candidateData, memoryData] =
+        await Promise.all([
+          getChannel(channelId),
+          getTopicRecommendations(channelId, 50, 20),
+          getTopicCandidates(channelId),
+          getTopicMemory(channelId, search || undefined),
+        ]);
+      setChannel(channelData);
+      setRecommendations(recommendationData);
+      setCandidates(candidateData);
+      setMemories(memoryData);
+    } catch (reason: unknown) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Failed to load topic intelligence data",
+      );
     } finally {
       setLoading(false);
     }
-  }, [channelId, searchMemory, setSelectedChannelId]);
+  }, [channelId, search, setSelectedChannelId]);
 
   useEffect(() => {
-    loadData();
+    void loadData();
   }, [loadData]);
+  const isArchived = channel?.state === "ARCHIVED";
+  const selectedCount = candidates.filter(
+    (candidate) => candidate.status === "SELECTED",
+  ).length;
+  const unevaluatedCount = candidates.filter(
+    (candidate) => candidate.status === "DISCOVERED",
+  ).length;
+  const visibleCandidates = useMemo(
+    () => (view === "recommendations" ? recommendations : candidates),
+    [candidates, recommendations, view],
+  );
 
-  async function handleIngest(e: React.FormEvent) {
-    e.preventDefault();
+  async function runAction(action: () => Promise<unknown>, fallback: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      await action();
+      await loadData();
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : fallback);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleIngest(event: React.FormEvent) {
+    event.preventDefault();
     if (!newTitle.trim()) {
-      setIngestError("Topic title is required.");
+      setFormError("Topic title is required.");
       return;
     }
-
+    setBusy(true);
+    setFormError(null);
     try {
-      setActionLoading(true);
-      setIngestError(null);
-
-      const parsedKeywords = newKeywords
-        .split(",")
-        .map((k) => k.trim())
-        .filter(Boolean);
-
-      const angles = newAngle.trim()
-        ? [{ angle: newAngle.trim(), hook: "Primary hook" }]
-        : [];
-
       await createTopicCandidate(channelId, {
         title: newTitle.trim(),
         summary: newSummary.trim() || undefined,
-        keywords: parsedKeywords,
-        angles,
+        keywords: newKeywords
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean),
+        angles: newAngle.trim()
+          ? [{ angle: newAngle.trim(), hook: "Primary hook" }]
+          : [],
       });
-
-      setShowIngestModal(false);
+      setShowIngest(false);
       setNewTitle("");
       setNewSummary("");
       setNewKeywords("");
       setNewAngle("");
       await loadData();
-    } catch (err: unknown) {
-      setIngestError(err instanceof Error ? err.message : "Failed to ingest candidate");
+    } catch (reason: unknown) {
+      setFormError(
+        reason instanceof Error ? reason.message : "Failed to ingest candidate",
+      );
     } finally {
-      setActionLoading(false);
+      setBusy(false);
     }
   }
 
-  async function handleEvaluateSingle(candidateId: string) {
-    try {
-      setActionLoading(true);
-      await evaluateTopicCandidate(channelId, candidateId);
-      await loadData();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to evaluate candidate");
-    } finally {
-      setActionLoading(false);
-    }
+  async function handleReject(event: React.FormEvent) {
+    event.preventDefault();
+    if (!rejectCandidate || !rejectReason.trim()) return;
+    const candidate = rejectCandidate;
+    setRejectCandidate(null);
+    await runAction(
+      () => rejectTopicCandidate(channelId, candidate.id, rejectReason.trim()),
+      "Failed to reject candidate",
+    );
   }
-
-  async function handleEvaluateBatch() {
-    try {
-      setActionLoading(true);
-      await evaluateTopicBatch(channelId);
-      await loadData();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to execute batch evaluation");
-    } finally {
-      setActionLoading(false);
-    }
-  }
-
-  async function handleSelect(candidateId: string) {
-    try {
-      setActionLoading(true);
-      await selectTopicCandidate(channelId, candidateId);
-      await loadData();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to select candidate");
-    } finally {
-      setActionLoading(false);
-    }
-  }
-
-  async function handleReject(candidateId: string) {
-    const reason = prompt("Please enter a reason for rejecting this topic candidate:", "Off-strategy");
-    if (!reason) return;
-
-    try {
-      setActionLoading(true);
-      await rejectTopicCandidate(channelId, candidateId, reason);
-      await loadData();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to reject candidate");
-    } finally {
-      setActionLoading(false);
-    }
-  }
-
-  async function handleArchive(candidateId: string) {
-    try {
-      setActionLoading(true);
-      await archiveTopicCandidate(channelId, candidateId);
-      await loadData();
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to archive candidate");
-    } finally {
-      setActionLoading(false);
-    }
-  }
-
-  const getStatusBadgeClass = (st: string) => {
-    switch (st) {
-      case "SELECTED":
-        return "badge-success";
-      case "RECOMMENDED":
-        return "badge-active";
-      case "EVALUATED":
-        return "badge-purple";
-      case "REJECTED":
-        return "badge-failed";
-      case "ARCHIVED":
-        return "badge-draft";
-      case "DISCOVERED":
-      default:
-        return "badge-warning";
-    }
-  };
-
-  const getDuplicateBadgeClass = (dup?: string | null) => {
-    switch (dup) {
-      case "UNIQUE":
-        return "badge-success";
-      case "SIMILAR":
-        return "badge-warning";
-      case "EXACT_DUPLICATE":
-        return "badge-failed";
-      default:
-        return "badge-neutral";
-    }
-  };
-
-  const isArchived = channel?.state === "ARCHIVED";
 
   return (
-    <div style={{ maxWidth: "1200px", margin: "0 auto", padding: "1.5rem" }}>
-      {/* Channel Context Bar with Pipeline Tabs */}
+    <div className="workflow-page ui-page-stack">
       <ChannelContextBar currentTab="topics" />
-
-      {/* Header */}
-      <div className="page-header" style={{ marginBottom: "1.5rem" }}>
-        <div>
-          <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "0.25rem" }}>
-            <h1 className="page-title">💡 Topic Intelligence Engine</h1>
-            <span className="badge badge-active">OMEGA-003</span>
-          </div>
-          <p className="page-subtitle">
-            Candidate scoring, anti-fatigue memory, content gap analysis, and deterministic topic ranking.
-          </p>
-        </div>
-
-        <div style={{ display: "flex", gap: "0.5rem" }}>
-          <button
-            onClick={handleEvaluateBatch}
-            disabled={actionLoading || isArchived}
-            title={isArchived ? "Activate this channel before evaluating topics." : "Evaluate All Discovered Topics"}
-            className="btn btn-primary btn-sm"
-            style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}
-          >
-            <span>⚡</span> Evaluate All Discovered
-          </button>
-          <button
-            onClick={() => setShowIngestModal(true)}
-            disabled={isArchived}
-            title={isArchived ? "Activate this channel before ingesting candidate topics." : "Ingest Candidate Topic"}
-            className="btn btn-secondary btn-sm"
-            style={{ display: "flex", alignItems: "center", gap: "0.35rem" }}
-          >
-            <span>+</span> Ingest Candidate
-          </button>
-        </div>
-      </div>
-
-      {error && (
-        <div
-          style={{
-            padding: "0.75rem 1rem",
-            background: "var(--status-danger-bg)",
-            border: "1px solid var(--status-danger-border)",
-            borderRadius: "var(--radius-sm)",
-            fontSize: "0.82rem",
-            color: "var(--status-danger)",
-            marginBottom: "1.5rem",
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-          }}
-        >
-          <span>{error}</span>
-          <button onClick={() => setError(null)} className="btn btn-secondary btn-sm" style={{ padding: "0.15rem 0.45rem", fontSize: "0.72rem" }}>
-            ✕
-          </button>
-        </div>
-      )}
-
-      {loading && !channel && (
-        <div className="card" style={{ padding: "3rem", textAlign: "center", color: "var(--text-muted)", fontSize: "0.9rem" }}>
-          Loading Topic Intelligence Engine...
-        </div>
-      )}
-
-      {/* Tabs */}
-      <div className="card" style={{ padding: "1.25rem" }}>
-        <div className="tab-group" style={{ marginBottom: "1.25rem" }}>
-          <button
-            onClick={() => setActiveTab("recommendations")}
-            className={`tab-item ${activeTab === "recommendations" ? "active" : ""}`}
-          >
-            🎯 Top Recommendations ({recommendations.length})
-          </button>
-          <button
-            onClick={() => setActiveTab("candidates")}
-            className={`tab-item ${activeTab === "candidates" ? "active" : ""}`}
-          >
-            📥 All Candidates ({candidates.length})
-          </button>
-          <button
-            onClick={() => setActiveTab("memory")}
-            className={`tab-item ${activeTab === "memory" ? "active" : ""}`}
-          >
-            🧠 Topic Memory ({memories.length})
-          </button>
-        </div>
-
-        {/* TAB 1: RECOMMENDATIONS */}
-        {activeTab === "recommendations" && (
-          <div>
-            {recommendations.length === 0 ? (
-              <div
-                style={{
-                  textAlign: "center",
-                  padding: "3rem 1.5rem",
-                  color: "var(--text-muted)",
-                  background: "var(--bg-input)",
-                  borderRadius: "var(--radius-sm)",
-                  border: "1px solid var(--border-subtle)",
-                }}
-              >
-                <p style={{ fontSize: "0.95rem", marginBottom: "0.5rem" }}>No evaluated topic recommendations available.</p>
-                <p style={{ fontSize: "0.82rem", marginBottom: "1rem" }}>
-                  Ingest or discover raw candidate topics, then trigger batch evaluation to score and rank them against channel DNA.
-                </p>
-                <button
-                  onClick={handleEvaluateBatch}
-                  disabled={actionLoading || isArchived}
-                  title={isArchived ? "Activate this channel before evaluating topics." : "Evaluate Pending Candidates"}
-                  className="btn btn-primary btn-sm"
-                >
-                  ⚡ Evaluate Pending Candidates Now
-                </button>
-              </div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
-                {recommendations.map((rec, idx) => (
-                  <div
-                    key={rec.id}
-                    style={{
-                      padding: "1.25rem",
-                      background: "var(--bg-input)",
-                      borderRadius: "var(--radius-sm)",
-                      border: "1px solid var(--border-subtle)",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "0.75rem",
-                    }}
-                  >
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: "1rem" }}>
-                      <div>
-                        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.35rem" }}>
-                          <span className="badge badge-active font-mono" style={{ fontSize: "0.72rem" }}>
-                            Rank #{idx + 1}
-                          </span>
-                          <span className={`badge ${getDuplicateBadgeClass(rec.duplicate_status)}`}>
-                            {rec.duplicate_status}
-                          </span>
-                          <span className={`badge ${getStatusBadgeClass(rec.status)}`}>
-                            {rec.status}
-                          </span>
-                        </div>
-                        <h2 style={{ fontSize: "1.1rem", fontWeight: 700, color: "var(--text-primary)" }}>{rec.title}</h2>
-                        {rec.summary && (
-                          <p style={{ fontSize: "0.82rem", color: "var(--text-muted)", marginTop: "0.25rem", lineHeight: 1.4 }}>
-                            {rec.summary}
-                          </p>
-                        )}
-                      </div>
-
-                      <div style={{ display: "flex", alignItems: "center", gap: "1rem" }}>
-                        <div style={{ textAlign: "right" }}>
-                          <div className="text-mono" style={{ fontSize: "1.6rem", fontWeight: 800, color: "var(--accent-secondary)" }}>
-                            {rec.final_score?.toFixed(1)}
-                          </div>
-                          <span style={{ fontSize: "0.68rem", textTransform: "uppercase", color: "var(--text-muted)", letterSpacing: "0.06em" }}>
-                            Final Score
-                          </span>
-                        </div>
-
-                        {rec.status !== "SELECTED" && (
-                          <button
-                            onClick={() => handleSelect(rec.id)}
-                            disabled={actionLoading || isArchived}
-                            title={isArchived ? "Activate this channel before selecting topics." : "Select Topic"}
-                            className="btn btn-primary btn-sm"
-                          >
-                            Select Topic
-                          </button>
-                        )}
-
-                        {rec.status !== "REJECTED" && (
-                          <button
-                            onClick={() => handleReject(rec.id)}
-                            disabled={actionLoading || isArchived}
-                            title={isArchived ? "Activate this channel before rejecting topics." : "Reject Topic"}
-                            className="btn btn-secondary btn-sm"
-                            style={{ color: "var(--status-danger)" }}
-                          >
-                            Reject
-                          </button>
-                        )}
-                      </div>
-                    </div>
-
-                    {/* Operational Reasons */}
-                    {rec.reasons && rec.reasons.length > 0 && (
-                      <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem", paddingTop: "0.5rem", borderTop: "1px solid var(--border-subtle)" }}>
-                        {rec.reasons.map((r, i) => (
-                          <span key={i} className="badge badge-neutral text-mono" style={{ fontSize: "0.7rem" }}>
-                            ✓ {r}
-                          </span>
-                        ))}
-                      </div>
-                    )}
-
-                    {/* Score Breakdown Bar */}
-                    <div
-                      style={{
-                        display: "grid",
-                        gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))",
-                        gap: "0.5rem",
-                        paddingTop: "0.5rem",
-                        borderTop: "1px solid var(--border-subtle)",
-                        fontSize: "0.72rem",
-                      }}
-                    >
-                      <div>
-                        <span style={{ color: "var(--text-muted)", display: "block" }}>Audience Fit:</span>
-                        <strong style={{ color: "var(--text-primary)" }}>{rec.score_breakdown?.audience_fit}</strong>
-                      </div>
-                      <div>
-                        <span style={{ color: "var(--text-muted)", display: "block" }}>Strategy Fit:</span>
-                        <strong style={{ color: "var(--text-primary)" }}>{rec.score_breakdown?.strategic_fit}</strong>
-                      </div>
-                      <div>
-                        <span style={{ color: "var(--text-muted)", display: "block" }}>Trend Score:</span>
-                        <strong style={{ color: "var(--text-primary)" }}>{rec.score_breakdown?.trend}</strong>
-                      </div>
-                      <div>
-                        <span style={{ color: "var(--text-muted)", display: "block" }}>Novelty:</span>
-                        <strong style={{ color: "var(--text-primary)" }}>{rec.score_breakdown?.novelty}</strong>
-                      </div>
-                      <div>
-                        <span style={{ color: "var(--text-muted)", display: "block" }}>Content Gap:</span>
-                        <strong style={{ color: "var(--text-primary)" }}>{rec.score_breakdown?.content_gap}</strong>
-                      </div>
-                      <div>
-                        <span style={{ color: "var(--text-muted)", display: "block" }}>Hist. Perf:</span>
-                        <strong style={{ color: "var(--text-primary)" }}>{rec.score_breakdown?.historical_performance}</strong>
-                      </div>
-                      <div>
-                        <span style={{ color: "var(--text-muted)", display: "block" }}>Feasibility:</span>
-                        <strong style={{ color: "var(--text-primary)" }}>{rec.score_breakdown?.cost_efficiency}</strong>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* TAB 2: ALL CANDIDATES */}
-        {activeTab === "candidates" && (
-          <div>
-            <div className="table-container">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Title & Summary</th>
-                    <th>Status</th>
-                    <th>Duplicate Check</th>
-                    <th>Score</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {candidates.length === 0 ? (
-                    <tr>
-                      <td colSpan={5} style={{ textAlign: "center", padding: "2rem", color: "var(--text-muted)" }}>
-                        No topic candidates found for this channel.
-                      </td>
-                    </tr>
-                  ) : (
-                    candidates.map((cand) => (
-                      <tr key={cand.id}>
-                        <td>
-                          <div style={{ fontWeight: 600, fontSize: "0.85rem", color: "var(--text-primary)" }}>{cand.title}</div>
-                          {cand.summary && (
-                            <div style={{ fontSize: "0.75rem", color: "var(--text-muted)", marginTop: "0.2rem" }}>
-                              {cand.summary.substring(0, 90)}...
-                            </div>
-                          )}
-                          <div className="text-mono" style={{ fontSize: "0.68rem", color: "var(--text-muted)", marginTop: "0.2rem" }}>
-                            Source: {cand.source_type}
-                          </div>
-                        </td>
-                        <td>
-                          <span className={`badge ${getStatusBadgeClass(cand.status)}`}>
-                            {cand.status}
-                          </span>
-                        </td>
-                        <td>
-                          <span className={`badge ${getDuplicateBadgeClass(cand.duplicate_status)}`}>
-                            {cand.duplicate_status || "UNKNOWN"}
-                          </span>
-                        </td>
-                        <td>
-                          <span className="text-mono" style={{ fontSize: "0.85rem", fontWeight: 700, color: cand.final_score ? "var(--accent-secondary)" : "var(--text-muted)" }}>
-                            {cand.final_score !== null && cand.final_score !== undefined ? cand.final_score.toFixed(1) : "—"}
-                          </span>
-                        </td>
-                        <td>
-                          <div style={{ display: "flex", gap: "0.35rem" }}>
-                            {cand.status === "DISCOVERED" && (
-                              <button
-                                onClick={() => handleEvaluateSingle(cand.id)}
-                                disabled={actionLoading || isArchived}
-                                title={isArchived ? "Activate this channel before evaluating topics." : "Evaluate Candidate"}
-                                className="btn btn-primary btn-sm"
-                                style={{ fontSize: "0.72rem", padding: "0.2rem 0.45rem" }}
-                              >
-                                Evaluate
-                              </button>
-                            )}
-                            {cand.status === "EVALUATED" && (
-                              <button
-                                onClick={() => handleSelect(cand.id)}
-                                disabled={actionLoading || isArchived}
-                                title={isArchived ? "Activate this channel before selecting topics." : "Select Topic"}
-                                className="btn btn-primary btn-sm"
-                                style={{ fontSize: "0.72rem", padding: "0.2rem 0.45rem" }}
-                              >
-                                Select
-                              </button>
-                            )}
-                            <button
-                              onClick={() => handleArchive(cand.id)}
-                              disabled={actionLoading || isArchived}
-                              title={isArchived ? "Channel is already archived" : "Archive Candidate"}
-                              className="btn btn-secondary btn-sm"
-                              style={{ fontSize: "0.72rem", padding: "0.2rem 0.45rem" }}
-                            >
-                              Archive
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        )}
-
-        {/* TAB 3: TOPIC MEMORY */}
-        {activeTab === "memory" && (
-          <div>
-            <div style={{ display: "flex", gap: "0.75rem", marginBottom: "1rem" }}>
+      <PageHeader
+        eyebrow="Channel workflow · Step 1"
+        title="Topic intelligence"
+        description="Evaluate ideas against channel fit, novelty, and topic memory before selecting the next production direction."
+        actions={
+          <>
+            <button
+              className="btn btn-primary"
+              type="button"
+              disabled={isArchived}
+              onClick={() => setShowIngest(true)}
+            >
+              Add candidate
+            </button>
+            <button
+              className="btn btn-secondary"
+              type="button"
+              disabled={busy || isArchived || unevaluatedCount === 0}
+              onClick={() =>
+                void runAction(
+                  () => evaluateTopicBatch(channelId),
+                  "Batch evaluation failed",
+                )
+              }
+            >
+              Evaluate discovered ({unevaluatedCount})
+            </button>
+          </>
+        }
+      />
+      {isArchived ? (
+        <Alert tone="warning" title="Channel archived">
+          Topic actions are disabled until the channel is active.
+        </Alert>
+      ) : null}
+      {error ? (
+        <ErrorState
+          title="Topic workflow unavailable"
+          description={error}
+          action={
+            <button
+              className="btn btn-secondary btn-sm"
+              type="button"
+              onClick={() => void loadData()}
+            >
+              Retry
+            </button>
+          }
+        />
+      ) : null}
+      <WorkflowStatusSummary
+        metrics={[
+          { label: "Candidates", value: candidates.length },
+          { label: "Recommended", value: recommendations.length },
+          { label: "Selected", value: selectedCount },
+          { label: "Memory records", value: memories.length },
+        ]}
+      />
+      <WorkflowTabs
+        label="Topic views"
+        active={view}
+        onChange={setView}
+        tabs={[
+          {
+            id: "recommendations",
+            label: "Recommendations",
+            count: recommendations.length,
+          },
+          {
+            id: "candidates",
+            label: "All candidates",
+            count: candidates.length,
+          },
+          { id: "memory", label: "Topic memory", count: memories.length },
+        ]}
+      />
+      {loading ? (
+        <LoadingState
+          title="Loading topic intelligence"
+          description="Retrieving candidates, recommendations, and channel memory."
+        />
+      ) : view === "memory" ? (
+        <PageSection
+          title="Topic memory"
+          description="Historical discovery and production frequency informs duplicate and fatigue decisions."
+          actions={
+            <div className="ui-filter-field">
+              <label htmlFor="topic-memory-search">Search memory</label>
               <input
-                type="text"
-                value={searchMemory}
-                onChange={(e) => setSearchMemory(e.target.value)}
-                placeholder="Search channel topic memory by keyword..."
-                className="form-input"
-                style={{ flex: 1 }}
+                id="topic-memory-search"
+                className="input"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+                placeholder="Topic or keyword"
               />
             </div>
-
-            {memories.length === 0 ? (
-              <div
-                style={{
-                  textAlign: "center",
-                  padding: "2.5rem 1rem",
-                  color: "var(--text-muted)",
-                  background: "var(--bg-input)",
-                  borderRadius: "var(--radius-sm)",
-                  border: "1px solid var(--border-subtle)",
-                  fontSize: "0.85rem",
-                }}
-              >
-                No historical topic memory records found. Memory automatically populates as topics are produced and published.
-              </div>
-            ) : (
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: "0.75rem" }}>
-                {memories.map((m) => (
-                  <div
-                    key={m.id}
-                    style={{
-                      padding: "0.85rem 1rem",
-                      background: "var(--bg-input)",
-                      borderRadius: "var(--radius-sm)",
-                      border: "1px solid var(--border-subtle)",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: "0.5rem",
-                    }}
-                  >
-                    <div style={{ fontWeight: 600, fontSize: "0.88rem", color: "var(--text-primary)" }}>
-                      {m.canonical_topic}
+          }
+        >
+          {memories.length === 0 ? (
+            <EmptyState
+              title="No topic memory found"
+              description={
+                search
+                  ? "No history matches this search."
+                  : "Memory appears after topic activity is recorded."
+              }
+            />
+          ) : (
+            <div className="workflow-card-grid">
+              {memories.map((memory) => (
+                <article className="workflow-card" key={memory.id}>
+                  <div className="workflow-card-header">
+                    <h3>{memory.canonical_topic}</h3>
+                    <StatusBadge>{memory.times_produced} produced</StatusBadge>
+                  </div>
+                  <div className="workflow-data-list">
+                    <div className="workflow-data-row">
+                      <span>Discovered</span>
+                      <strong>{memory.times_discovered}</strong>
                     </div>
-                    <div style={{ display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "var(--text-muted)" }}>
-                      <span>Discovered: <strong style={{ color: "var(--text-primary)" }}>{m.times_discovered}</strong></span>
-                      <span>Selected: <strong style={{ color: "var(--accent-secondary)" }}>{m.times_selected}</strong></span>
-                      <span>Produced: <strong style={{ color: "var(--status-success)" }}>{m.times_produced}</strong></span>
+                    <div className="workflow-data-row">
+                      <span>Selected</span>
+                      <strong>{memory.times_selected}</strong>
                     </div>
-                    <div className="text-mono" style={{ fontSize: "0.7rem", color: "var(--text-muted)" }}>
-                      Last Seen: {m.last_seen_at ? new Date(m.last_seen_at).toLocaleDateString() : "Never"}
+                    <div className="workflow-data-row">
+                      <span>Rejected</span>
+                      <strong>{memory.times_rejected}</strong>
+                    </div>
+                    <div className="workflow-data-row">
+                      <span>Last seen</span>
+                      <strong>
+                        {new Date(memory.last_seen_at).toLocaleDateString()}
+                      </strong>
                     </div>
                   </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {/* Modal: Ingest Candidate */}
-      {showIngestModal && (
-        <div className="modal-backdrop">
-          <div className="modal-card" style={{ maxWidth: "520px" }}>
-            <div className="modal-header">
-              <h3 style={{ fontSize: "1rem", fontWeight: 700, color: "var(--text-primary)" }}>
-                Ingest Topic Candidate
-              </h3>
-              <button onClick={() => setShowIngestModal(false)} className="btn btn-secondary btn-sm" style={{ padding: "0.2rem 0.5rem" }}>
-                ✕
-              </button>
+                  <TechnicalDetails data={memory} />
+                </article>
+              ))}
             </div>
-
-            <form onSubmit={handleIngest}>
-              <div className="modal-body" style={{ display: "flex", flexDirection: "column", gap: "0.85rem" }}>
-                {ingestError && (
-                  <div style={{ padding: "0.5rem 0.75rem", background: "var(--status-danger-bg)", color: "var(--status-danger)", borderRadius: "var(--radius-sm)", fontSize: "0.78rem" }}>
-                    {ingestError}
-                  </div>
-                )}
-
-                <div className="form-group">
-                  <label className="form-label">Topic Title *</label>
-                  <input
-                    type="text"
-                    value={newTitle}
-                    onChange={(e) => setNewTitle(e.target.value)}
-                    placeholder="e.g. 5 FastAPI Performance Traps & How to Fix Them"
-                    className="form-input"
-                    required
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Summary / Core Premise</label>
-                  <textarea
-                    value={newSummary}
-                    onChange={(e) => setNewSummary(e.target.value)}
-                    placeholder="Brief explanation of the angle and key audience takeaway..."
-                    className="form-textarea"
-                    rows={3}
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Keywords (comma-separated)</label>
-                  <input
-                    type="text"
-                    value={newKeywords}
-                    onChange={(e) => setNewKeywords(e.target.value)}
-                    placeholder="fastapi, python, concurrency, async, database"
-                    className="form-input"
-                  />
-                </div>
-
-                <div className="form-group">
-                  <label className="form-label">Primary Hook / Angle</label>
-                  <input
-                    type="text"
-                    value={newAngle}
-                    onChange={(e) => setNewAngle(e.target.value)}
-                    placeholder="e.g. Why sync blocking calls destroy FastAPI throughput"
-                    className="form-input"
-                  />
-                </div>
-              </div>
-
-              <div className="modal-footer" style={{ display: "flex", justifyContent: "flex-end", gap: "0.5rem" }}>
-                <button
-                  type="button"
-                  onClick={() => setShowIngestModal(false)}
-                  className="btn btn-secondary btn-sm"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={actionLoading || !newTitle.trim()}
-                  className="btn btn-primary btn-sm"
-                >
-                  {actionLoading ? "Ingesting..." : "Ingest Candidate"}
-                </button>
-              </div>
-            </form>
+          )}
+        </PageSection>
+      ) : visibleCandidates.length === 0 ? (
+        <EmptyState
+          title={
+            view === "recommendations"
+              ? "No recommendations meet the threshold"
+              : "No topic candidates yet"
+          }
+          description={
+            view === "recommendations"
+              ? "Evaluate discovered topics or inspect all candidates."
+              : "Add a candidate to begin topic evaluation."
+          }
+        />
+      ) : (
+        <PageSection
+          title={
+            view === "recommendations"
+              ? "Ranked recommendations"
+              : "Candidate inventory"
+          }
+          description="Actions remain explicit; scores and rationale are primary, while raw metadata stays secondary."
+        >
+          <div className="workflow-card-grid">
+            {visibleCandidates.map((candidate) => (
+              <CandidateCard
+                key={candidate.id}
+                candidate={candidate}
+                busy={busy}
+                archived={Boolean(isArchived)}
+                onEvaluate={() =>
+                  void runAction(
+                    () => evaluateTopicCandidate(channelId, candidate.id),
+                    "Failed to evaluate candidate",
+                  )
+                }
+                onSelect={() =>
+                  void runAction(
+                    () => selectTopicCandidate(channelId, candidate.id),
+                    "Failed to select candidate",
+                  )
+                }
+                onReject={() => {
+                  setRejectReason("Off-strategy");
+                  setRejectCandidate(candidate);
+                }}
+                onArchive={() => setArchiveCandidate(candidate)}
+              />
+            ))}
           </div>
-        </div>
+        </PageSection>
       )}
+      <Dialog
+        open={showIngest}
+        title="Add topic candidate"
+        description="Add an operator-sourced topic for deterministic scoring."
+        onClose={() => setShowIngest(false)}
+        actions={
+          <>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setShowIngest(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              form="topic-ingest-form"
+              className="btn btn-primary"
+              disabled={busy}
+            >
+              {busy ? "Adding…" : "Add candidate"}
+            </button>
+          </>
+        }
+      >
+        <form
+          id="topic-ingest-form"
+          className="workflow-dialog-form"
+          onSubmit={handleIngest}
+        >
+          {formError ? <Alert tone="danger">{formError}</Alert> : null}
+          <FormField id="topic-title" label="Title" required>
+            <input
+              className="input"
+              value={newTitle}
+              onChange={(event) => setNewTitle(event.target.value)}
+            />
+          </FormField>
+          <FormField id="topic-summary" label="Summary">
+            <textarea
+              className="input"
+              value={newSummary}
+              onChange={(event) => setNewSummary(event.target.value)}
+            />
+          </FormField>
+          <FormField
+            id="topic-keywords"
+            label="Keywords"
+            description="Comma-separated"
+          >
+            <input
+              className="input"
+              value={newKeywords}
+              onChange={(event) => setNewKeywords(event.target.value)}
+            />
+          </FormField>
+          <FormField id="topic-angle" label="Initial angle">
+            <input
+              className="input"
+              value={newAngle}
+              onChange={(event) => setNewAngle(event.target.value)}
+            />
+          </FormField>
+        </form>
+      </Dialog>
+      <Dialog
+        open={Boolean(rejectCandidate)}
+        title="Reject topic candidate"
+        description={
+          rejectCandidate
+            ? `Record why “${rejectCandidate.title}” should not proceed.`
+            : undefined
+        }
+        onClose={() => setRejectCandidate(null)}
+        actions={
+          <>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={() => setRejectCandidate(null)}
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              form="topic-reject-form"
+              className="btn btn-danger"
+              disabled={busy || !rejectReason.trim()}
+            >
+              Reject candidate
+            </button>
+          </>
+        }
+      >
+        <form id="topic-reject-form" onSubmit={handleReject}>
+          <FormField id="topic-reject-reason" label="Reason" required>
+            <textarea
+              className="input"
+              value={rejectReason}
+              onChange={(event) => setRejectReason(event.target.value)}
+            />
+          </FormField>
+        </form>
+      </Dialog>
+      <ConfirmDialog
+        open={Boolean(archiveCandidate)}
+        title="Archive topic candidate"
+        description={
+          archiveCandidate
+            ? `Archive “${archiveCandidate.title}”? It will leave the active workflow.`
+            : "Archive this candidate?"
+        }
+        confirmLabel="Archive"
+        busy={busy}
+        onCancel={() => setArchiveCandidate(null)}
+        onConfirm={() => {
+          if (!archiveCandidate) return;
+          const candidate = archiveCandidate;
+          setArchiveCandidate(null);
+          void runAction(
+            () => archiveTopicCandidate(channelId, candidate.id),
+            "Failed to archive candidate",
+          );
+        }}
+      />
     </div>
   );
 }

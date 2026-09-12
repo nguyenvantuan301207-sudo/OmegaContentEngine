@@ -1,22 +1,43 @@
 "use client";
 
-import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { Channel, getChannel, getChannels } from "@/lib/api";
+import {
+  DEFAULT_PREFERENCES,
+  persistPreferences,
+  PREFERENCES_EVENT,
+  readPreferences,
+} from "@/lib/preferences";
+import {
+  classifyChannel,
+  isChannelVisible,
+  isClassificationInternal,
+  type ChannelClassification,
+} from "@/lib/channel-classification";
 
 export type ViewMode = "OPERATOR" | "DEVELOPMENT";
-
-export const CANARY_CHANNEL_ID = "fa8813c9-9e7b-43d0-b76e-1bb323ad5a7a";
-export const CANARY_CHANNEL_NAME = "FastAPI Masterclass";
 
 interface OperatorContextType {
   mode: ViewMode;
   setMode: (mode: ViewMode) => void;
   toggleMode: () => void;
-  canaryChannelId: string;
-  canaryChannelName: string;
   channels: Channel[];
+  visibleChannels: Channel[];
+  channelsLoading: boolean;
+  channelError: string | null;
   selectedChannelId: string;
   selectedChannel: Channel | null;
+  selectedChannelClassification: ChannelClassification;
+  isSelectedChannelInternal: boolean;
+  showInternalChannels: boolean;
+  setShowInternalChannels: (show: boolean) => void;
   setSelectedChannelId: (id: string) => void;
   refreshChannels: () => Promise<void>;
 }
@@ -25,11 +46,16 @@ const OperatorContext = createContext<OperatorContextType>({
   mode: "OPERATOR",
   setMode: () => {},
   toggleMode: () => {},
-  canaryChannelId: CANARY_CHANNEL_ID,
-  canaryChannelName: CANARY_CHANNEL_NAME,
   channels: [],
-  selectedChannelId: CANARY_CHANNEL_ID,
+  visibleChannels: [],
+  channelsLoading: true,
+  channelError: null,
+  selectedChannelId: "",
   selectedChannel: null,
+  selectedChannelClassification: "UNKNOWN",
+  isSelectedChannelInternal: false,
+  showInternalChannels: false,
+  setShowInternalChannels: () => {},
   setSelectedChannelId: () => {},
   refreshChannels: async () => {},
 });
@@ -40,16 +66,19 @@ const CHANNEL_STORAGE_KEY = "omega_selected_channel_id";
 export function OperatorProvider({ children }: { children: React.ReactNode }) {
   const [mode, setModeState] = useState<ViewMode>("OPERATOR");
   const [channels, setChannels] = useState<Channel[]>([]);
-  const [selectedChannelId, setSelectedChannelIdState] = useState<string>(CANARY_CHANNEL_ID);
+  const [channelsLoading, setChannelsLoading] = useState(true);
+  const [channelError, setChannelError] = useState<string | null>(null);
+  const [selectedChannelId, setSelectedChannelIdState] = useState("");
   const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
 
   const loadChannels = useCallback(async () => {
+    setChannelsLoading(true);
+    setChannelError(null);
     try {
-      // Fetch available channels from API
-      const chanList = await getChannels(undefined, undefined, 50, 0).catch(() => []);
+      const chanList = await getChannels(undefined, undefined, 50, 0);
       setChannels(chanList);
 
-      let initialChannelId = CANARY_CHANNEL_ID;
+      let initialChannelId = "";
       try {
         const stored = localStorage.getItem(CHANNEL_STORAGE_KEY);
         if (stored && stored.trim().length > 0) {
@@ -60,7 +89,9 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
       }
 
       // Check if initialChannelId is valid in the list
-      let matched: Channel | null = chanList.find((c) => c.id === initialChannelId) || null;
+      let matched: Channel | null = initialChannelId
+        ? chanList.find((c) => c.id === initialChannelId) || null
+        : null;
 
       // If matched channel is archived or not found, try to find an ACTIVE channel
       if (!matched || matched.state === "ARCHIVED") {
@@ -73,7 +104,12 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
 
       if (!matched && initialChannelId) {
         // Fetch it authoritatively directly
-        matched = await getChannel(initialChannelId).catch(() => null);
+        try {
+          matched = await getChannel(initialChannelId);
+        } catch {
+          // A stale persisted selection is optional; the loaded channel list remains authoritative.
+          initialChannelId = "";
+        }
         if (matched && !chanList.some((c) => c.id === matched?.id)) {
           setChannels([matched, ...chanList]);
         }
@@ -83,11 +119,22 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
         setSelectedChannelIdState(matched.id);
         setSelectedChannel(matched);
       } else if (chanList.length > 0) {
-        setSelectedChannelIdState(chanList[0].id);
-        setSelectedChannel(chanList[0]);
+        const fallback =
+          chanList.find((channel) => channel.state === "ACTIVE") || chanList[0];
+        setSelectedChannelIdState(fallback.id);
+        setSelectedChannel(fallback);
+      } else {
+        setSelectedChannelIdState("");
+        setSelectedChannel(null);
       }
-    } catch {
-      // Fail closed / gracefully
+    } catch (error: unknown) {
+      setChannelError(
+        error instanceof Error
+          ? error.message
+          : "Unable to load channel context.",
+      );
+    } finally {
+      setChannelsLoading(false);
     }
   }, []);
 
@@ -128,15 +175,63 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
       if (found) {
         setSelectedChannel(found);
       } else {
-        const fetched = await getChannel(cleanId).catch(() => null);
-        if (fetched) {
+        try {
+          const fetched = await getChannel(cleanId);
           setSelectedChannel(fetched);
-          setChannels((prev) => (prev.some((c) => c.id === fetched.id) ? prev : [fetched, ...prev]));
+          setChannels((prev) =>
+            prev.some((c) => c.id === fetched.id) ? prev : [fetched, ...prev],
+          );
+          setChannelError(null);
+        } catch (error: unknown) {
+          setChannelError(
+            error instanceof Error
+              ? error.message
+              : "Unable to select channel.",
+          );
         }
       }
     },
-    [channels]
+    [channels],
   );
+
+  const [showInternalChannels, setShowInternalChannelsState] = useState(false);
+
+  useEffect(() => {
+    const prefs = readPreferences();
+    setShowInternalChannelsState(Boolean(prefs.showInternalChannels));
+
+    const handlePrefs = (event: Event) => {
+      const customEvent = event as CustomEvent<Partial<typeof DEFAULT_PREFERENCES>>;
+      if (customEvent.detail && typeof customEvent.detail.showInternalChannels === "boolean") {
+        setShowInternalChannelsState(customEvent.detail.showInternalChannels);
+      }
+    };
+    window.addEventListener(PREFERENCES_EVENT, handlePrefs);
+    return () => window.removeEventListener(PREFERENCES_EVENT, handlePrefs);
+  }, []);
+
+  const setShowInternalChannels = useCallback((show: boolean) => {
+    setShowInternalChannelsState(show);
+    const currentPrefs = readPreferences();
+    persistPreferences({ ...currentPrefs, showInternalChannels: show });
+  }, []);
+
+  const selectedChannelClassification: ChannelClassification = useMemo(() => {
+    if (!selectedChannel) return "UNKNOWN";
+    return classifyChannel(selectedChannel).classification;
+  }, [selectedChannel]);
+
+  const isSelectedChannelInternal = useMemo(() => {
+    return isClassificationInternal(selectedChannelClassification);
+  }, [selectedChannelClassification]);
+
+  const visibleChannels = useMemo(() => {
+    return channels.filter((ch) => {
+      // Keep selected channel addressable even if internal
+      if (selectedChannelId && ch.id === selectedChannelId) return true;
+      return isChannelVisible(ch, showInternalChannels);
+    });
+  }, [channels, selectedChannelId, showInternalChannels]);
 
   const toggleMode = () => {
     setMode(mode === "OPERATOR" ? "DEVELOPMENT" : "OPERATOR");
@@ -148,11 +243,16 @@ export function OperatorProvider({ children }: { children: React.ReactNode }) {
         mode,
         setMode,
         toggleMode,
-        canaryChannelId: CANARY_CHANNEL_ID,
-        canaryChannelName: CANARY_CHANNEL_NAME,
         channels,
+        visibleChannels,
+        channelsLoading,
+        channelError,
         selectedChannelId,
         selectedChannel,
+        selectedChannelClassification,
+        isSelectedChannelInternal,
+        showInternalChannels,
+        setShowInternalChannels,
         setSelectedChannelId,
         refreshChannels: loadChannels,
       }}
