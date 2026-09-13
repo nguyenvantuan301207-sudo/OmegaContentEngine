@@ -15,7 +15,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from omega.infrastructure.celery_app import celery_app
+from omega.infrastructure.celery_app import (
+    PUBLISHER_TASK_ACKS_LATE,
+    PUBLISHER_TASK_NAME,
+    PUBLISHER_TASK_REJECT_ON_WORKER_LOST,
+    celery_app,
+)
 from omega.logging import get_logger
 
 logger = get_logger(service="omega-worker")
@@ -1627,7 +1632,11 @@ def schedule_stale_dispatching_sweep_task() -> dict[str, int]:
         return {"status": "error", "recovered": 0, "consumed": 0, "released": 0, "requeued": 0}
 
 
-@celery_app.task(name="omega.publisher.execute_publish")
+@celery_app.task(
+    name=PUBLISHER_TASK_NAME,
+    acks_late=PUBLISHER_TASK_ACKS_LATE,
+    reject_on_worker_lost=PUBLISHER_TASK_REJECT_ON_WORKER_LOST,
+)
 def execute_publish_task(task_id: str) -> dict[str, Any]:
     """Execute external publication for an approved PublishIntent."""
     import asyncio

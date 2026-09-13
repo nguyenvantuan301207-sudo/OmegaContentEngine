@@ -437,6 +437,8 @@ class PublishExecutionService:
                     destination_url="https://oauth2.googleapis.com/token",
                     service_category=ServiceCategory.YOUTUBE_API,
                     caller_key="refresh_access_token",
+                    mission_id=intent.mission_id,
+                    task_id=task_id,
                 )
             )
             _, permit_upload = await preflight_service.preflight(
@@ -444,6 +446,8 @@ class PublishExecutionService:
                     destination_url="https://www.googleapis.com/upload/youtube/v3/videos",
                     service_category=ServiceCategory.YOUTUBE_API,
                     caller_key="init_resumable_upload",
+                    mission_id=intent.mission_id,
+                    task_id=task_id,
                 )
             )
             if not permit_oauth or not permit_upload or permit_oauth.is_expired() or permit_upload.is_expired():
@@ -771,6 +775,8 @@ class PublishExecutionService:
                         destination_url="https://oauth2.googleapis.com/token",
                         service_category=ServiceCategory.YOUTUBE_API,
                         caller_key="refresh_access_token",
+                        mission_id=intent.mission_id,
+                        task_id=task_id,
                     )
                 )
                 oauth_target = "https://oauth2.googleapis.com/token"
@@ -910,6 +916,8 @@ class PublishExecutionService:
                         destination_url=upload_init_target,
                         service_category=ServiceCategory.YOUTUBE_API,
                         caller_key="init_resumable_upload",
+                        mission_id=intent.mission_id,
+                        task_id=task_id,
                     )
                 )
                 if not permit_upload or not permit_upload.is_valid_for(upload_init_target):
@@ -1001,6 +1009,8 @@ class PublishExecutionService:
                                 destination_url=session_uri,
                                 service_category=ServiceCategory.YOUTUBE_API,
                                 caller_key="upload_chunk",
+                                mission_id=intent.mission_id,
+                                task_id=task_id,
                             )
                         )
                         if not permit_upload or not permit_upload.is_valid_for(session_uri):

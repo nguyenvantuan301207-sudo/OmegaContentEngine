@@ -6,10 +6,21 @@ Uses Redis as both broker and result backend.
 from __future__ import annotations
 
 from celery import Celery
+from kombu import Queue
 
 from omega.config import get_settings
 
 settings = get_settings()
+
+DEFAULT_QUEUE = "celery"
+PUBLISHER_QUEUE = "omega-publisher"
+PUBLISHER_TASK_NAME = "omega.publisher.execute_publish"
+GENERAL_WORKER_QUEUES = (DEFAULT_QUEUE,)
+PUBLISHER_WORKER_QUEUES = (PUBLISHER_QUEUE,)
+PUBLISHER_WORKER_CONCURRENCY_DEFAULT = 1
+PUBLISHER_WORKER_PREFETCH_MULTIPLIER = 1
+PUBLISHER_TASK_ACKS_LATE = True
+PUBLISHER_TASK_REJECT_ON_WORKER_LOST = True
 
 celery_app = Celery(
     "omega",
@@ -25,6 +36,10 @@ celery_app.conf.update(
     timezone="UTC",
     enable_utc=True,
     task_track_started=True,
+    task_default_queue=DEFAULT_QUEUE,
+    task_queues=(Queue(DEFAULT_QUEUE), Queue(PUBLISHER_QUEUE)),
+    task_routes={PUBLISHER_TASK_NAME: {"queue": PUBLISHER_QUEUE}},
+    task_create_missing_queues=False,
     worker_hijack_root_logger=False,
     broker_connection_retry_on_startup=True,
     beat_schedule={
@@ -100,3 +115,27 @@ celery_app.conf.update(
         },
     },
 )
+
+
+def resolve_task_queue(task_name: str) -> str:
+    """Return the queue selected by canonical Celery routing for a task name."""
+    route = celery_app.amqp.router.route({}, task_name)
+    queue = route["queue"]
+    return queue.name if hasattr(queue, "name") else str(queue)
+
+
+def publisher_worker_metadata() -> dict[str, object]:
+    """Expose stable read-only publisher fleet configuration for operations tooling."""
+    return {
+        "queue_name": PUBLISHER_QUEUE,
+        "worker_role": "publisher",
+        "worker_queues": PUBLISHER_WORKER_QUEUES,
+        "concurrency_default": PUBLISHER_WORKER_CONCURRENCY_DEFAULT,
+        "prefetch_multiplier": PUBLISHER_WORKER_PREFETCH_MULTIPLIER,
+        "max_in_flight_per_worker": PUBLISHER_WORKER_CONCURRENCY_DEFAULT
+        * PUBLISHER_WORKER_PREFETCH_MULTIPLIER,
+        "task_name": PUBLISHER_TASK_NAME,
+        "acks_late": PUBLISHER_TASK_ACKS_LATE,
+        "reject_on_worker_lost": PUBLISHER_TASK_REJECT_ON_WORKER_LOST,
+        "queue_backlog_count": None,
+    }
