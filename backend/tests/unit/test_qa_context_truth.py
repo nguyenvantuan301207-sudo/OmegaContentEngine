@@ -1,20 +1,17 @@
 import uuid
-from typing import Any
-from unittest.mock import MagicMock, AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from omega.application.production_qa import ProductionQAEngine
 from omega.application.guardian.adapters.production_qa_adapter import ProductionQAAdapter
-from omega.application.guardian.detectors.media_integrity import MediaIntegrityDetector
-from omega.application.render_service import ProductionRenderService
 from omega.application.guardian.detectors.base import GuardianEvaluationContext
+from omega.application.guardian.detectors.media_integrity import MediaIntegrityDetector
+from omega.application.production_qa import ProductionQAEngine
 from omega.infrastructure.models import (
     ProductionRequest,
     ProductionScene,
-    ScriptVersion,
     ScriptSection,
-    MediaArtifact,
+    ScriptVersion,
 )
 
 

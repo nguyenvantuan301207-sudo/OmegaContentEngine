@@ -17,15 +17,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.domain.mission import MissionState
+from omega.domain.publisher import PublishIntentState
 from omega.domain.scheduler import (
     DispatchFenceResult,
     ReservationState,
     SchedulePolicyStatus,
+    ScheduleTargetType,
+    ScheduleWorkloadCategory,
 )
 from omega.domain.task import TaskState
 from omega.infrastructure.models import (
     ChannelDNARevision,
+    MediaArtifact,
     Mission,
+    PublishIntent,
+    ScheduleDecision,
     SchedulePolicy,
     ScheduleReservation,
     ScheduleStateTransition,
@@ -103,13 +109,18 @@ class DispatchFence:
                 f"Guardian epoch changed from {reservation.guardian_epoch} to {mission.guardian_epoch}",
             )
 
-        # 5. If task-scoped, verify task exists and is READY
-        if reservation.target_type == "TASK_EXECUTION" or reservation.decision.task_id:
-            task_id = (
-                reservation.target_id
-                if reservation.target_type == "TASK_EXECUTION"
-                else reservation.decision.task_id
+        # 5. Resolve task_id safely (without async lazy loading hazards)
+        task_id = None
+        if reservation.target_type == "TASK_EXECUTION":
+            task_id = reservation.target_id
+        elif reservation.decision_id:
+            dec_res = await session.execute(
+                select(ScheduleDecision.task_id).where(ScheduleDecision.id == reservation.decision_id)
             )
+            task_id = dec_res.scalar_one_or_none()
+
+        # If task-scoped, verify task exists and is READY
+        if task_id:
             task_res = await session.execute(
                 select(Task).where(Task.id == task_id).with_for_update()
             )
@@ -128,6 +139,109 @@ class DispatchFence:
                     DispatchFenceResult.TASK_INELIGIBLE,
                     f"Task state is {task.state}, not READY",
                 )
+
+        # 5b. For EXTERNAL_PUBLISH: verify publisher lineage and human approval immediately before dispatch
+        if (
+            reservation.workload_category
+            == ScheduleWorkloadCategory.EXTERNAL_PUBLISH.value
+        ):
+            intent = None
+            if reservation.target_type == ScheduleTargetType.PUBLISH_INTENT.value:
+                intent_res = await session.execute(
+                    select(PublishIntent).where(PublishIntent.id == reservation.target_id).with_for_update()
+                )
+                intent = intent_res.scalar_one_or_none()
+            elif task_id:
+                intent_res = await session.execute(
+                    select(PublishIntent)
+                    .where(PublishIntent.task_id == task_id)
+                    .order_by(PublishIntent.revision_number.desc())
+                    .limit(1)
+                    .with_for_update()
+                )
+                intent = intent_res.scalar_one_or_none()
+
+            if intent is None:
+                await _release_reservation(
+                    session,
+                    reservation,
+                    reason="No linked PublishIntent found for EXTERNAL_PUBLISH reservation",
+                )
+                return (DispatchFenceResult.TASK_INELIGIBLE, "PublishIntent not found")
+
+            if intent:
+                # Verify exact PublishIntent state == APPROVED
+                if intent.state != PublishIntentState.APPROVED.value:
+                    if intent.state == PublishIntentState.DRAFT.value:
+                        return (
+                            DispatchFenceResult.TASK_INELIGIBLE,
+                            "PublishIntent in DRAFT state; human approval required before dispatch",
+                        )
+                    elif intent.state == PublishIntentState.CLAIMED.value:
+                        return (
+                            DispatchFenceResult.TASK_INELIGIBLE,
+                            "PublishIntent is actively CLAIMED by worker; duplicate calendar dispatch blocked",
+                        )
+                    elif intent.state == PublishIntentState.CANCELLED.value:
+                        msg = "PublishIntent is CANCELLED"
+                    elif intent.state == PublishIntentState.PUBLISHED.value:
+                        msg = "PublishIntent is already PUBLISHED"
+                    elif intent.state in (
+                        PublishIntentState.FAILED.value,
+                        PublishIntentState.SUPERSEDED.value,
+                    ):
+                        msg = f"PublishIntent is in {intent.state} state"
+                    else:
+                        msg = f"PublishIntent is in {intent.state} state, not APPROVED"
+
+                    await _release_reservation(session, reservation, reason=msg)
+                    return (DispatchFenceResult.TASK_INELIGIBLE, msg)
+
+                # Verify lineage linkages: Task, Mission, Channel, MediaArtifact
+                if task_id and intent.task_id != task_id:
+                    await _release_reservation(
+                        session,
+                        reservation,
+                        reason=f"PublishIntent task_id mismatch: intent has {intent.task_id}, reservation expects {task_id}",
+                    )
+                    return (DispatchFenceResult.TASK_INELIGIBLE, "Task lineage mismatch")
+
+                if intent.mission_id != reservation.mission_id:
+                    await _release_reservation(
+                        session,
+                        reservation,
+                        reason=f"PublishIntent mission_id mismatch: intent has {intent.mission_id}, reservation has {reservation.mission_id}",
+                    )
+                    return (DispatchFenceResult.TASK_INELIGIBLE, "Mission lineage mismatch")
+
+                if reservation.channel_id and intent.channel_id != reservation.channel_id:
+                    await _release_reservation(
+                        session,
+                        reservation,
+                        reason=f"PublishIntent channel_id mismatch: intent has {intent.channel_id}, reservation has {reservation.channel_id}",
+                    )
+                    return (DispatchFenceResult.TASK_INELIGIBLE, "Channel lineage mismatch")
+
+                # Verify MediaArtifact
+                if not intent.media_artifact_id:
+                    await _release_reservation(
+                        session,
+                        reservation,
+                        reason="PublishIntent has no media_artifact_id",
+                    )
+                    return (DispatchFenceResult.TASK_INELIGIBLE, "MediaArtifact not bound")
+
+                artifact_res = await session.execute(
+                    select(MediaArtifact).where(MediaArtifact.id == intent.media_artifact_id)
+                )
+                artifact = artifact_res.scalar_one_or_none()
+                if not artifact:
+                    await _release_reservation(
+                        session,
+                        reservation,
+                        reason="MediaArtifact row not found for PublishIntent",
+                    )
+                    return (DispatchFenceResult.TASK_INELIGIBLE, "MediaArtifact not found")
 
         # 6. Verify SchedulePolicy is still active and matches pinned checksum
         policy_res = await session.execute(

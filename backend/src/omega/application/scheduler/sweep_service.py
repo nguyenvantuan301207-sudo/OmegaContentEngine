@@ -24,6 +24,8 @@ from omega.domain.scheduler import (
 )
 from omega.domain.task import TaskState
 from omega.infrastructure.models import (
+    PublishIntent,
+    ScheduleDecision,
     SchedulerDispatchOutbox,
     ScheduleReservation,
     ScheduleStateTransition,
@@ -86,11 +88,19 @@ class SchedulerSweepService:
                 == ScheduleWorkloadCategory.EXTERNAL_PUBLISH.value
             )
 
-            task_id = (
-                reservation.target_id
-                if reservation.target_type == "TASK_EXECUTION"
-                else reservation.decision.task_id
-            )
+            task_id = None
+            if reservation.target_type == "TASK_EXECUTION":
+                task_id = reservation.target_id
+            else:
+                dec_res = await session.execute(
+                    select(ScheduleDecision.task_id).where(ScheduleDecision.id == reservation.decision_id)
+                )
+                task_id = dec_res.scalar_one_or_none()
+                if not task_id and is_external_publish:
+                    pi_res = await session.execute(
+                        select(PublishIntent.task_id).where(PublishIntent.id == reservation.target_id)
+                    )
+                    task_id = pi_res.scalar_one_or_none()
 
             if is_external_publish and not task_id:
                 logger.error(

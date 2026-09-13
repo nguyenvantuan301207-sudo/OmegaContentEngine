@@ -5,6 +5,10 @@ from omega.application.publisher.adapters import (
     BasePlatformAdapter,
     YouTubeDataApiAdapter,
 )
+from omega.application.publisher.calendar_service import (
+    PublishCalendarError,
+    PublishCalendarService,
+)
 from omega.application.publisher.handoff_relay import HandoffRelayService
 from omega.application.publisher.intent_service import PublishIntentService
 from omega.application.publisher.oauth_service import OAuthService
@@ -16,6 +20,8 @@ __all__ = [
     "BasePlatformAdapter",
     "HandoffRelayService",
     "OAuthService",
+    "PublishCalendarError",
+    "PublishCalendarService",
     "PublishExecutionService",
     "PublishIntentService",
     "ReconciliationService",
