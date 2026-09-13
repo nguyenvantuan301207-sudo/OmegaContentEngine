@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from omega.application.error_sanitizer import sanitize_error, sanitize_sensitive_text
 from omega.application.scheduler.evaluation_engine import ScheduleEvaluationEngine
 from omega.domain.publisher import HandoffStatus
 from omega.domain.scheduler import (
@@ -31,6 +32,11 @@ from omega.logging import get_logger
 logger = get_logger(service="omega-publisher-handoff-relay")
 
 MAX_HANDOFF_ATTEMPTS = 5
+
+
+def handoff_backoff_seconds(attempt_count: int) -> int:
+    """Return the bounded deterministic delay after a failed relay attempt."""
+    return min(300, 10 * (2 ** max(0, attempt_count - 1)))
 
 
 class HandoffRelayService:
@@ -151,13 +157,14 @@ class HandoffRelayService:
                     )
 
             except Exception as exc:
+                safe_error = sanitize_error(exc)
                 logger.error(
                     "Error delivering retry handoff to Scheduler",
                     handoff_id=str(handoff_id),
-                    error=str(exc),
+                    error=safe_error,
                 )
                 # Handle retry or dead letter
-                await cls._handle_handoff_failure(session, handoff_id, claim_token, str(exc))
+                await cls._handle_handoff_failure(session, handoff_id, claim_token, safe_error)
 
         return delivered_count
 
@@ -183,7 +190,7 @@ class HandoffRelayService:
         if not row:
             return
 
-        row.last_error = error_msg
+        row.last_error = sanitize_sensitive_text(error_msg)
         row.claim_token = None
         row.lease_expires_at = None
 
@@ -196,7 +203,7 @@ class HandoffRelayService:
             )
         else:
             row.status = HandoffStatus.PENDING.value
-            backoff_sec = min(300, 10 * (2 ** (row.attempt_count - 1)))
+            backoff_sec = handoff_backoff_seconds(row.attempt_count)
             row.next_attempt_at = datetime.now(UTC) + timedelta(seconds=backoff_sec)
 
         await session.commit()

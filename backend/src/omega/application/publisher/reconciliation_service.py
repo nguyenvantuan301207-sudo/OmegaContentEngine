@@ -14,6 +14,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.durable_dispatch import DurableDispatchService
+from omega.application.error_sanitizer import sanitize_sensitive_text
 from omega.application.network.preflight import NetworkPreflightService
 from omega.application.publisher.adapters.base import AdapterRegistry
 from omega.domain.network import NetworkEgressPermit, ServiceCategory
@@ -165,7 +166,10 @@ class ReconciliationService:
                 publish_attempt_id=attempt.id,
                 from_state=previous_state,
                 to_state=PublishAttemptState.SUCCEEDED.value,
-                reason=f"Reconciled successfully from session URI: {recon_result.diagnostic_reason}",
+                reason=(
+                    "Reconciled successfully from existing upload session: "
+                    f"{sanitize_sensitive_text(recon_result.diagnostic_reason)}"
+                ),
                 actor="RECONCILER",
             )
             session.add(trans)
@@ -271,7 +275,7 @@ class ReconciliationService:
                 session=session,
                 attempt=attempt,
                 previous_state=previous_state,
-                reason=recon_result.diagnostic_reason,
+                reason=sanitize_sensitive_text(recon_result.diagnostic_reason),
             )
             return ReconciliationOutcome(
                 status=ReconciliationStatus.MANUAL_HOLD,
@@ -289,7 +293,7 @@ class ReconciliationService:
             publish_attempt_id=attempt.id,
             from_state=previous_state,
             to_state=previous_state,
-            reason=f"Reconciliation hold: {recon_result.diagnostic_reason}",
+            reason=f"Reconciliation hold: {sanitize_sensitive_text(recon_result.diagnostic_reason)}",
             actor="RECONCILER",
         )
         session.add(trans)

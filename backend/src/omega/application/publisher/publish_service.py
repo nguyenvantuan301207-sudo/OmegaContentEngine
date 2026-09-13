@@ -23,23 +23,28 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.durable_dispatch import DurableDispatchService
+from omega.application.error_sanitizer import sanitize_error, sanitize_sensitive_text
 from omega.application.guardian.engine import GuardianEngine
 from omega.application.media_storage import LocalMediaStorageProvider, StorageSecurityError
 from omega.application.network.preflight import NetworkPreflightService
 from omega.application.publisher.adapters.base import AdapterRegistry
+from omega.application.publisher.failure_policy import (
+    PublisherFailureEvidence,
+    PublisherRecoveryAction,
+    determine_publisher_recovery_action,
+)
+from omega.application.publisher.recovery_operations import PublisherRecoveryOperationsService
 from omega.config import get_settings
 from omega.domain.guardian import GuardianCheckpoint
 from omega.domain.mission import MissionState
 from omega.domain.network import ServiceCategory
 from omega.domain.publisher import (
-    HandoffStatus,
     PrivacyStatus,
     PublishAttemptState,
     PublisherErrorCategory,
     PublishIntentState,
     PublishReadinessReport,
     ReconciliationStatus,
-    compute_handoff_idempotency_key,
     compute_publish_attempt_idempotency_key,
 )
 from omega.domain.task import TaskState
@@ -52,7 +57,6 @@ from omega.infrastructure.models import (
     ProductionRequest,
     PublishAttempt,
     PublishAttemptTransition,
-    PublisherSchedulerHandoffOutbox,
     PublishIntent,
     Task,
     UploadSession,
@@ -1093,7 +1097,8 @@ class PublishExecutionService:
                         await session.commit()
 
         except Exception as exc:
-            logger.error("Publisher execution failed", error=str(exc))
+            safe_error = sanitize_error(exc)
+            logger.error("Publisher execution failed", error=safe_error)
             classified = adapter.classify_error(exc) if "adapter" in locals() else None
 
             # Check if this is an ambiguous final chunk timeout / server error
@@ -1113,7 +1118,7 @@ class PublishExecutionService:
                     attempt_id=attempt.id,
                     new_state=PublishAttemptState.UNKNOWN,
                     error_category=PublisherErrorCategory.UNKNOWN_OUTCOME,
-                    error_message=f"Ambiguous final chunk outcome: {exc}",
+                    error_message=f"Ambiguous final chunk outcome: {safe_error}",
                     reason="Final chunk timed out or returned 5xx; placed in UNKNOWN for authoritative session reconciliation.",
                     actor=effective_worker_id,
                 )
@@ -1139,37 +1144,39 @@ class PublishExecutionService:
                 )
                 retry_after = classified.retry_after_seconds if classified else 30
 
-            if is_retryable:
+            policy_action = determine_publisher_recovery_action(
+                error_category=category,
+                attempt_state=(
+                    PublishAttemptState.RETRYABLE_FAILED
+                    if is_retryable
+                    else PublishAttemptState.PERMANENT_FAILED
+                ),
+                evidence=PublisherFailureEvidence(
+                    has_upload_session="upload_session" in locals(),
+                    auth_refresh_available=category != PublisherErrorCategory.AUTH_REVOKED,
+                ),
+            )
+
+            if policy_action == PublisherRecoveryAction.RETRY:
                 # Record RETRYABLE_FAILED and insert Scheduler handoff outbox row in same transaction
                 earliest_retry_at = datetime.now(UTC) + timedelta(seconds=retry_after or 30)
-                handoff_idemp = compute_handoff_idempotency_key(
-                    publish_intent_id=intent.id,
-                    publish_attempt_id=attempt.id,
-                    retry_generation=intent.attempt_generation,
-                    earliest_retry_at=earliest_retry_at,
-                )
-
-                handoff_row = PublisherSchedulerHandoffOutbox(
-                    id=uuid4(),
-                    publish_intent_id=intent.id,
-                    publish_attempt_id=attempt.id,
+                await PublisherRecoveryOperationsService.create_retry_handoff(
+                    session,
+                    intent=intent,
+                    attempt=attempt,
                     task_id=task.id,
-                    mission_id=intent.mission_id,
                     earliest_retry_at=earliest_retry_at,
-                    reason=str(exc),
-                    idempotency_key=handoff_idemp,
-                    status=HandoffStatus.PENDING.value,
+                    reason=safe_error,
                 )
-                session.add(handoff_row)
 
                 await cls._transition_attempt(
                     session=session,
                     attempt_id=attempt.id,
                     new_state=PublishAttemptState.RETRYABLE_FAILED,
                     error_category=category,
-                    error_message=str(exc),
+                    error_message=safe_error,
                     retry_after_seconds=retry_after,
-                    reason=f"Retryable error: {exc}",
+                    reason=f"Retryable error: {safe_error}",
                     actor=effective_worker_id,
                 )
                 await cls._release_intent(session, intent.id)
@@ -1181,8 +1188,8 @@ class PublishExecutionService:
                     attempt_id=attempt.id,
                     new_state=PublishAttemptState.PERMANENT_FAILED,
                     error_category=category,
-                    error_message=str(exc),
-                    reason=f"Permanent failure: {exc}",
+                    error_message=safe_error,
+                    reason=f"Permanent failure: {safe_error}",
                     actor=effective_worker_id,
                 )
                 await session.execute(
@@ -1194,7 +1201,9 @@ class PublishExecutionService:
                     update(Task)
                     .where(Task.id == task.id)
                     .values(
-                        state=TaskState.FAILED.value, error=str(exc), completed_at=datetime.now(UTC)
+                        state=TaskState.FAILED.value,
+                        error=sanitize_sensitive_text(safe_error),
+                        completed_at=datetime.now(UTC),
                     )
                 )
                 await cls._enqueue_terminal_mission_evaluation(

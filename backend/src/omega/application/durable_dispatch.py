@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from omega.application.error_sanitizer import sanitize_error
 from omega.infrastructure.models import DurableDispatchIntent
 
 PENDING = "PENDING"
@@ -23,14 +24,6 @@ DEAD_LETTER = "DEAD_LETTER"
 
 def _utcnow() -> datetime:
     return datetime.now(UTC)
-
-
-def _sanitize_error(error: Exception) -> str:
-    error_type = type(error).__name__
-    message = str(error).split("\n", 1)[0]
-    if any(marker in message.lower() for marker in ("://", "password", "secret", "token", "key=")):
-        return f"{error_type}: broker publication failed (details redacted)"
-    return f"{error_type}: {message[:500]}"
 
 
 def _validate_args(args: Any) -> list[Any]:
@@ -281,7 +274,7 @@ class DurableDispatchService:
             return "STALE_CLAIM"
         intent.state = DEAD_LETTER if intent.attempt >= intent.max_attempts else RETRY
         intent.next_attempt_at = None if intent.state == DEAD_LETTER else _utcnow() + timedelta(seconds=30)
-        intent.last_error = _sanitize_error(error)
+        intent.last_error = sanitize_error(error)
         intent.claimed_at = None
         intent.claim_token = None
         session.commit()
