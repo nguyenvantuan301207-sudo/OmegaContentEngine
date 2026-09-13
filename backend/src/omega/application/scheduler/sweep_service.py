@@ -9,8 +9,9 @@ Implements background worker jobs for:
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,8 +46,12 @@ class SchedulerSweepService:
         *,
         batch_size: int = 20,
         now: datetime | None = None,
+        reservation_ids: Collection[UUID] | None = None,
     ) -> dict[str, int]:
         """Claim due ACTIVE reservations, execute Dispatch Fence, and create transactional outbox items."""
+        if reservation_ids is not None and not reservation_ids:
+            return {"claimed": 0, "dispatched": 0, "rejected": 0}
+
         if now is None:
             now = datetime.now(UTC)
 
@@ -63,6 +68,9 @@ class SchedulerSweepService:
             .limit(batch_size)
             .with_for_update(skip_locked=True)
         )
+        if reservation_ids is not None:
+            stmt = stmt.where(ScheduleReservation.id.in_(tuple(reservation_ids)))
+
         res = await session.execute(stmt)
         due_reservations = list(res.scalars().all())
 

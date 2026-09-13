@@ -7,6 +7,7 @@ Never holds PostgreSQL row locks while publishing to broker.
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
@@ -40,8 +41,12 @@ class OutboxRelayService:
         *,
         batch_size: int = 50,
         now: datetime | None = None,
+        outbox_ids: Collection[UUID] | None = None,
     ) -> dict[str, int]:
         """Claim, publish, and acknowledge an outbox batch with decoupled transaction boundaries."""
+        if outbox_ids is not None and not outbox_ids:
+            return {"claimed": 0, "sent": 0, "retried": 0, "dead_letter": 0}
+
         if now is None:
             now = datetime.now(UTC)
 
@@ -66,6 +71,9 @@ class OutboxRelayService:
             .limit(batch_size)
             .with_for_update(skip_locked=True)
         )
+        if outbox_ids is not None:
+            stmt = stmt.where(SchedulerDispatchOutbox.id.in_(tuple(outbox_ids)))
+
         res = await session.execute(stmt)
         claimed_items = list(res.scalars().all())
 

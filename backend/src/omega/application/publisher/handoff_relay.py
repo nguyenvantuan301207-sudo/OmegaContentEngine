@@ -12,7 +12,7 @@ from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.error_sanitizer import sanitize_error, sanitize_sensitive_text
@@ -41,6 +41,30 @@ def handoff_backoff_seconds(attempt_count: int) -> int:
 
 class HandoffRelayService:
     """Relays failed publish attempts to OMEGA-010 Scheduler for deferred retry."""
+
+    @classmethod
+    async def count_eligible_handoffs(
+        cls,
+        session: AsyncSession,
+        now: datetime | None = None,
+    ) -> int:
+        """Count rows in PublisherSchedulerHandoffOutbox currently eligible for relay."""
+        if now is None:
+            now = datetime.now(UTC)
+        stmt = (
+            select(func.count(PublisherSchedulerHandoffOutbox.id))
+            .where(
+                (
+                    (PublisherSchedulerHandoffOutbox.status == HandoffStatus.PENDING.value)
+                    | (
+                        (PublisherSchedulerHandoffOutbox.status == HandoffStatus.CLAIMED.value)
+                        & (PublisherSchedulerHandoffOutbox.lease_expires_at <= now)
+                    )
+                ),
+                PublisherSchedulerHandoffOutbox.next_attempt_at <= now,
+            )
+        )
+        return (await session.execute(stmt)).scalar_one()
 
     @classmethod
     async def process_pending_handoffs(
