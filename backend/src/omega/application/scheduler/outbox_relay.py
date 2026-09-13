@@ -10,14 +10,23 @@ from __future__ import annotations
 from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from uuid import UUID
+from uuid import NAMESPACE_OID, UUID, uuid5
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from omega.domain.scheduler import DispatchOutboxStatus
+from omega.domain.publisher import PublishIntentState
+from omega.domain.scheduler import DispatchOutboxStatus, ReservationState
 from omega.infrastructure.celery_app import celery_app
-from omega.infrastructure.models import SchedulerDispatchOutbox
+from omega.infrastructure.models import (
+    PublishAttempt,
+    PublishIntent,
+    SchedulerDispatchOutbox,
+    ScheduleReservation,
+    ScheduleStateTransition,
+    Task,
+    UploadSession,
+)
 from omega.logging import get_logger
 
 logger = get_logger(service="omega-scheduler-outbox")
@@ -236,4 +245,242 @@ class OutboxRelayService:
             "sent": sent_count,
             "retried": retry_count,
             "dead_letter": dead_letter_count,
+        }
+
+    @classmethod
+    async def redrive_sent_item(
+        cls,
+        session: AsyncSession,
+        *,
+        outbox_id: UUID,
+        actor: str,
+        reason: str,
+        idempotency_key: str,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Manually redrive a SENT publisher outbox where broker accepted but execution never started.
+
+        Strict safety contract:
+        - explicit operator actor and reason required
+        - explicit caller idempotency_key required
+        - outbox exists and status == SENT
+        - reservation exists and state == DISPATCHING
+        - task exists and state == QUEUED
+        - celery_task_name == omega.publisher.execute_publish
+        - associated PublishIntent exists and state == APPROVED
+        - no PublishAttempt exists for intent
+        - no UploadSession exists for intent
+        - no provider_video_id evidence exists for intent
+        - at most one broker send guaranteed via append-only ScheduleStateTransition idempotency fence
+        - DB locks released before broker network I/O
+        - reuses canonical _decode_celery_payload
+        """
+        if not actor or not actor.strip():
+            raise ValueError("actor is required for manual outbox redrive")
+        if not reason or not reason.strip():
+            raise ValueError("reason is required for manual outbox redrive")
+        if not idempotency_key or not idempotency_key.strip():
+            raise ValueError("idempotency_key is required for manual outbox redrive")
+
+        clean_actor = actor.strip()
+        clean_reason = reason.strip()
+        clean_idempotency_key = idempotency_key.strip()
+
+        if now is None:
+            now = datetime.now(UTC)
+
+        # ── Step 1: TX-VALIDATE-AND-CLAIM-AUDIT ──
+        # Validate all precondition boundaries under row lock
+        outbox_res = await session.execute(
+            select(SchedulerDispatchOutbox)
+            .where(SchedulerDispatchOutbox.id == outbox_id)
+            .with_for_update()
+        )
+        outbox = outbox_res.scalar_one_or_none()
+        if not outbox:
+            raise ValueError(f"SchedulerDispatchOutbox {outbox_id} not found")
+
+        if outbox.status != DispatchOutboxStatus.SENT.value:
+            raise ValueError(
+                f"SchedulerDispatchOutbox {outbox_id} status is '{outbox.status}', "
+                f"expected '{DispatchOutboxStatus.SENT.value}' for manual redrive"
+            )
+
+        if outbox.celery_task_name != "omega.publisher.execute_publish":
+            raise ValueError(
+                f"SchedulerDispatchOutbox {outbox_id} task name is '{outbox.celery_task_name}', "
+                "only 'omega.publisher.execute_publish' can be manually redriven"
+            )
+
+        res_res = await session.execute(
+            select(ScheduleReservation)
+            .where(ScheduleReservation.id == outbox.reservation_id)
+            .with_for_update()
+        )
+        reservation = res_res.scalar_one_or_none()
+        if not reservation:
+            raise ValueError(f"ScheduleReservation {outbox.reservation_id} not found")
+
+        if reservation.state != ReservationState.DISPATCHING.value:
+            raise ValueError(
+                f"ScheduleReservation {reservation.id} state is '{reservation.state}', "
+                f"expected '{ReservationState.DISPATCHING.value}'"
+            )
+
+        task_res = await session.execute(select(Task).where(Task.id == outbox.task_id))
+        task = task_res.scalar_one_or_none()
+        if not task:
+            raise ValueError(f"Task {outbox.task_id} not found")
+
+        if task.state != "QUEUED":
+            raise ValueError(f"Task {task.id} state is '{task.state}', expected 'QUEUED'")
+
+        # Resolve associated PublishIntent
+        intent_res = await session.execute(
+            select(PublishIntent).where(PublishIntent.task_id == outbox.task_id)
+        )
+        intent = intent_res.scalar_one_or_none()
+        if not intent:
+            intent_res = await session.execute(
+                select(PublishIntent).where(PublishIntent.id == reservation.target_id)
+            )
+            intent = intent_res.scalar_one_or_none()
+
+        if not intent:
+            raise ValueError(
+                f"PublishIntent not found for task {outbox.task_id} or reservation {reservation.id}"
+            )
+
+        if intent.state != PublishIntentState.APPROVED.value:
+            raise ValueError(
+                f"PublishIntent {intent.id} state is '{intent.state}', "
+                f"expected '{PublishIntentState.APPROVED.value}'"
+            )
+
+        # Provider evidence checks: must be 0 attempts, 0 upload sessions, 0 provider videos
+        attempt_count = (
+            await session.scalar(
+                select(func.count(PublishAttempt.id)).where(
+                    PublishAttempt.publish_intent_id == intent.id
+                )
+            )
+            or 0
+        )
+        if attempt_count > 0:
+            raise ValueError(
+                f"Redrive blocked: {attempt_count} PublishAttempt(s) already exist for intent {intent.id}"
+            )
+
+        upload_session_count = (
+            await session.scalar(
+                select(func.count(UploadSession.id))
+                .join(PublishAttempt, UploadSession.publish_attempt_id == PublishAttempt.id)
+                .where(PublishAttempt.publish_intent_id == intent.id)
+            )
+            or 0
+        )
+        if upload_session_count > 0:
+            raise ValueError(
+                f"Redrive blocked: {upload_session_count} UploadSession(s) already exist for intent {intent.id}"
+            )
+
+        provider_video_count = (
+            await session.scalar(
+                select(func.count(PublishAttempt.id)).where(
+                    PublishAttempt.publish_intent_id == intent.id,
+                    PublishAttempt.provider_video_id.is_not(None),
+                )
+            )
+            or 0
+        )
+        if provider_video_count > 0:
+            raise ValueError(
+                f"Redrive blocked: provider_video_id evidence already exists for intent {intent.id}"
+            )
+
+        # Idempotency fence check via ScheduleStateTransition
+        transition_id = uuid5(
+            NAMESPACE_OID, f"outbox-redrive:{outbox.id}:{clean_idempotency_key}"
+        )
+        existing_trans = await session.execute(
+            select(ScheduleStateTransition).where(ScheduleStateTransition.id == transition_id)
+        )
+        if existing_trans.scalar_one_or_none() is not None:
+            raise ValueError(
+                f"Redrive with idempotency key '{clean_idempotency_key}' already executed for outbox {outbox.id}"
+            )
+
+        # Decode payload using canonical decoder fixed in P17-E1 (fails closed if malformed)
+        args, kwargs = _decode_celery_payload(outbox.celery_args)
+
+        # Append audit transition (DISPATCHING -> DISPATCHING)
+        semantic_reason = (
+            f"MANUAL_BROKER_REDRIVE_AFTER_PREEXECUTION_FAILURE: "
+            f"outbox_id={outbox.id} reason={clean_reason} idempotency_key={clean_idempotency_key}"
+        )
+        transition = ScheduleStateTransition(
+            id=transition_id,
+            reservation_id=reservation.id,
+            from_state=ReservationState.DISPATCHING.value,
+            to_state=ReservationState.DISPATCHING.value,
+            reason=semantic_reason,
+            actor=clean_actor,
+            created_at=now,
+        )
+        session.add(transition)
+
+        # Increment outbox attempt count
+        outbox.attempt_count += 1
+
+        # Snapshot parameters for broker send outside DB transaction
+        task_name = outbox.celery_task_name
+        outbox_snapshot_id = outbox.id
+        attempt_count_val = outbox.attempt_count
+
+        # Commit TX-VALIDATE-AND-CLAIM-AUDIT to release all row locks before broker network I/O
+        await session.commit()
+
+        # ── Step 2: BROKER I/O OUTSIDE DB TRANSACTION ──
+        send_error: str | None = None
+        try:
+            celery_app.send_task(task_name, args=args, kwargs=kwargs)
+            logger.info(
+                "dispatch_outbox_redrive_sent",
+                outbox_id=str(outbox_snapshot_id),
+                task_name=task_name,
+                attempt=attempt_count_val,
+                actor=clean_actor,
+            )
+        except Exception as exc:
+            send_error = _sanitize_error(exc)
+            logger.error(
+                "dispatch_outbox_redrive_failed",
+                outbox_id=str(outbox_snapshot_id),
+                task_name=task_name,
+                error=send_error,
+                attempt=attempt_count_val,
+            )
+
+        # ── Step 3: TX-ACK ──
+        if send_error is not None:
+            ack_res = await session.execute(
+                select(SchedulerDispatchOutbox)
+                .where(SchedulerDispatchOutbox.id == outbox_snapshot_id)
+                .with_for_update()
+            )
+            item = ack_res.scalar_one_or_none()
+            if item:
+                item.last_error = send_error
+            await session.commit()
+            raise RuntimeError(f"Broker send failed during redrive: {send_error}")
+
+        return {
+            "outbox_id": outbox_snapshot_id,
+            "status": DispatchOutboxStatus.SENT.value,
+            "redriven": True,
+            "attempt_count": attempt_count_val,
+            "celery_task_name": task_name,
+            "args": args,
+            "kwargs": kwargs,
+            "transition_id": transition_id,
         }
