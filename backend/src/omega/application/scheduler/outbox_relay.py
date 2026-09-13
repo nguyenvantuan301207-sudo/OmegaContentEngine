@@ -32,6 +32,61 @@ def _sanitize_error(exc: Exception) -> str:
     return f"{type(exc).__name__}: {raw[:500]}"
 
 
+def decode_celery_payload(raw_args: Any) -> tuple[list[Any], dict[str, Any]]:
+    """Decode and validate Celery payload envelope into (args, kwargs).
+
+    Expected canonical envelope:
+        {"args": [...], "kwargs": {...}}
+    where:
+        - "args" is optional (defaults to []) and must be a list or tuple.
+        - "kwargs" is optional (defaults to {}) and must be a dict.
+
+    Raises ValueError if raw_args or its components are malformed.
+    """
+    if not isinstance(raw_args, dict):
+        raise ValueError(
+            f"Malformed Celery payload: expected dict envelope, got {type(raw_args).__name__}"
+        )
+
+    # Canonical envelope check:
+    # If "args" or "kwargs" key is present, parse strictly according to canonical envelope.
+    if "args" in raw_args or "kwargs" in raw_args:
+        args_val = raw_args.get("args", [])
+        kwargs_val = raw_args.get("kwargs", {})
+
+        if not isinstance(args_val, (list, tuple)):
+            raise ValueError(
+                f"Malformed Celery payload 'args': expected list or tuple, got {type(args_val).__name__}"
+            )
+        if not isinstance(kwargs_val, dict):
+            raise ValueError(
+                f"Malformed Celery payload 'kwargs': expected dict, got {type(kwargs_val).__name__}"
+            )
+
+        extra_keys = set(raw_args.keys()) - {"args", "kwargs"}
+        if extra_keys:
+            raise ValueError(
+                f"Malformed Celery payload: unexpected envelope keys {sorted(extra_keys)}"
+            )
+
+        return list(args_val), dict(kwargs_val)
+
+    # Empty dictionary envelope
+    if not raw_args:
+        return [], {}
+
+    # Backward compatibility for legacy plain kwargs dictionaries without "args"/"kwargs" envelope
+    if all(isinstance(k, str) for k in raw_args):
+        return [], dict(raw_args)
+
+    raise ValueError(
+        "Malformed Celery payload: non-empty dict without 'args' or 'kwargs' contains non-string keys"
+    )
+
+
+_decode_celery_payload = decode_celery_payload
+
+
 class OutboxRelayService:
     """Processes pending/retry outbox items without holding DB transactions during broker I/O."""
 
@@ -106,11 +161,8 @@ class OutboxRelayService:
             raw_args = snap["celery_args"]
 
             try:
-                # Format arguments
-                args = raw_args.get("args", []) if isinstance(raw_args, dict) else []
-                kwargs = (
-                    raw_args.get("kwargs", raw_args) if isinstance(raw_args, dict) else raw_args
-                )
+                # Format arguments via validated decoder
+                args, kwargs = _decode_celery_payload(raw_args)
 
                 # Publish to Celery
                 celery_app.send_task(task_name, args=args, kwargs=kwargs)
