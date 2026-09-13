@@ -791,6 +791,12 @@ class PublishExecutionService:
                 )
                 access_token = refreshed.access_token
                 enc_acc, v_acc = vault.encrypt(refreshed.access_token)
+                vault_res = await session.execute(
+                    select(CredentialVault)
+                    .where(CredentialVault.platform_account_id == account.id)
+                    .with_for_update()
+                )
+                vault_entry = vault_res.scalar_one()
                 vault_entry.encrypted_access_token = enc_acc
                 vault_entry.access_token_expires_at = datetime.now(UTC) + timedelta(
                     seconds=refreshed.expires_in_seconds
