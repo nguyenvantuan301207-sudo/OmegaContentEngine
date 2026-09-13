@@ -2955,3 +2955,368 @@ export async function rejectAutonomyAction(
     }),
   });
 }
+
+// ── Publisher Operations Types & Functions (P17-D) ──
+
+export interface PublisherOperationsOverview {
+  scheduled_upcoming: number;
+  scheduled_due: number;
+  publish_uploading: number;
+  publish_finalizing: number;
+  publish_unknown: number;
+  publish_succeeded_recent: number;
+  publish_failed_recent: number;
+  recent_window_hours: number;
+  retry_pending: number;
+  retry_claimed: number;
+  dead_letter_count: number;
+  recovery_manual_hold_count: number;
+  schedule_manual_hold_count: number;
+  publisher_queue_name: string;
+  publisher_worker_role: string;
+  configured_concurrency: number;
+  prefetch_multiplier: number;
+  oldest_manual_hold_age_seconds: number | null;
+  earliest_scheduled_publish: string | null;
+  next_retry_handoff_at: string | null;
+}
+
+export interface PublishCalendarItem {
+  reservation_id: string;
+  decision_id: string;
+  publish_intent_id: string;
+  channel_id: string;
+  channel_name: string | null;
+  title: string;
+  scheduled_start_at: string;
+  scheduled_end_at: string;
+  reservation_state: string;
+  priority_score: number;
+  policy_id: string;
+  policy_version: string;
+  created_at: string;
+  is_due: boolean;
+}
+
+export interface PublishCalendarListResponse {
+  items: PublishCalendarItem[];
+  total_count: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ActivePublicationItem {
+  attempt_id: string;
+  publish_intent_id: string;
+  attempt_number: number;
+  attempt_state: string;
+  reconciliation_status: string | null;
+  started_at: string;
+  title: string;
+  channel_id: string;
+  channel_name: string | null;
+  platform: string;
+  account_display_name: string | null;
+  upload_session_id: string | null;
+  bytes_uploaded: number | null;
+  total_bytes: number | null;
+  progress_percentage: number | null;
+}
+
+export interface ActivePublicationListResponse {
+  items: ActivePublicationItem[];
+  total_count: number;
+  limit: number;
+  offset: number;
+}
+
+export interface RetryQueueItem {
+  handoff_id: string;
+  publish_intent_id: string;
+  publish_attempt_id: string;
+  status: string;
+  attempt_count: number;
+  max_attempts: number;
+  earliest_retry_at: string;
+  next_retry_time: string | null;
+  claimed_at: string | null;
+  lease_expires_at: string | null;
+  last_sanitized_error: string | null;
+  title: string;
+  channel_id: string;
+  channel_name: string | null;
+  created_at: string;
+}
+
+export interface RetryQueueListResponse {
+  items: RetryQueueItem[];
+  total_count: number;
+  limit: number;
+  offset: number;
+}
+
+export interface ManualHoldItem {
+  attempt_id: string;
+  publish_intent_id: string;
+  attempt_number: number;
+  attempt_state: string;
+  error_category: string | null;
+  reconciliation_status: string | null;
+  last_sanitized_error: string | null;
+  started_at: string;
+  age_seconds: number | null;
+  title: string;
+  channel_id: string;
+  channel_name: string | null;
+  hold_source: string;
+}
+
+export interface ManualHoldListResponse {
+  items: ManualHoldItem[];
+  total_count: number;
+  limit: number;
+  offset: number;
+}
+
+export interface DeadLetterItem {
+  handoff_id: string;
+  publish_intent_id: string;
+  publish_attempt_id: string;
+  status: string;
+  attempt_count: number;
+  max_attempts: number;
+  next_retry_time: string | null;
+  last_sanitized_error: string | null;
+  title: string;
+  channel_id: string;
+  channel_name: string | null;
+  created_at: string;
+  can_requeue: boolean;
+  requeue_blocked_reason: string | null;
+}
+
+export interface DeadLetterListResponse {
+  items: DeadLetterItem[];
+  total_count: number;
+  limit: number;
+  offset: number;
+}
+
+export interface PublicationHistoryItem {
+  attempt_id: string;
+  publish_intent_id: string;
+  attempt_number: number;
+  state: string;
+  reconciliation_status: string | null;
+  error_category: string | null;
+  last_sanitized_error: string | null;
+  provider_video_id: string | null;
+  provider_url: string | null;
+  effective_privacy_status: string | null;
+  started_at: string;
+  completed_at: string | null;
+  duration_seconds: number | null;
+  title: string;
+  channel_id: string;
+  channel_name: string | null;
+}
+
+export interface PublicationHistoryListResponse {
+  items: PublicationHistoryItem[];
+  total_count: number;
+  limit: number;
+  offset: number;
+}
+
+export interface PublicationDetailResponse {
+  intent_id: string;
+  channel_id: string;
+  channel_name: string | null;
+  title: string;
+  description: string | null;
+  requested_privacy_status: string;
+  intent_state: string;
+  lease_expires_at: string | null;
+  has_active_lease: boolean;
+  active_attempt: {
+    attempt_id: string;
+    attempt_number: number;
+    state: string;
+    reconciliation_status: string | null;
+    error_category: string | null;
+    last_sanitized_error: string | null;
+    started_at: string;
+  } | null;
+  upload_session: {
+    session_id: string;
+    bytes_uploaded: number;
+    total_bytes: number;
+    progress_percentage: number;
+    chunk_size_bytes: number;
+    expires_at: string;
+  } | null;
+  provider: {
+    video_id: string | null;
+    url: string | null;
+    effective_privacy_status: string | null;
+  };
+  schedule_reservation: {
+    reservation_id: string;
+    state: string;
+    scheduled_start_at: string;
+    scheduled_end_at: string;
+    is_due: boolean;
+  } | null;
+  attempts_history: Array<{
+    attempt_id: string;
+    attempt_number: number;
+    state: string;
+    reconciliation_status: string | null;
+    error_category: string | null;
+    last_sanitized_error: string | null;
+    started_at: string;
+    completed_at: string | null;
+  }>;
+  recovery_eligibility: {
+    allowed_operations: string[];
+    blocked_operations: Record<string, string>;
+  };
+}
+
+export async function getPublisherOperationsOverview(): Promise<PublisherOperationsOverview> {
+  return apiFetch("/api/v1/publisher/operations/overview");
+}
+
+export async function getPublishCalendar(params?: {
+  channel_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PublishCalendarListResponse> {
+  const q = new URLSearchParams();
+  if (params?.channel_id) q.set("channel_id", params.channel_id);
+  if (params?.limit !== undefined) q.set("limit", String(params.limit));
+  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  const qs = q.toString() ? `?${q.toString()}` : "";
+  return apiFetch(`/api/v1/publisher/operations/calendar${qs}`);
+}
+
+export async function getActivePublications(params?: {
+  channel_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<ActivePublicationListResponse> {
+  const q = new URLSearchParams();
+  if (params?.channel_id) q.set("channel_id", params.channel_id);
+  if (params?.limit !== undefined) q.set("limit", String(params.limit));
+  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  const qs = q.toString() ? `?${q.toString()}` : "";
+  return apiFetch(`/api/v1/publisher/operations/active${qs}`);
+}
+
+export async function getPublisherRetries(params?: {
+  channel_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<RetryQueueListResponse> {
+  const q = new URLSearchParams();
+  if (params?.channel_id) q.set("channel_id", params.channel_id);
+  if (params?.limit !== undefined) q.set("limit", String(params.limit));
+  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  const qs = q.toString() ? `?${q.toString()}` : "";
+  return apiFetch(`/api/v1/publisher/operations/retries${qs}`);
+}
+
+export async function getPublisherManualHolds(params?: {
+  channel_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<ManualHoldListResponse> {
+  const q = new URLSearchParams();
+  if (params?.channel_id) q.set("channel_id", params.channel_id);
+  if (params?.limit !== undefined) q.set("limit", String(params.limit));
+  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  const qs = q.toString() ? `?${q.toString()}` : "";
+  return apiFetch(`/api/v1/publisher/operations/manual-holds${qs}`);
+}
+
+export async function getPublisherDeadLetters(params?: {
+  channel_id?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<DeadLetterListResponse> {
+  const q = new URLSearchParams();
+  if (params?.channel_id) q.set("channel_id", params.channel_id);
+  if (params?.limit !== undefined) q.set("limit", String(params.limit));
+  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  const qs = q.toString() ? `?${q.toString()}` : "";
+  return apiFetch(`/api/v1/publisher/operations/dead-letters${qs}`);
+}
+
+export async function getPublisherHistory(params?: {
+  channel_id?: string;
+  state?: string;
+  search?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<PublicationHistoryListResponse> {
+  const q = new URLSearchParams();
+  if (params?.channel_id) q.set("channel_id", params.channel_id);
+  if (params?.state) q.set("state", params.state);
+  if (params?.search && params.search.trim()) q.set("search", params.search.trim());
+  if (params?.limit !== undefined) q.set("limit", String(params.limit));
+  if (params?.offset !== undefined) q.set("offset", String(params.offset));
+  const qs = q.toString() ? `?${q.toString()}` : "";
+  return apiFetch(`/api/v1/publisher/operations/history${qs}`);
+}
+
+export async function getPublicationDetail(intentId: string): Promise<PublicationDetailResponse> {
+  return apiFetch(`/api/v1/publisher/operations/publications/${intentId}`);
+}
+
+export async function requeuePublisherDeadLetter(
+  handoffId: string,
+  payload: { actor: string; reason: string }
+): Promise<{ handoff_id: string; status: string; attempt_count: number; actor: string }> {
+  return apiFetch(`/api/v1/publisher/operations/dead-letters/${handoffId}/requeue`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function reconcilePublisherManualHold(
+  attemptId: string,
+  payload: { actor: string; reason: string }
+): Promise<{
+  attempt_id: string;
+  reconciliation_status: string;
+  operation: string;
+  actor: string;
+  reconciled_at: string;
+}> {
+  return apiFetch(`/api/v1/publisher/operations/manual-holds/${attemptId}/reconcile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function authorizePublisherSessionResume(
+  attemptId: string,
+  payload: { actor: string; reason: string }
+): Promise<{
+  attempt_id: string;
+  upload_session_id: string;
+  provider_offset: number;
+  total_bytes: number;
+  progress_percentage: number;
+  authorized: boolean;
+  actor: string;
+  authorized_at: string;
+}> {
+  return apiFetch(`/api/v1/publisher/operations/sessions/${attemptId}/resume-authorize`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+}

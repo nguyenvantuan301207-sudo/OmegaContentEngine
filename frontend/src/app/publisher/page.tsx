@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
 import { listPlatformAccounts, listPublishIntents, type PlatformAccount, type PublishIntent } from "@/lib/api";
 import { useOperatorContext } from "@/lib/operator-context";
@@ -62,7 +63,16 @@ export default function PublisherPage() {
         eyebrow="Operations"
         title="Publish studio"
         description={selectedChannel ? `Account readiness, approvals and publish intents for ${selectedChannel.name}.` : "Select a channel to inspect publishing state."}
-        actions={<button type="button" className="btn btn-secondary" onClick={() => void loadData()} disabled={loading}>Refresh</button>}
+        actions={
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <Link href="/publisher/operations" className="btn btn-primary">
+              Fleet Operations & Observability
+            </Link>
+            <button type="button" className="btn btn-secondary" onClick={() => void loadData()} disabled={loading}>
+              Refresh
+            </button>
+          </div>
+        }
       />
 
       {error && <Alert tone="danger" title="Publishing state unavailable" actions={<button type="button" className="btn btn-secondary btn-sm" onClick={() => void loadData()}>Retry</button>}>{error}</Alert>}
