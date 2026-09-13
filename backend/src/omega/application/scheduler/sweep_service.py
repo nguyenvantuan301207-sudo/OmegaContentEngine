@@ -17,20 +17,25 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.scheduler.dispatch_fence import DispatchFence
+from omega.domain.publisher import PublishIntentState
 from omega.domain.scheduler import (
     DispatchFenceResult,
     DispatchOutboxStatus,
     ReservationState,
+    ScheduleTargetType,
     ScheduleWorkloadCategory,
 )
 from omega.domain.task import TaskState
 from omega.infrastructure.models import (
+    PublishAttempt,
+    PublisherSchedulerHandoffOutbox,
     PublishIntent,
     ScheduleDecision,
     SchedulerDispatchOutbox,
     ScheduleReservation,
     ScheduleStateTransition,
     Task,
+    UploadSession,
 )
 from omega.logging import get_logger
 
@@ -245,8 +250,18 @@ class SchedulerSweepService:
         timeout_seconds: int = 300,
         batch_size: int = 50,
         now: datetime | None = None,
+        reservation_ids: Collection[UUID] | None = None,
     ) -> dict[str, int]:
         """Reconcile reservations stuck in DISPATCHING state based on task and outbox status."""
+        if reservation_ids is not None and not reservation_ids:
+            return {
+                "recovered": 0,
+                "consumed": 0,
+                "released": 0,
+                "requeued": 0,
+                "suppressed": 0,
+            }
+
         if now is None:
             now = datetime.now(UTC)
 
@@ -261,20 +276,29 @@ class SchedulerSweepService:
             .limit(batch_size)
             .with_for_update(skip_locked=True)
         )
+        if reservation_ids is not None:
+            stmt = stmt.where(ScheduleReservation.id.in_(tuple(reservation_ids)))
+
         res = await session.execute(stmt)
         stale_reservations = list(res.scalars().all())
 
         consumed_count = 0
         released_count = 0
         requeued_count = 0
+        suppressed_count = 0
 
         for reservation in stale_reservations:
             # Query associated task
-            task_id = (
-                reservation.target_id
-                if reservation.target_type == "TASK_EXECUTION"
-                else reservation.decision.task_id
-            )
+            if reservation.target_type == "TASK_EXECUTION":
+                task_id = reservation.target_id
+            else:
+                task_id = (
+                    await session.execute(
+                        select(ScheduleDecision.task_id).where(
+                            ScheduleDecision.id == reservation.decision_id
+                        )
+                    )
+                ).scalar_one_or_none()
             task = None
             if task_id:
                 task_res = await session.execute(
@@ -327,28 +351,159 @@ class SchedulerSweepService:
                 )
                 released_count += 1
 
-            # 3. Outbox was SENT but task is still QUEUED -> message was likely lost in broker; reset outbox to PENDING to redeliver
+            # 3. Outbox was SENT but task is still QUEUED
             elif (
                 latest_outbox
                 and latest_outbox.status == DispatchOutboxStatus.SENT.value
                 and task
                 and task.state == TaskState.QUEUED.value
             ):
-                latest_outbox.status = DispatchOutboxStatus.PENDING.value
-                latest_outbox.scheduled_send_at = now
-                latest_outbox.sent_at = None
-                session.add(
-                    ScheduleStateTransition(
-                        id=uuid4(),
-                        reservation_id=reservation.id,
-                        from_state=ReservationState.DISPATCHING.value,
-                        to_state=ReservationState.DISPATCHING.value,
-                        reason="Task remained QUEUED past timeout; reset outbox to PENDING for re-delivery",
-                        actor="STALE_DISPATCH_RECOVERY",
-                        created_at=now,
-                    )
+                is_publisher_task = (
+                    latest_outbox.celery_task_name == "omega.publisher.execute_publish"
                 )
-                requeued_count += 1
+                has_publisher_evidence = False
+
+                if is_publisher_task:
+                    # Check publisher evidence to prevent duplicate external publishing
+                    # 1. Canonical intent resolution:
+                    # If reservation.target_type == "PUBLISH_INTENT", reservation.target_id is authoritative.
+                    intent: PublishIntent | None = None
+                    try:
+                        if reservation.target_type == ScheduleTargetType.PUBLISH_INTENT.value:
+                            intent = await session.get(PublishIntent, reservation.target_id)
+
+                        if (
+                            not intent
+                            and reservation.target_type != ScheduleTargetType.PUBLISH_INTENT.value
+                            and task
+                        ):
+                            intent_res = await session.execute(
+                                select(PublishIntent).where(PublishIntent.task_id == task.id)
+                            )
+                            intent = intent_res.scalar_one_or_none()
+
+                        if intent:
+                            # Query any attempts associated with this intent
+                            attempt_res = await session.execute(
+                                select(PublishAttempt).where(
+                                    PublishAttempt.publish_intent_id == intent.id
+                                )
+                            )
+                            attempts = list(attempt_res.scalars().all())
+
+                            # Query any upload sessions associated with attempts of this intent
+                            sess_res = await session.execute(
+                                select(UploadSession)
+                                .join(
+                                    PublishAttempt,
+                                    UploadSession.publish_attempt_id == PublishAttempt.id,
+                                )
+                                .where(PublishAttempt.publish_intent_id == intent.id)
+                            )
+                            upload_sessions = list(sess_res.scalars().all())
+
+                            has_provider_video = any(
+                                a.provider_video_id is not None for a in attempts
+                            )
+                            has_reconciliation = any(
+                                a.reconciliation_status is not None for a in attempts
+                            )
+
+                            handoff_res = await session.execute(
+                                select(PublisherSchedulerHandoffOutbox).where(
+                                    PublisherSchedulerHandoffOutbox.publish_intent_id == intent.id
+                                )
+                            )
+                            has_handoff = bool(handoff_res.first())
+
+                            has_claimed_intent = (
+                                intent.state
+                                in (
+                                    PublishIntentState.CLAIMED.value,
+                                    PublishIntentState.PUBLISHED.value,
+                                )
+                                or intent.claim_token is not None
+                                or intent.claimed_by_worker_id is not None
+                            )
+
+                            if (
+                                bool(attempts)
+                                or bool(upload_sessions)
+                                or has_provider_video
+                                or has_reconciliation
+                                or has_handoff
+                                or has_claimed_intent
+                            ):
+                                has_publisher_evidence = True
+                        else:
+                            # Ambiguous: publisher task exists but no intent found — fail closed
+                            logger.warning(
+                                "stale_dispatch_publisher_intent_missing_fail_closed",
+                                reservation_id=str(reservation.id),
+                                task_id=str(task.id) if task else None,
+                            )
+                            has_publisher_evidence = True
+                    except Exception as exc:
+                        # Fail closed on any query inconsistency/ambiguity
+                        logger.error(
+                            "stale_dispatch_publisher_evidence_query_failed_fail_closed",
+                            reservation_id=str(reservation.id),
+                            error=str(exc),
+                        )
+                        has_publisher_evidence = True
+
+                if has_publisher_evidence:
+                    logger.info(
+                        "stale_dispatch_publisher_evidence_detected",
+                        reservation_id=str(reservation.id),
+                        task_id=str(task.id),
+                        outbox_id=str(latest_outbox.id),
+                        reason="Publisher execution evidence exists; suppressing scheduler redelivery.",
+                    )
+                    # Check if suppression transition already exists for this reservation (idempotency)
+                    existing_suppression_res = await session.execute(
+                        select(ScheduleStateTransition.id).where(
+                            ScheduleStateTransition.reservation_id == reservation.id,
+                            ScheduleStateTransition.actor == "STALE_DISPATCH_RECOVERY",
+                            ScheduleStateTransition.reason.like("Publisher execution evidence exists%"),
+                        )
+                    )
+                    if not existing_suppression_res.first():
+                        session.add(
+                            ScheduleStateTransition(
+                                id=uuid4(),
+                                reservation_id=reservation.id,
+                                from_state=ReservationState.DISPATCHING.value,
+                                to_state=ReservationState.DISPATCHING.value,
+                                reason=(
+                                    "Publisher execution evidence exists; "
+                                    "scheduler redelivery suppressed; "
+                                    "publisher reconciliation/recovery owns resolution."
+                                ),
+                                actor="STALE_DISPATCH_RECOVERY",
+                                created_at=now,
+                            )
+                        )
+                    suppressed_count += 1
+                else:
+                    latest_outbox.status = DispatchOutboxStatus.PENDING.value
+                    latest_outbox.scheduled_send_at = now
+                    latest_outbox.sent_at = None
+                    session.add(
+                        ScheduleStateTransition(
+                            id=uuid4(),
+                            reservation_id=reservation.id,
+                            from_state=ReservationState.DISPATCHING.value,
+                            to_state=ReservationState.DISPATCHING.value,
+                            reason=(
+                                "Task remained QUEUED past timeout; "
+                                "reset outbox to PENDING for re-delivery"
+                            ),
+                            actor="STALE_DISPATCH_RECOVERY",
+                            created_at=now,
+                        )
+                    )
+                    requeued_count += 1
 
             # 4. Outbox is still PENDING / RETRY -> outbox relay is still active, leave in DISPATCHING
 
@@ -358,4 +513,5 @@ class SchedulerSweepService:
             "consumed": consumed_count,
             "released": released_count,
             "requeued": requeued_count,
+            "suppressed": suppressed_count,
         }

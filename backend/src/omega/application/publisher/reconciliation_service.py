@@ -104,6 +104,24 @@ class ReconciliationService:
         task_res = await session.execute(task_stmt)
         task = task_res.scalar_one_or_none()
 
+        if task is None or task.execution_id is None:
+            attempt.reconciliation_status = ReconciliationStatus.MANUAL_HOLD.value
+            session.add(
+                PublishAttemptTransition(
+                    id=uuid4(),
+                    publish_attempt_id=attempt.id,
+                    from_state=previous_state,
+                    to_state=previous_state,
+                    reason=(
+                        "Reconciliation blocked: production PUBLISH_VIDEO requires "
+                        "MissionExecution identity."
+                    ),
+                    actor="RECONCILER",
+                )
+            )
+            await session.commit()
+            return ReconciliationOutcome(status=ReconciliationStatus.MANUAL_HOLD)
+
         if upload_sess.expires_at <= datetime.now(UTC):
             await cls._mark_expired_session_terminal(
                 session=session,
@@ -194,8 +212,6 @@ class ReconciliationService:
             session.add(intent_trans)
 
             if task:
-                if task.execution_id is None:
-                    raise ValueError("Terminal publish task has no MissionExecution identity.")
                 await session.execute(
                     update(Task)
                     .where(Task.id == task.id)

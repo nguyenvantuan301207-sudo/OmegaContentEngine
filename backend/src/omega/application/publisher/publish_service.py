@@ -566,6 +566,11 @@ class PublishExecutionService:
         if not mission:
             raise PublishExecutionError(f"Mission {intent.mission_id} not found.")
 
+        if task.execution_id is None:
+            raise PublishExecutionError(
+                "Production PUBLISH_VIDEO requires MissionExecution identity."
+            )
+
         # Update intent claim fencing
         intent.state = PublishIntentState.CLAIMED.value
         intent.claim_token = claim_token
@@ -1226,7 +1231,9 @@ class PublishExecutionService:
     ) -> None:
         """Enroll Mission evaluation in the publisher's terminal transaction."""
         if task.execution_id is None:
-            raise PublishExecutionError("Terminal publish task has no MissionExecution identity.")
+            raise PublishExecutionError(
+                "Production PUBLISH_VIDEO requires MissionExecution identity."
+            )
         await DurableDispatchService.enqueue_async(
             session,
             idempotency_key=(
