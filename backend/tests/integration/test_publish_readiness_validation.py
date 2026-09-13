@@ -63,6 +63,7 @@ from omega.infrastructure.models import (
     ChannelDNARevision,
     ContentGenerationRequest,
     CredentialVault,
+    GuardianRuleSet,
     MediaArtifact,
     Mission,
     MissionExecution,
@@ -218,6 +219,17 @@ async def setup_shadow_fixtures(db_session: AsyncSession, monkeypatch):
         channel_id=channel.id,
     )
     db_session.add(mission)
+
+    db_session.add(
+        GuardianRuleSet(
+            id=uuid4(),
+            version=f"shadow-{uuid4().hex[:8]}",
+            status="ACTIVE",
+            effective_at=now,
+            rules_config={"rules": []},
+            checksum="b" * 64,
+        )
+    )
 
     execution = MissionExecution(
         id=uuid4(),

@@ -9,6 +9,7 @@ Transactional Retry Handoff.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -29,7 +30,7 @@ from omega.application.publisher.adapters.base import AdapterRegistry
 from omega.config import get_settings
 from omega.domain.guardian import GuardianCheckpoint
 from omega.domain.mission import MissionState
-from omega.domain.network import NetworkEgressPermit, ServiceCategory
+from omega.domain.network import ServiceCategory
 from omega.domain.publisher import (
     HandoffStatus,
     PrivacyStatus,
@@ -61,7 +62,17 @@ from omega.logging import get_logger
 
 logger = get_logger(service="omega-publisher-execution")
 
-CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB chunks
+CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB (aligned with YouTube resumable protocol requirements)
+
+
+@contextlib.contextmanager
+def _open_stream(path: Any, is_real: bool):
+    """Context manager for bounded-memory file streaming."""
+    if is_real and path:
+        with open(path, "rb") as f:
+            yield f
+    else:
+        yield None
 
 
 class PublishExecutionError(Exception):
@@ -86,6 +97,7 @@ class PublishExecutionService:
         intent_id: UUID,
     ) -> dict[str, Any]:
         """Validate provider-free canonical publish readiness without external preflight."""
+        settings = get_settings()
         errors: list[str] = []
         task = await session.get(Task, task_id)
         mission = await session.get(Mission, mission_id)
@@ -171,10 +183,18 @@ class PublishExecutionService:
             )
             if not account_valid:
                 errors.append("PlatformAccount is not ACTIVE or channel-coherent.")
+            if (
+                settings.publisher_private_canary_mode
+                and account is not None
+                and account.platform != "YOUTUBE"
+            ):
+                account_valid = False
+                errors.append("Private canary mode permits YouTube publication only.")
             try:
                 requested_privacy = PrivacyStatus(intent.requested_privacy_status)
-                privacy_valid = requested_privacy == PrivacyStatus.PRIVATE or bool(
-                    intent.platform_custom_options.get("privacy_fallback_allowed", False)
+                privacy_valid = requested_privacy == PrivacyStatus.PRIVATE or (
+                    not settings.publisher_private_canary_mode
+                    and bool(intent.platform_custom_options.get("privacy_fallback_allowed", False))
                 )
                 if not privacy_valid:
                     errors.append("Requested privacy contract is not internally valid.")
@@ -426,8 +446,13 @@ class PublishExecutionService:
                     caller_key="init_resumable_upload",
                 )
             )
-            network_preflight_passed = True
+            if not permit_oauth or not permit_upload or permit_oauth.is_expired() or permit_upload.is_expired():
+                network_preflight_passed = False
+                errors.append("Network preflight denied or valid egress permit unavailable.")
+            else:
+                network_preflight_passed = True
         except Exception as exc:
+            network_preflight_passed = False
             errors.append(f"Network preflight failed: {exc}")
 
         # 7. Sanitized Payload Construction & Digest Computation
@@ -656,6 +681,32 @@ class PublishExecutionService:
             requested_privacy = PrivacyStatus(intent.requested_privacy_status)
             effective_privacy = requested_privacy
 
+            if settings.publisher_private_canary_mode:
+                if account.platform != "YOUTUBE":
+                    raise PublishExecutionError(
+                        "Private canary mode permits YouTube publication only."
+                    )
+                if requested_privacy != PrivacyStatus.PRIVATE:
+                    await cls._transition_attempt(
+                        session=session,
+                        attempt_id=attempt.id,
+                        new_state=PublishAttemptState.BLOCKED_GUARDIAN,
+                        error_category=PublisherErrorCategory.PRIVACY_RESTRICTION_BLOCKED,
+                        error_message=(
+                            "Private canary mode rejects PUBLIC and UNLISTED requests; "
+                            "submit an explicitly PRIVATE intent."
+                        ),
+                        reason="Server-controlled private canary safety gate rejected intent.",
+                        actor=effective_worker_id,
+                    )
+                    await cls._release_intent(session, intent.id)
+                    await session.commit()
+                    return (
+                        await session.execute(
+                            select(PublishAttempt).where(PublishAttempt.id == attempt.id)
+                        )
+                    ).scalar_one()
+
             # Core v1: unverified project restriction handling
             # If requested is PUBLIC/UNLISTED and provider requires PRIVATE:
             # Check if channel DNA / custom options allows fallback
@@ -715,21 +766,22 @@ class PublishExecutionService:
                     vault_entry.encrypted_refresh_token, vault_entry.key_version
                 )
                 preflight_service = NetworkPreflightService(lambda: session)
-                _, permit_oauth = await preflight_service.preflight(
+                preflight_oauth, permit_oauth = await preflight_service.preflight(
                     NetworkPreflightRequest(
                         destination_url="https://oauth2.googleapis.com/token",
                         service_category=ServiceCategory.YOUTUBE_API,
                         caller_key="refresh_access_token",
                     )
                 )
-                if not permit_oauth:
-                    permit_oauth = NetworkEgressPermit(
-                        network_check_id=uuid4(),
-                        route_id=uuid4(),
-                        route_config_version=1,
-                        canonical_destination="https://oauth2.googleapis.com",
-                        service_category=ServiceCategory.YOUTUBE_API,
-                        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+                oauth_target = "https://oauth2.googleapis.com/token"
+                if not permit_oauth or not permit_oauth.is_valid_for(oauth_target):
+                    reason = (
+                        preflight_oauth.decision.reason
+                        if preflight_oauth.decision
+                        else "Permit unavailable or expired"
+                    )
+                    raise PublishExecutionError(
+                        f"Network preflight blocked OAuth token refresh: {reason}"
                     )
                 refreshed = await adapter.refresh_access_token(
                     refresh_token=refresh_token,
@@ -749,164 +801,280 @@ class PublishExecutionService:
                     vault_entry.key_version = v_ref
                 await session.commit()
 
-            # ── 6. Resumable Upload Session Initialization ──
-            from omega.domain.network import NetworkPreflightRequest
-
-            preflight_service = NetworkPreflightService(lambda: session)
-            _, permit_upload = await preflight_service.preflight(
-                NetworkPreflightRequest(
-                    destination_url="https://www.googleapis.com/upload/youtube/v3/videos",
-                    service_category=ServiceCategory.YOUTUBE_API,
-                    caller_key="init_resumable_upload",
-                )
-            )
-            if not permit_upload:
-                permit_upload = NetworkEgressPermit(
-                    network_check_id=uuid4(),
-                    route_id=uuid4(),
-                    route_config_version=1,
-                    canonical_destination="https://www.googleapis.com",
-                    service_category=ServiceCategory.YOUTUBE_API,
-                    expires_at=datetime.now(UTC) + timedelta(minutes=15),
-                )
-
+            # ── 5.5. Crash-Window Duplicate Prevention & Prior Session Reconciliation ──
             total_bytes = (
                 artifact_file_path.stat().st_size
                 if artifact_file_path.is_file()
                 else (artifact.file_size_bytes or 1024)
             )
-            init_res = await adapter.initialize_resumable_upload(
-                title=intent.title,
-                description=intent.description,
-                tags=intent.tags or [],
-                category_id=intent.category_id,
-                requested_privacy=effective_privacy,
-                made_for_kids=intent.made_for_kids,
-                total_bytes=total_bytes,
-                access_token=access_token,
-                permit=permit_upload,
-                custom_options=intent.platform_custom_options,
-            )
-
-            # Persist UploadSession
-            upload_session = UploadSession(
-                id=uuid4(),
-                publish_attempt_id=attempt.id,
-                session_uri=init_res.session_uri,
-                total_bytes=total_bytes,
-                bytes_uploaded=0,
-                chunk_size_bytes=CHUNK_SIZE,
-                expires_at=init_res.expires_at,
-            )
-            session.add(upload_session)
-            await cls._transition_attempt(
-                session=session,
-                attempt_id=attempt.id,
-                new_state=PublishAttemptState.UPLOADING,
-                reason="Resumable upload session initialized.",
-                actor=effective_worker_id,
-            )
-
-            # ── 7. Chunk Streaming with Fenced Heartbeats ──
+            session_uri: str | None = None
             offset = 0
-            file_data = b""
-            if artifact_file_path.is_file():
-                with open(artifact_file_path, "rb") as f:
-                    file_data = f.read()
-            else:
-                file_data = b"0" * total_bytes
-
-            while offset < total_bytes:
-                # TX-PRE-CHUNK: Verify fencing token and lease
-                pre_chunk_stmt = (
-                    update(PublishIntent)
-                    .where(
-                        PublishIntent.id == intent.id,
-                        PublishIntent.claim_token == claim_token,
-                        PublishIntent.attempt_generation == intent.attempt_generation,
-                        PublishIntent.lease_expires_at > datetime.now(UTC),
-                    )
-                    .values(
-                        lease_expires_at=datetime.now(UTC) + timedelta(minutes=3),
-                        updated_at=datetime.now(UTC),
-                    )
+            permit_upload = None
+            prior_sess_stmt = (
+                select(UploadSession, PublishAttempt)
+                .join(PublishAttempt, UploadSession.publish_attempt_id == PublishAttempt.id)
+                .where(
+                    PublishAttempt.publish_intent_id == intent.id,
+                    PublishAttempt.id != attempt.id,
+                    PublishAttempt.state.in_([
+                        PublishAttemptState.CREATED.value,
+                        PublishAttemptState.UPLOADING.value,
+                        PublishAttemptState.FINALIZING.value,
+                        PublishAttemptState.UNKNOWN.value,
+                    ]),
                 )
-                pre_res = await session.execute(pre_chunk_stmt)
-                await session.commit()
-                if pre_res.rowcount == 0:
-                    logger.error(
-                        "Lease fence lost; halting upload chunk transmission",
-                        intent_id=str(intent.id),
-                    )
-                    return attempt
+                .order_by(PublishAttempt.attempt_number.desc())
+            )
+            prior_sess_res = await session.execute(prior_sess_stmt)
+            prior_row = prior_sess_res.first()
 
-                # Prepare chunk
-                chunk_end = min(offset + CHUNK_SIZE, total_bytes)
-                chunk_bytes = file_data[offset:chunk_end]
-
-                # HTTP PUT outside DB transaction
-                chunk_result = await adapter.upload_chunk(
-                    session_uri=init_res.session_uri,
-                    chunk_data=chunk_bytes,
-                    start_byte=offset,
-                    total_bytes=total_bytes,
-                    permit=permit_upload,
+            if prior_row:
+                prior_upload_session, prior_attempt = prior_row
+                from omega.application.publisher.reconciliation_service import (
+                    ReconciliationService,
                 )
 
-                # TX-POST-CHUNK: Monotonic update
-                if chunk_result.is_complete:
-                    # Upload finished!
+                logger.info(
+                    "Found prior unfinalized upload session; reconciling before any new session",
+                    prior_attempt_id=str(prior_attempt.id),
+                )
+                outcome = await ReconciliationService.reconcile_attempt_detailed(
+                    session=session,
+                    attempt_id=prior_attempt.id,
+                )
+                prior_attempt = (
+                    await session.execute(
+                        select(PublishAttempt).where(PublishAttempt.id == prior_attempt.id)
+                    )
+                ).scalar_one()
+
+                if outcome.status == ReconciliationStatus.CONFIRMED_SUCCESS:
                     await cls._transition_attempt(
                         session=session,
                         attempt_id=attempt.id,
-                        new_state=PublishAttemptState.SUCCEEDED,
-                        provider_video_id=chunk_result.provider_video_id,
-                        provider_url=chunk_result.provider_url,
-                        effective_privacy_status=chunk_result.effective_privacy_status
-                        or effective_privacy,
-                        reason="Video upload completed and verified on YouTube.",
+                        new_state=PublishAttemptState.CANCELLED,
+                        reason="Prior attempt already confirmed SUCCEEDED on provider.",
                         actor=effective_worker_id,
                     )
-                    # Mark intent and task published
-                    await session.execute(
-                        update(PublishIntent)
-                        .where(PublishIntent.id == intent.id)
-                        .values(
-                            state=PublishIntentState.PUBLISHED.value, updated_at=datetime.now(UTC)
+                    await session.commit()
+                    return prior_attempt
+
+                if outcome.can_resume and outcome.provider_offset is not None:
+                    if not 0 <= outcome.provider_offset < prior_upload_session.total_bytes:
+                        await cls._hold_redundant_attempt(
+                            session,
+                            attempt,
+                            intent,
+                            effective_worker_id,
+                            "Provider returned an invalid or final offset; awaiting reconciliation.",
                         )
-                    )
-                    await session.execute(
-                        update(Task)
-                        .where(Task.id == task.id)
-                        .values(state=TaskState.SUCCEEDED.value, completed_at=datetime.now(UTC))
-                    )
-                    await cls._enqueue_terminal_mission_evaluation(
-                        session, task, attempt, TaskState.SUCCEEDED.value
-                    )
-                    await session.execute(
-                        update(UploadSession)
-                        .where(UploadSession.id == upload_session.id)
-                        .values(bytes_uploaded=total_bytes, updated_at=datetime.now(UTC))
+                        return prior_attempt
+                    await cls._transition_attempt(
+                        session=session,
+                        attempt_id=attempt.id,
+                        new_state=PublishAttemptState.CANCELLED,
+                        reason="Resuming prior provider upload session instead of creating a new one.",
+                        actor=effective_worker_id,
                     )
                     await session.commit()
-                    logger.info("Publishing SUCCEEDED", video_id=chunk_result.provider_video_id)
-                    res_final = await session.execute(
-                        select(PublishAttempt).where(PublishAttempt.id == attempt.id)
+                    attempt = prior_attempt
+                    upload_session = prior_upload_session
+                    session_uri = prior_upload_session.session_uri
+                    total_bytes = prior_upload_session.total_bytes
+                    offset = outcome.provider_offset
+                    permit_upload = outcome.permit
+                elif not outcome.session_terminal:
+                    await cls._hold_redundant_attempt(
+                        session,
+                        attempt,
+                        intent,
+                        effective_worker_id,
+                        "Prior upload outcome remains unresolved; no replacement session created.",
                     )
-                    return res_final.scalar_one()
+                    return prior_attempt
 
-                else:
-                    # Intermediate chunk
-                    offset = chunk_result.next_byte_offset
-                    await session.execute(
-                        update(UploadSession)
-                        .where(UploadSession.id == upload_session.id)
+            # ── 6. Resumable Upload Session Initialization ──
+            from omega.domain.network import NetworkPreflightRequest
+
+            preflight_service = NetworkPreflightService(lambda: session)
+            if session_uri is None:
+                upload_init_target = "https://www.googleapis.com/upload/youtube/v3/videos"
+                preflight_upload, permit_upload = await preflight_service.preflight(
+                    NetworkPreflightRequest(
+                        destination_url=upload_init_target,
+                        service_category=ServiceCategory.YOUTUBE_API,
+                        caller_key="init_resumable_upload",
+                    )
+                )
+                if not permit_upload or not permit_upload.is_valid_for(upload_init_target):
+                    reason = (
+                        preflight_upload.decision.reason
+                        if preflight_upload.decision
+                        else "Permit unavailable, expired, or destination-mismatched"
+                    )
+                    raise PublishExecutionError(
+                        f"Network preflight blocked resumable upload initialization: {reason}"
+                    )
+
+            if session_uri is None:
+                init_res = await adapter.initialize_resumable_upload(
+                    title=intent.title,
+                    description=intent.description,
+                    tags=intent.tags or [],
+                    category_id=intent.category_id,
+                    requested_privacy=effective_privacy,
+                    made_for_kids=intent.made_for_kids,
+                    total_bytes=total_bytes,
+                    access_token=access_token,
+                    permit=permit_upload,
+                    custom_options=intent.platform_custom_options,
+                )
+
+                upload_session = UploadSession(
+                    id=uuid4(),
+                    publish_attempt_id=attempt.id,
+                    session_uri=init_res.session_uri,
+                    total_bytes=total_bytes,
+                    bytes_uploaded=0,
+                    chunk_size_bytes=CHUNK_SIZE,
+                    expires_at=init_res.expires_at,
+                )
+                session.add(upload_session)
+                await cls._transition_attempt(
+                    session=session,
+                    attempt_id=attempt.id,
+                    new_state=PublishAttemptState.UPLOADING,
+                    reason="Resumable upload session initialized.",
+                    actor=effective_worker_id,
+                )
+                session_uri = init_res.session_uri
+
+            if session_uri is None or permit_upload is None:
+                raise PublishExecutionError(
+                    "Upload session is unresolved; external chunk transmission is prohibited."
+                )
+            is_real_file = artifact_file_path.is_file()
+
+            with _open_stream(artifact_file_path, is_real_file) as file_obj:
+                while offset < total_bytes:
+                    # TX-PRE-CHUNK: Verify fencing token and lease
+                    pre_chunk_stmt = (
+                        update(PublishIntent)
+                        .where(
+                            PublishIntent.id == intent.id,
+                            PublishIntent.claim_token == claim_token,
+                            PublishIntent.attempt_generation == intent.attempt_generation,
+                            PublishIntent.lease_expires_at > datetime.now(UTC),
+                        )
                         .values(
-                            bytes_uploaded=offset,
+                            lease_expires_at=datetime.now(UTC) + timedelta(minutes=3),
                             updated_at=datetime.now(UTC),
                         )
                     )
+                    pre_res = await session.execute(pre_chunk_stmt)
                     await session.commit()
+                    if pre_res.rowcount == 0:
+                        logger.error(
+                            "Lease fence lost; halting upload chunk transmission",
+                            intent_id=str(intent.id),
+                        )
+                        return attempt
+
+                    # Prepare chunk bytes bounded by CHUNK_SIZE
+                    chunk_size_current = min(CHUNK_SIZE, total_bytes - offset)
+                    if file_obj is not None:
+                        file_obj.seek(offset)
+                        chunk_bytes = file_obj.read(chunk_size_current)
+                    else:
+                        chunk_bytes = b"0" * chunk_size_current
+
+                    # Check permit before chunk upload
+                    if not permit_upload or not permit_upload.is_valid_for(session_uri):
+                        preflight_chunk, permit_upload = await preflight_service.preflight(
+                            NetworkPreflightRequest(
+                                destination_url=session_uri,
+                                service_category=ServiceCategory.YOUTUBE_API,
+                                caller_key="upload_chunk",
+                            )
+                        )
+                        if not permit_upload or not permit_upload.is_valid_for(session_uri):
+                            reason = (
+                                preflight_chunk.decision.reason
+                                if preflight_chunk.decision
+                                else "Permit unavailable or expired"
+                            )
+                            raise PublishExecutionError(
+                                f"Network preflight blocked upload chunk: {reason}"
+                            )
+
+                    # HTTP PUT outside DB transaction
+                    chunk_result = await adapter.upload_chunk(
+                        session_uri=session_uri,
+                        chunk_data=chunk_bytes,
+                        start_byte=offset,
+                        total_bytes=total_bytes,
+                        permit=permit_upload,
+                    )
+
+                    # TX-POST-CHUNK: Monotonic update
+                    if chunk_result.is_complete:
+                        # Upload finished!
+                        await cls._transition_attempt(
+                            session=session,
+                            attempt_id=attempt.id,
+                            new_state=PublishAttemptState.SUCCEEDED,
+                            provider_video_id=chunk_result.provider_video_id,
+                            provider_url=chunk_result.provider_url,
+                            effective_privacy_status=chunk_result.effective_privacy_status
+                            or effective_privacy,
+                            reason="Video upload completed and verified on YouTube.",
+                            actor=effective_worker_id,
+                        )
+                        # Mark intent and task published
+                        await session.execute(
+                            update(PublishIntent)
+                            .where(PublishIntent.id == intent.id)
+                            .values(
+                                state=PublishIntentState.PUBLISHED.value,
+                                updated_at=datetime.now(UTC),
+                            )
+                        )
+                        await session.execute(
+                            update(Task)
+                            .where(Task.id == task.id)
+                            .values(
+                                state=TaskState.SUCCEEDED.value, completed_at=datetime.now(UTC)
+                            )
+                        )
+                        await cls._enqueue_terminal_mission_evaluation(
+                            session, task, attempt, TaskState.SUCCEEDED.value
+                        )
+                        await session.execute(
+                            update(UploadSession)
+                            .where(UploadSession.id == upload_session.id)
+                            .values(bytes_uploaded=total_bytes, updated_at=datetime.now(UTC))
+                        )
+                        await session.commit()
+                        logger.info(
+                            "Publishing SUCCEEDED", video_id=chunk_result.provider_video_id
+                        )
+                        res_final = await session.execute(
+                            select(PublishAttempt).where(PublishAttempt.id == attempt.id)
+                        )
+                        return res_final.scalar_one()
+
+                    else:
+                        # Intermediate chunk
+                        offset = chunk_result.next_byte_offset
+                        await session.execute(
+                            update(UploadSession)
+                            .where(UploadSession.id == upload_session.id)
+                            .values(
+                                bytes_uploaded=offset,
+                                updated_at=datetime.now(UTC),
+                            )
+                        )
+                        await session.commit()
 
         except Exception as exc:
             logger.error("Publisher execution failed", error=str(exc))
@@ -1102,6 +1270,26 @@ class PublishExecutionService:
         )
         session.add(trans)
         await session.flush()
+
+    @classmethod
+    async def _hold_redundant_attempt(
+        cls,
+        session: AsyncSession,
+        attempt: PublishAttempt,
+        intent: PublishIntent,
+        actor: str,
+        reason: str,
+    ) -> None:
+        """Cancel a redundant local attempt without creating a provider session."""
+        await cls._transition_attempt(
+            session=session,
+            attempt_id=attempt.id,
+            new_state=PublishAttemptState.CANCELLED,
+            reason=reason,
+            actor=actor,
+        )
+        await cls._release_intent(session, intent.id)
+        await session.commit()
 
     @classmethod
     async def _release_intent(cls, session: AsyncSession, intent_id: UUID) -> None:

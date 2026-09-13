@@ -39,6 +39,14 @@ class YouTubeDataApiAdapter(BasePlatformAdapter):
     def platform(self) -> Platform:
         return Platform.YOUTUBE
 
+    @staticmethod
+    def _assert_valid_permit(permit: NetworkEgressPermit | None, target_url: str) -> None:
+        if permit is None or not permit.is_valid_for(target_url):
+            raise RuntimeError(
+                "Network preflight permit missing, expired, or bound to another destination; "
+                "external socket prohibited."
+            )
+
     async def validate_credentials(
         self,
         access_token: str,
@@ -46,6 +54,15 @@ class YouTubeDataApiAdapter(BasePlatformAdapter):
     ) -> CredentialValidationResult:
         """Validate account and fetch channel profile from YouTube API."""
         url = "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true"
+        if permit is None or not permit.is_valid_for(url):
+            return CredentialValidationResult(
+                is_valid=False,
+                error_category=PublisherErrorCategory.PERMISSION_DENIED,
+                error_message=(
+                    "Network preflight permit missing, expired, or bound to another destination; "
+                    "external socket prohibited."
+                ),
+            )
         headers = {
             "Authorization": f"Bearer {access_token}",
             "Accept": "application/json",
@@ -98,6 +115,7 @@ class YouTubeDataApiAdapter(BasePlatformAdapter):
     ) -> RefreshedTokenData:
         """Exchange refresh token for a fresh short-lived access token."""
         url = "https://oauth2.googleapis.com/token"
+        self._assert_valid_permit(permit, url)
         data = {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -141,6 +159,7 @@ class YouTubeDataApiAdapter(BasePlatformAdapter):
     ) -> UploadSessionInitResult:
         """Initiate official resumable upload session with video metadata resource."""
         url = "https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status"
+        self._assert_valid_permit(permit, url)
         metadata_body = {
             "snippet": {
                 "title": title,
@@ -185,6 +204,7 @@ class YouTubeDataApiAdapter(BasePlatformAdapter):
         permit: NetworkEgressPermit,
     ) -> ChunkUploadResult:
         """Transmit an individual chunk to provider upload session."""
+        self._assert_valid_permit(permit, session_uri)
         chunk_len = len(chunk_data)
         end_byte = start_byte + chunk_len - 1
         headers = {
@@ -241,6 +261,7 @@ class YouTubeDataApiAdapter(BasePlatformAdapter):
         permit: NetworkEgressPermit,
     ) -> UploadProgressResult:
         """Query provider for received byte offset."""
+        self._assert_valid_permit(permit, session_uri)
         headers = {
             "Content-Length": "0",
             "Content-Range": f"bytes */{total_bytes}",
@@ -287,6 +308,7 @@ class YouTubeDataApiAdapter(BasePlatformAdapter):
         permit: NetworkEgressPermit,
     ) -> ReconciliationResult:
         """Authoritatively query session URI to reconcile UNKNOWN outcome."""
+        self._assert_valid_permit(permit, session_uri)
         headers = {
             "Content-Length": "0",
             "Content-Range": f"bytes */{total_bytes}",
@@ -326,6 +348,7 @@ class YouTubeDataApiAdapter(BasePlatformAdapter):
                         is_confirmed_success=False,
                         is_incomplete=False,
                         is_held_for_review=True,
+                        is_expired=True,
                         diagnostic_reason="Session URI expired or not found (404/410) after ambiguous completion; manual review required.",
                     )
                 return ReconciliationResult(

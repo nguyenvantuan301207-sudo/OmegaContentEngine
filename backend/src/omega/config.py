@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     google_client_secret: str | None = None
     google_redirect_uri: str = "http://localhost:8000/api/v1/publisher/accounts/youtube/callback"
     media_storage_root: str = "storage/media"
+    publisher_private_canary_mode: bool = True
 
     # ── TTS Narration ──
     tts_provider: str = "local"

@@ -1,6 +1,5 @@
 """Integration tests for OMEGA-011 Publisher application services."""
 
-import os
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -350,7 +349,8 @@ async def test_privacy_fallback_policy_rejection_and_opt_in(
     """Verify requested PUBLIC without fallback is blocked, but with opt-in fallback uploads PRIVATE."""
     f = setup_publisher_fixtures
     task_id = f["task"].id
-    os.environ["OMEGA_TEST_MODE"] = "1"
+    monkeypatch.setenv("OMEGA_TEST_MODE", "1")
+    monkeypatch.setenv("PUBLISHER_PRIVATE_CANARY_MODE", "false")
 
     # 1. Fallback disabled (default) -> BLOCKED_GUARDIAN
     payload_blocked = PublishIntentCreate(
@@ -379,7 +379,7 @@ async def test_privacy_fallback_policy_rejection_and_opt_in(
 
     mock_init = AsyncMock()
     mock_init.return_value = UploadSessionInitResult(
-        session_uri="https://mock-upload-session",
+        session_uri="https://www.googleapis.com/upload/youtube/v3/videos?upload_id=privacy",
         expires_at=datetime.now(UTC) + timedelta(hours=24),
     )
     mock_chunk = AsyncMock()
@@ -440,7 +440,7 @@ async def test_handoff_outbox_and_scheduler_relay(
     """Verify failed retryable publish inserts handoff outbox and relay invokes Scheduler."""
     f = setup_publisher_fixtures
     task_id = f["task"].id
-    os.environ["OMEGA_TEST_MODE"] = "1"
+    monkeypatch.setenv("OMEGA_TEST_MODE", "1")
 
     # Mock adapter failure with retryable network error
     mock_init = AsyncMock(side_effect=httpx.NetworkError("Transient network drop"))
@@ -481,8 +481,10 @@ async def test_handoff_outbox_and_scheduler_relay(
     assert handoff.status == HandoffStatus.PENDING.value
 
     # Run HandoffRelayService sweep
-    delivered = await HandoffRelayService.process_pending_handoffs(db_session)
-    assert delivered >= 1
+    delivered = await HandoffRelayService.process_pending_handoffs(
+        db_session, handoff_ids=[handoff.id]
+    )
+    assert delivered == 1
 
     await db_session.refresh(handoff)
     assert handoff.status == HandoffStatus.DELIVERED.value
@@ -643,13 +645,13 @@ async def test_final_timeout_becomes_unknown_and_prevents_blind_reupload(
     """Verify when final chunk times out, attempt becomes UNKNOWN and prevents blind re-upload."""
     f = setup_publisher_fixtures
     task_id = f["task"].id
-    os.environ["OMEGA_TEST_MODE"] = "1"
+    monkeypatch.setenv("OMEGA_TEST_MODE", "1")
 
     from omega.application.publisher.adapters.base import UploadSessionInitResult
 
     mock_init = AsyncMock()
     mock_init.return_value = UploadSessionInitResult(
-        session_uri="https://mock-timeout-session",
+        session_uri="https://www.googleapis.com/upload/youtube/v3/videos?upload_id=timeout",
         expires_at=datetime.now(UTC) + timedelta(hours=24),
     )
     # Final chunk times out
@@ -742,7 +744,7 @@ async def test_old_worker_cannot_send_chunk_after_lease_expiry(
 ):
     """Verify if lease expires during upload, old worker halts and does not send chunk."""
     f = setup_publisher_fixtures
-    os.environ["OMEGA_TEST_MODE"] = "1"
+    monkeypatch.setenv("OMEGA_TEST_MODE", "1")
 
     from omega.application.publisher.adapters.base import UploadSessionInitResult
 
@@ -776,7 +778,7 @@ async def test_old_worker_cannot_send_chunk_after_lease_expiry(
             )
             await s.commit()
         return UploadSessionInitResult(
-            session_uri="https://mock-fence-session",
+            session_uri="https://www.googleapis.com/upload/youtube/v3/videos?upload_id=fence",
             expires_at=datetime.now(UTC) + timedelta(hours=24),
         )
 
@@ -963,8 +965,10 @@ async def test_handoff_crash_after_scheduler_success_before_ack_recovers_without
     await db_session.commit()
 
     # First relay delivery runs
-    delivered1 = await HandoffRelayService.process_pending_handoffs(db_session)
-    assert delivered1 >= 1
+    delivered1 = await HandoffRelayService.process_pending_handoffs(
+        db_session, handoff_ids=[handoff.id]
+    )
+    assert delivered1 == 1
 
     await db_session.refresh(handoff)
     assert handoff.status == HandoffStatus.DELIVERED.value
@@ -978,7 +982,9 @@ async def test_handoff_crash_after_scheduler_success_before_ack_recovers_without
     assert len(reservations) == 1
 
     # Simulate re-running relay: row is already DELIVERED
-    delivered2 = await HandoffRelayService.process_pending_handoffs(db_session)
+    delivered2 = await HandoffRelayService.process_pending_handoffs(
+        db_session, handoff_ids=[handoff.id]
+    )
     assert delivered2 == 0
 
     # Reservations remain exactly 1 (zero duplicate reservations)
@@ -1048,7 +1054,9 @@ async def test_handoff_dead_letter_after_max_attempts(
     )
 
     # Process: Attempt count reaches 5 (MAX) -> Transitions to DEAD_LETTER
-    delivered = await HandoffRelayService.process_pending_handoffs(db_session)
+    delivered = await HandoffRelayService.process_pending_handoffs(
+        db_session, handoff_ids=[handoff.id]
+    )
     assert delivered == 0
 
     await db_session.refresh(handoff)

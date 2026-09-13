@@ -487,5 +487,21 @@ class NetworkEgressPermit(BaseModel):
         now = current_time or datetime.now(UTC)
         if now >= self.expires_at:
             return False
-        canon = normalize_destination(target_url)
-        return canon.canonical_string.startswith(self.canonical_destination)
+        target = normalize_destination(target_url)
+        permitted = normalize_destination(self.canonical_destination)
+        if (
+            target.scheme != permitted.scheme
+            or target.normalized_host != permitted.normalized_host
+            or target.effective_port != permitted.effective_port
+        ):
+            return False
+        if not permitted.path_prefix:
+            return True
+        target_path = target.path_prefix or ""
+        permitted_path = permitted.path_prefix
+        return target_path == permitted_path or target_path.startswith(f"{permitted_path}/")
+
+    def is_expired(self, current_time: datetime | None = None) -> bool:
+        """Check whether the permit has passed its expiration timestamp."""
+        now = current_time or datetime.now(UTC)
+        return now >= self.expires_at

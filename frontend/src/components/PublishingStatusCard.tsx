@@ -207,40 +207,47 @@ export function PublishingStatusCard({
   const guardianBlocked = guardianStatus?.overall_gate_state === "BLOCKED";
   const executionPermitted =
     latestIntent?.state === "APPROVED" && !guardianBlocked && !isArchived;
-  const accountAction = account ? (
-    <div className="ui-inline-actions">
-      <StatusBadge tone={account.status === "ACTIVE" ? "success" : "danger"}>
-        {account.status}
-      </StatusBadge>
-      <button
-        type="button"
-        className="btn btn-danger btn-sm"
-        disabled={loading || isArchived}
-        title={
-          isArchived
-            ? "Activate this channel before modifying accounts."
-            : undefined
-        }
-        onClick={() => setShowDisconnectConfirm(true)}
-      >
-        Disconnect
-      </button>
-    </div>
-  ) : (
-    <button
-      type="button"
-      className="btn btn-primary btn-sm"
-      disabled={loading || isArchived}
-      title={
-        isArchived
-          ? "Activate this channel before connecting platform accounts."
-          : undefined
-      }
-      onClick={() => void handleConnect()}
-    >
-      {loading ? "Connecting…" : "Connect YouTube"}
-    </button>
-  );
+  const isRevoked = account?.status === "REVOKED";
+  const accountAction =
+    account && !isRevoked ? (
+      <div className="ui-inline-actions">
+        <StatusBadge tone={account.status === "ACTIVE" ? "success" : "danger"}>
+          {account.status}
+        </StatusBadge>
+        <button
+          type="button"
+          className="btn btn-danger btn-sm"
+          disabled={loading || isArchived}
+          title={
+            isArchived
+              ? "Activate this channel before modifying accounts."
+              : undefined
+          }
+          onClick={() => setShowDisconnectConfirm(true)}
+        >
+          Disconnect
+        </button>
+      </div>
+    ) : (
+      <div className="ui-inline-actions">
+        {account && isRevoked && (
+          <StatusBadge tone="danger">Disconnected</StatusBadge>
+        )}
+        <button
+          type="button"
+          className="btn btn-primary btn-sm"
+          disabled={loading || isArchived}
+          title={
+            isArchived
+              ? "Activate this channel before connecting platform accounts."
+              : undefined
+          }
+          onClick={() => void handleConnect()}
+        >
+          {loading ? "Connecting…" : "Connect YouTube"}
+        </button>
+      </div>
+    );
 
   return (
     <PageSection
@@ -265,7 +272,10 @@ export function PublishingStatusCard({
               { label: "Platform", value: account.platform },
               {
                 label: "Account status",
-                value: account.status,
+                value:
+                  account.status === "REVOKED"
+                    ? "Disconnected (Revoked)"
+                    : account.status,
                 status: account.status,
               },
               { label: "Scopes", value: account.scopes.length },

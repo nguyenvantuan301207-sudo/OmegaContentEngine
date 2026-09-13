@@ -14,7 +14,7 @@ from urllib.parse import urlencode
 from uuid import UUID, uuid4
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.network.preflight import NetworkPreflightService
@@ -183,22 +183,24 @@ class OAuthService:
         code_verifier = vault.decrypt(auth_session.encrypted_pkce_verifier, 1)
 
         # 3. Network Preflight for Google Token Endpoint (OMEGA-009)
-        from omega.domain.network import NetworkEgressPermit, NetworkPreflightRequest
+        from omega.domain.network import NetworkPreflightRequest
 
         preflight_service = NetworkPreflightService(lambda: session)
-        preflight_check, _ = await preflight_service.preflight(
+        preflight_check, permit_token = await preflight_service.preflight(
             NetworkPreflightRequest(
                 destination_url=GOOGLE_OAUTH_TOKEN_URL,
                 service_category=ServiceCategory.YOUTUBE_API,
                 caller_key="oauth_token_exchange",
             )
         )
-        if not preflight_check.decision or preflight_check.decision.action.value not in (
-            "ALLOW",
-            "ALLOW_DEGRADED",
-        ):
+        if not permit_token or not permit_token.is_valid_for(GOOGLE_OAUTH_TOKEN_URL):
+            reason = (
+                preflight_check.decision.reason
+                if preflight_check.decision
+                else "Permit unavailable or expired"
+            )
             raise OAuthServiceError(
-                f"Network preflight blocked Google token exchange: {preflight_check.decision.reason if preflight_check.decision else 'Blocked'}"
+                f"Network preflight blocked Google token exchange: {reason}"
             )
 
         # 4. Exchange authorization code for tokens (Outside DB TX)
@@ -229,21 +231,22 @@ class OAuthService:
 
         # 5. Network Preflight & Account Validation via YouTube Adapter
         adapter = AdapterRegistry.get(auth_session.platform)
-        _, permit_obj = await preflight_service.preflight(
+        preflight_val, permit_obj = await preflight_service.preflight(
             NetworkPreflightRequest(
                 destination_url="https://www.googleapis.com/youtube/v3/channels",
                 service_category=ServiceCategory.YOUTUBE_API,
                 caller_key="oauth_channel_validation",
             )
         )
-        if not permit_obj:
-            permit_obj = NetworkEgressPermit(
-                network_check_id=uuid4(),
-                route_id=uuid4(),
-                route_config_version=1,
-                canonical_destination="https://www.googleapis.com",
-                service_category=ServiceCategory.YOUTUBE_API,
-                expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        channel_validation_url = "https://www.googleapis.com/youtube/v3/channels"
+        if not permit_obj or not permit_obj.is_valid_for(channel_validation_url):
+            reason = (
+                preflight_val.decision.reason
+                if preflight_val.decision
+                else "Permit unavailable or expired"
+            )
+            raise OAuthServiceError(
+                f"Network preflight blocked YouTube channel validation: {reason}"
             )
         val_result = await adapter.validate_credentials(access_token, permit_obj)
         if not val_result.is_valid:
@@ -334,7 +337,16 @@ class OAuthService:
 
         account.status = PlatformAccountStatus.REVOKED.value
         account.updated_at = datetime.now(UTC)
+
+        # Explicitly invalidate and delete credentials from CredentialVault
+        await session.execute(
+            delete(CredentialVault).where(CredentialVault.platform_account_id == account.id)
+        )
+
         await session.commit()
         await session.refresh(account)
-        logger.info("Platform account revoked/disconnected", account_id=str(account_id))
+        logger.info(
+            "Platform account revoked/disconnected and credentials wiped",
+            account_id=str(account_id),
+        )
         return account

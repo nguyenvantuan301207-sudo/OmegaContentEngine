@@ -7,6 +7,8 @@ and invokes OMEGA-010 ScheduleEvaluationEngine with deterministic idempotency.
 from __future__ import annotations
 
 import os
+import secrets
+from collections.abc import Collection
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -40,10 +42,14 @@ class HandoffRelayService:
         session: AsyncSession,
         batch_size: int = 20,
         worker_id: str | None = None,
+        handoff_ids: Collection[UUID] | None = None,
     ) -> int:
-        """Claim and deliver due handoff outbox rows to OMEGA-010 Scheduler."""
+        """Claim due handoffs, optionally restricted to explicit ownership IDs."""
         now = datetime.now(UTC)
-        effective_worker_id = worker_id or f"relay-{os.getpid()}-{secrets_hex()}"
+        effective_worker_id = worker_id or f"relay-{os.getpid()}-{secrets.token_hex(4)}"
+
+        if handoff_ids is not None and not handoff_ids:
+            return 0
 
         # 1. TX-CLAIM: Find and lock pending or expired-lease rows
         stmt = (
@@ -62,6 +68,8 @@ class HandoffRelayService:
             .limit(batch_size)
             .with_for_update(skip_locked=True)
         )
+        if handoff_ids is not None:
+            stmt = stmt.where(PublisherSchedulerHandoffOutbox.id.in_(tuple(handoff_ids)))
 
         res = await session.execute(stmt)
         rows = res.scalars().all()
@@ -192,9 +200,3 @@ class HandoffRelayService:
             row.next_attempt_at = datetime.now(UTC) + timedelta(seconds=backoff_sec)
 
         await session.commit()
-
-
-def secrets_hex() -> str:
-    import secrets
-
-    return secrets.token_hex(4)

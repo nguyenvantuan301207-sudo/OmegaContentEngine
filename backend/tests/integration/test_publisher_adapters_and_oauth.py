@@ -4,6 +4,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.publisher.adapters.youtube import YouTubeDataApiAdapter
@@ -22,6 +23,7 @@ from omega.infrastructure.models import (
     OAuthAuthorizationSession,
     PlatformAccount,
 )
+from omega.infrastructure.vault import get_credential_vault
 
 pytestmark = pytest.mark.usefixtures("publisher_test_env")
 
@@ -184,6 +186,20 @@ async def test_disconnect_account_requires_confirmation(
         scopes=["https://www.googleapis.com/auth/youtube.upload"],
     )
     db_session.add(account)
+    await db_session.flush()
+
+    vault = get_credential_vault()
+    enc_acc, v1 = vault.encrypt("mock_token")
+    enc_ref, v2 = vault.encrypt("mock_refresh")
+    vault_entry = CredentialVault(
+        id=uuid4(),
+        platform_account_id=account.id,
+        encrypted_access_token=enc_acc,
+        access_token_expires_at=datetime.now(UTC) + timedelta(hours=1),
+        encrypted_refresh_token=enc_ref,
+        key_version=v1,
+    )
+    db_session.add(vault_entry)
     await db_session.commit()
 
     # Reject without confirmation
@@ -193,6 +209,12 @@ async def test_disconnect_account_requires_confirmation(
     # Disconnect with confirmation
     revoked = await OAuthService.disconnect_account(db_session, account.id, confirm_disconnect=True)
     assert revoked.status == PlatformAccountStatus.REVOKED.value
+
+    # Verify credentials wiped from vault
+    res_vault = await db_session.execute(
+        select(CredentialVault).where(CredentialVault.platform_account_id == account.id)
+    )
+    assert res_vault.scalar_one_or_none() is None
 
 
 @pytest.mark.asyncio
@@ -215,7 +237,7 @@ async def test_youtube_adapter_resumable_protocol(monkeypatch):
         route_config_version=1,
         canonical_destination="https://www.googleapis.com",
         service_category=ServiceCategory.YOUTUBE_API,
-        expires_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
     )
 
     init_res = await adapter.initialize_resumable_upload(
@@ -272,6 +294,55 @@ async def test_youtube_adapter_resumable_protocol(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_youtube_adapter_rejects_wrong_destination_permit_without_http(monkeypatch):
+    """Every adapter socket path rejects a valid permit bound to another host."""
+    adapter = YouTubeDataApiAdapter()
+    wrong_permit = NetworkEgressPermit(
+        network_check_id=uuid4(),
+        route_id=uuid4(),
+        route_config_version=1,
+        canonical_destination="https://example.invalid",
+        service_category=ServiceCategory.YOUTUBE_API,
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+    mock_get = AsyncMock()
+    mock_post = AsyncMock()
+    mock_put = AsyncMock()
+    monkeypatch.setattr("httpx.AsyncClient.get", mock_get)
+    monkeypatch.setattr("httpx.AsyncClient.post", mock_post)
+    monkeypatch.setattr("httpx.AsyncClient.put", mock_put)
+
+    validation = await adapter.validate_credentials("token", wrong_permit)
+    assert validation.is_valid is False
+
+    with pytest.raises(RuntimeError, match="another destination"):
+        await adapter.refresh_access_token("refresh", "client", "secret", wrong_permit)
+    with pytest.raises(RuntimeError, match="another destination"):
+        await adapter.initialize_resumable_upload(
+            title="Test",
+            description="",
+            tags=[],
+            category_id="28",
+            requested_privacy=PrivacyStatus.PRIVATE,
+            made_for_kids=False,
+            total_bytes=1,
+            access_token="token",
+            permit=wrong_permit,
+        )
+    session_uri = "https://www.googleapis.com/upload/youtube/v3/videos?upload_id=abc"
+    with pytest.raises(RuntimeError, match="another destination"):
+        await adapter.upload_chunk(session_uri, b"x", 0, 1, wrong_permit)
+    with pytest.raises(RuntimeError, match="another destination"):
+        await adapter.query_upload_progress(session_uri, 1, wrong_permit)
+    with pytest.raises(RuntimeError, match="another destination"):
+        await adapter.reconcile_upload_session(session_uri, 1, wrong_permit)
+
+    mock_get.assert_not_called()
+    mock_post.assert_not_called()
+    mock_put.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_youtube_adapter_authoritative_reconciliation(monkeypatch):
     """Verify UNKNOWN reconciliation checks: 200 confirms success, 308 resumes, 404 holds."""
     adapter = YouTubeDataApiAdapter()
@@ -282,7 +353,7 @@ async def test_youtube_adapter_authoritative_reconciliation(monkeypatch):
         route_config_version=1,
         canonical_destination="https://www.googleapis.com",
         service_category=ServiceCategory.YOUTUBE_API,
-        expires_at=datetime.now(UTC),
+        expires_at=datetime.now(UTC) + timedelta(minutes=15),
     )
 
     # 1. 200 OK -> Confirmed success
@@ -290,7 +361,8 @@ async def test_youtube_adapter_authoritative_reconciliation(monkeypatch):
     mock_resp1.status_code = 200
     mock_resp1.json.return_value = {"id": "reconciled_video_123"}
     monkeypatch.setattr("httpx.AsyncClient.put", AsyncMock(return_value=mock_resp1))
-    recon1 = await adapter.reconcile_upload_session("https://fake-session", 1000, dummy_permit)
+    session_uri = "https://www.googleapis.com/upload/youtube/v3/videos?upload_id=reconcile"
+    recon1 = await adapter.reconcile_upload_session(session_uri, 1000, dummy_permit)
     assert recon1.is_confirmed_success is True
     assert recon1.provider_video_id == "reconciled_video_123"
 
@@ -299,7 +371,7 @@ async def test_youtube_adapter_authoritative_reconciliation(monkeypatch):
     mock_resp2.status_code = 308
     mock_resp2.headers = {"Range": "bytes=0-749"}
     monkeypatch.setattr("httpx.AsyncClient.put", AsyncMock(return_value=mock_resp2))
-    recon2 = await adapter.reconcile_upload_session("https://fake-session", 1000, dummy_permit)
+    recon2 = await adapter.reconcile_upload_session(session_uri, 1000, dummy_permit)
     assert recon2.is_confirmed_success is False
     assert recon2.is_incomplete is True
     assert recon2.bytes_received == 750
@@ -308,10 +380,11 @@ async def test_youtube_adapter_authoritative_reconciliation(monkeypatch):
     mock_resp3 = MagicMock()
     mock_resp3.status_code = 404
     monkeypatch.setattr("httpx.AsyncClient.put", AsyncMock(return_value=mock_resp3))
-    recon3 = await adapter.reconcile_upload_session("https://fake-session", 1000, dummy_permit)
+    recon3 = await adapter.reconcile_upload_session(session_uri, 1000, dummy_permit)
     assert recon3.is_confirmed_success is False
     assert recon3.is_incomplete is False
     assert recon3.is_held_for_review is True
+    assert recon3.is_expired is True
 
 
 @pytest.mark.asyncio
@@ -388,7 +461,9 @@ async def test_refresh_response_without_refresh_token_preserves_old_token(monkey
 
 
 @pytest.mark.asyncio
-async def test_session_uri_ssrf_validation(db_session: AsyncSession):
+async def test_session_uri_ssrf_validation(
+    db_session: AsyncSession, sample_channel: Channel
+):
     """Verify malicious private and link-local session URIs are rejected by network preflight before HTTP."""
     from omega.application.network.preflight import NetworkPreflightService
     from omega.domain.network import NetworkAction, NetworkPreflightRequest
@@ -421,7 +496,9 @@ async def test_session_uri_ssrf_validation(db_session: AsyncSession):
 
 
 @pytest.mark.asyncio
-async def test_separate_oauth_and_upload_network_permits(db_session: AsyncSession):
+async def test_separate_oauth_and_upload_network_permits(
+    db_session: AsyncSession, sample_channel: Channel
+):
     """Verify OAuth token endpoint and upload endpoint require separate, distinct destination permits."""
     from omega.application.network.preflight import NetworkPreflightService
     from omega.domain.network import NetworkAction, NetworkPreflightRequest
@@ -457,7 +534,9 @@ async def test_separate_oauth_and_upload_network_permits(db_session: AsyncSessio
 
 
 @pytest.mark.asyncio
-async def test_expired_permit_forces_fresh_preflight(db_session: AsyncSession):
+async def test_expired_permit_forces_fresh_preflight(
+    db_session: AsyncSession, sample_channel: Channel
+):
     """Verify an expired NetworkEgressPermit is recognized as expired and requires a fresh preflight check."""
     from omega.domain.network import NetworkAction, NetworkEgressPermit, ServiceCategory
 

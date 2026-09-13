@@ -6,10 +6,11 @@ session URIs without risking duplicate uploads.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.durable_dispatch import DurableDispatchService
@@ -35,6 +36,17 @@ from omega.logging import get_logger
 logger = get_logger(service="omega-publisher-reconciliation")
 
 
+@dataclass(frozen=True)
+class ReconciliationOutcome:
+    """Detailed provider outcome used by restart-safe execution."""
+
+    status: ReconciliationStatus
+    can_resume: bool = False
+    provider_offset: int | None = None
+    session_terminal: bool = False
+    permit: NetworkEgressPermit | None = None
+
+
 class ReconciliationService:
     """Performs provider-level reconciliation for UNKNOWN upload outcomes."""
 
@@ -44,12 +56,27 @@ class ReconciliationService:
         session: AsyncSession,
         attempt_id: UUID,
     ) -> ReconciliationStatus:
-        """Reconcile an individual UNKNOWN attempt."""
+        """Reconcile an attempt and retain the original status-only API."""
+        outcome = await cls.reconcile_attempt_detailed(session, attempt_id)
+        return outcome.status
+
+    @classmethod
+    async def reconcile_attempt_detailed(
+        cls,
+        session: AsyncSession,
+        attempt_id: UUID,
+    ) -> ReconciliationOutcome:
+        """Reconcile an attempt and expose whether its session is safe to resume."""
         stmt = select(PublishAttempt).where(PublishAttempt.id == attempt_id).with_for_update()
         res = await session.execute(stmt)
         attempt = res.scalar_one_or_none()
-        if not attempt or attempt.state != PublishAttemptState.UNKNOWN.value:
-            return ReconciliationStatus.PENDING
+        if not attempt or attempt.state not in (
+            PublishAttemptState.UNKNOWN.value,
+            PublishAttemptState.UPLOADING.value,
+            PublishAttemptState.FINALIZING.value,
+        ):
+            return ReconciliationOutcome(status=ReconciliationStatus.PENDING)
+        previous_state = attempt.state
 
         # Load upload session
         sess_stmt = select(UploadSession).where(UploadSession.publish_attempt_id == attempt.id)
@@ -58,7 +85,7 @@ class ReconciliationService:
         if not upload_sess:
             attempt.reconciliation_status = ReconciliationStatus.MANUAL_HOLD.value
             await session.commit()
-            return ReconciliationStatus.MANUAL_HOLD
+            return ReconciliationOutcome(status=ReconciliationStatus.MANUAL_HOLD)
 
         # Load publish intent
         intent_stmt = (
@@ -69,33 +96,47 @@ class ReconciliationService:
         intent_res = await session.execute(intent_stmt)
         intent = intent_res.scalar_one_or_none()
         if not intent:
-            return ReconciliationStatus.PENDING
+            return ReconciliationOutcome(status=ReconciliationStatus.PENDING)
 
         # Load task
         task_stmt = select(Task).where(Task.id == intent.task_id).with_for_update()
         task_res = await session.execute(task_stmt)
         task = task_res.scalar_one_or_none()
 
+        if upload_sess.expires_at <= datetime.now(UTC):
+            await cls._mark_expired_session_terminal(
+                session=session,
+                attempt=attempt,
+                previous_state=previous_state,
+                reason="Persisted resumable upload session has expired.",
+            )
+            return ReconciliationOutcome(
+                status=ReconciliationStatus.MANUAL_HOLD,
+                session_terminal=True,
+            )
+
         # Execute network preflight for session URI
         from omega.domain.network import NetworkPreflightRequest
 
         preflight_service = NetworkPreflightService(lambda: session)
-        _, permit = await preflight_service.preflight(
+        preflight_check, permit = await preflight_service.preflight(
             NetworkPreflightRequest(
                 destination_url=upload_sess.session_uri,
                 service_category=ServiceCategory.YOUTUBE_API,
                 caller_key="reconcile_upload_session",
             )
         )
-        if not permit:
-            permit = NetworkEgressPermit(
-                network_check_id=uuid4(),
-                route_id=uuid4(),
-                route_config_version=1,
-                canonical_destination=upload_sess.session_uri,
-                service_category=ServiceCategory.YOUTUBE_API,
-                expires_at=datetime.now(UTC),
+        if not permit or not permit.is_valid_for(upload_sess.session_uri):
+            logger.error(
+                "Network preflight blocked reconciliation; external socket call forbidden",
+                attempt_id=str(attempt.id),
+                reason=(
+                    preflight_check.decision.reason
+                    if preflight_check.decision
+                    else "No valid permit"
+                ),
             )
+            return ReconciliationOutcome(status=ReconciliationStatus.PENDING)
 
         adapter = AdapterRegistry.get("YOUTUBE")
         recon_result = await adapter.reconcile_upload_session(
@@ -122,7 +163,7 @@ class ReconciliationService:
             trans = PublishAttemptTransition(
                 id=uuid4(),
                 publish_attempt_id=attempt.id,
-                from_state=PublishAttemptState.UNKNOWN.value,
+                from_state=previous_state,
                 to_state=PublishAttemptState.SUCCEEDED.value,
                 reason=f"Reconciled successfully from session URI: {recon_result.diagnostic_reason}",
                 actor="RECONCILER",
@@ -179,14 +220,38 @@ class ReconciliationService:
                 attempt_id=str(attempt.id),
                 video_id=recon_result.provider_video_id,
             )
-            return ReconciliationStatus.CONFIRMED_SUCCESS
+            return ReconciliationOutcome(status=ReconciliationStatus.CONFIRMED_SUCCESS)
 
         if recon_result.is_incomplete:
+            if not 0 <= recon_result.bytes_received < upload_sess.total_bytes:
+                await session.execute(
+                    update(PublishAttempt)
+                    .where(PublishAttempt.id == attempt.id)
+                    .values(reconciliation_status=ReconciliationStatus.MANUAL_HOLD.value)
+                )
+                session.add(
+                    PublishAttemptTransition(
+                        id=uuid4(),
+                        publish_attempt_id=attempt.id,
+                        from_state=previous_state,
+                        to_state=previous_state,
+                        reason="Provider returned an invalid incomplete-upload offset.",
+                        actor="RECONCILER",
+                    )
+                )
+                await session.commit()
+                return ReconciliationOutcome(status=ReconciliationStatus.MANUAL_HOLD)
             # Upload incomplete; update bytes
             await session.execute(
                 update(UploadSession)
                 .where(UploadSession.id == upload_sess.id)
-                .values(bytes_uploaded=recon_result.bytes_received, updated_at=datetime.now(UTC))
+                .values(
+                    bytes_uploaded=func.greatest(
+                        UploadSession.bytes_uploaded,
+                        recon_result.bytes_received,
+                    ),
+                    updated_at=datetime.now(UTC),
+                )
             )
             await session.execute(
                 update(PublishAttempt)
@@ -194,7 +259,24 @@ class ReconciliationService:
                 .values(reconciliation_status=ReconciliationStatus.PENDING.value)
             )
             await session.commit()
-            return ReconciliationStatus.PENDING
+            return ReconciliationOutcome(
+                status=ReconciliationStatus.PENDING,
+                can_resume=True,
+                provider_offset=recon_result.bytes_received,
+                permit=permit,
+            )
+
+        if recon_result.is_expired:
+            await cls._mark_expired_session_terminal(
+                session=session,
+                attempt=attempt,
+                previous_state=previous_state,
+                reason=recon_result.diagnostic_reason,
+            )
+            return ReconciliationOutcome(
+                status=ReconciliationStatus.MANUAL_HOLD,
+                session_terminal=True,
+            )
 
         # Manual hold / Session not found
         await session.execute(
@@ -205,15 +287,47 @@ class ReconciliationService:
         trans = PublishAttemptTransition(
             id=uuid4(),
             publish_attempt_id=attempt.id,
-            from_state=PublishAttemptState.UNKNOWN.value,
-            to_state=PublishAttemptState.UNKNOWN.value,
+            from_state=previous_state,
+            to_state=previous_state,
             reason=f"Reconciliation hold: {recon_result.diagnostic_reason}",
             actor="RECONCILER",
         )
         session.add(trans)
         await session.commit()
         logger.warning("Attempt reconciliation placed on MANUAL_HOLD", attempt_id=str(attempt.id))
-        return ReconciliationStatus.MANUAL_HOLD
+        return ReconciliationOutcome(status=ReconciliationStatus.MANUAL_HOLD)
+
+    @classmethod
+    async def _mark_expired_session_terminal(
+        cls,
+        session: AsyncSession,
+        attempt: PublishAttempt,
+        previous_state: str,
+        reason: str,
+    ) -> None:
+        """Record an authoritative expired session before any replacement is allowed."""
+        now = datetime.now(UTC)
+        await session.execute(
+            update(PublishAttempt)
+            .where(PublishAttempt.id == attempt.id)
+            .values(
+                state=PublishAttemptState.PERMANENT_FAILED.value,
+                reconciliation_status=ReconciliationStatus.MANUAL_HOLD.value,
+                completed_at=now,
+                error_message=reason,
+            )
+        )
+        session.add(
+            PublishAttemptTransition(
+                id=uuid4(),
+                publish_attempt_id=attempt.id,
+                from_state=previous_state,
+                to_state=PublishAttemptState.PERMANENT_FAILED.value,
+                reason=f"Resumable session terminal: {reason}",
+                actor="RECONCILER",
+            )
+        )
+        await session.commit()
 
     @classmethod
     async def reconcile_pending_attempts_sweep(

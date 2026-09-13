@@ -75,6 +75,7 @@ class ReconciliationResult:
     provider_video_id: str | None = None
     provider_url: str | None = None
     bytes_received: int = 0
+    is_expired: bool = False
     diagnostic_reason: str = ""
 
 
