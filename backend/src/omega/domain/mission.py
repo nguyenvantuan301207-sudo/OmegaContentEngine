@@ -7,11 +7,14 @@ This is the domain layer — zero infrastructure dependencies.
 from __future__ import annotations
 
 import enum
+import logging
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+
+logger = logging.getLogger(__name__)
 
 
 class MissionState(enum.StrEnum):
@@ -159,3 +162,33 @@ class MissionResponse(BaseModel):
     cancelled_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def _normalize_legacy_state(cls, v: Any, info: ValidationInfo) -> Any:
+        if isinstance(v, str) and v == "ACTIVE":
+            mission_id = info.data.get("id") if info.data else None
+            logger.warning(
+                "Normalizing legacy mission field '%s' from '%s' to '%s' (mission_id=%s)",
+                "state",
+                v,
+                MissionState.RUNNING.value,
+                mission_id,
+            )
+            return MissionState.RUNNING
+        return v
+
+    @field_validator("autonomy_level", mode="before")
+    @classmethod
+    def _normalize_legacy_autonomy_level(cls, v: Any, info: ValidationInfo) -> Any:
+        if isinstance(v, str) and v == "FULL":
+            mission_id = info.data.get("id") if info.data else None
+            logger.warning(
+                "Normalizing legacy mission field '%s' from '%s' to '%s' (mission_id=%s)",
+                "autonomy_level",
+                v,
+                AutonomyLevel.AUTONOMOUS.value,
+                mission_id,
+            )
+            return AutonomyLevel.AUTONOMOUS
+        return v
