@@ -49,6 +49,7 @@ from omega.application.subtitle_engine import (
     generate_karaoke_cues,
 )
 from omega.application.visual_production_v2_service import (
+    SUBTITLE_SEMANTICS_VERSION,
     VerticalSliceError,
     VisualProductionV2Service,
     _derived_karaoke_timing_error,
@@ -821,6 +822,121 @@ async def test_v2_manifest_provenance_roundtrip(v2_service_fixture):
     assert manifest_data["subtitle_fallback_applied"] is False
     assert manifest_data["subtitle_timing_source"] == "DERIVED_SEGMENT_TIMING"
     assert "subtitle_mode_decision" in manifest_data
+    assert manifest_data["subtitle_semantics_version"] == SUBTITLE_SEMANTICS_VERSION
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cached_version",
+    [pytest.param(None, id="missing"), 1, 3, "2", 2.0],
+)
+async def test_incompatible_subtitle_semantics_cache_is_a_miss(
+    v2_service_fixture, cached_version
+):
+    fx = v2_service_fixture
+    _setup_v2_mocks(fx, text="one two three four five", duration_ms=2000)
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    first = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+    old_manifest_path = first.output_path.parent / "manifest.json"
+    old_manifest = json.loads(old_manifest_path.read_text("utf-8"))
+    if cached_version is None:
+        old_manifest.pop("subtitle_semantics_version")
+    else:
+        old_manifest["subtitle_semantics_version"] = cached_version
+    old_manifest["subtitle_timing_source"] = "PROVIDER_WORD_TIMING"
+    old_manifest["subtitle_mode_decision"]["timing_source"] = "PROVIDER_WORD_TIMING"
+    old_manifest_path.write_text(json.dumps(old_manifest, indent=2), "utf-8")
+    old_video_bytes = first.output_path.read_bytes()
+    narration_calls_before = fx["narration"].synthesize_segment_audio.call_count
+
+    second = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+
+    assert second.output_path != first.output_path
+    assert second.subtitle_timing_source == "DERIVED_SEGMENT_TIMING"
+    assert fx["narration"].synthesize_segment_audio.call_count == narration_calls_before + 1
+    assert first.output_path.read_bytes() == old_video_bytes
+    assert json.loads(old_manifest_path.read_text("utf-8")) == old_manifest
+    current_manifest = json.loads(
+        (second.output_path.parent / "manifest.json").read_text("utf-8")
+    )
+    assert current_manifest["subtitle_semantics_version"] == SUBTITLE_SEMANTICS_VERSION
+
+
+@pytest.mark.asyncio
+async def test_pre_fix_mixed_output_cache_is_not_reused(v2_service_fixture):
+    fx = v2_service_fixture
+    captured_ass = _setup_v2_mocks(
+        fx, text="one two three four five", duration_ms=2000
+    )
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    first = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+    old_manifest_path = first.output_path.parent / "manifest.json"
+    old_manifest = json.loads(old_manifest_path.read_text("utf-8"))
+    old_manifest.pop("subtitle_semantics_version")
+    old_manifest["subtitle_fallback_applied"] = False
+    old_manifest["subtitle_fallback_reason"] = None
+    old_manifest_path.write_text(json.dumps(old_manifest, indent=2), "utf-8")
+    old_video_bytes = first.output_path.read_bytes()
+
+    second = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+
+    assert second.output_path != first.output_path
+    assert len(captured_ass) == 2
+    assert first.output_path.read_bytes() == old_video_bytes
+    assert json.loads(old_manifest_path.read_text("utf-8")) == old_manifest
+
+
+@pytest.mark.asyncio
+async def test_current_subtitle_semantics_cache_hit_is_idempotent(v2_service_fixture):
+    fx = v2_service_fixture
+    _setup_v2_mocks(fx, text="one two three four five", duration_ms=2000)
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    first = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+    narration_calls_before = fx["narration"].synthesize_segment_audio.call_count
+    second = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+
+    assert second.output_path == first.output_path
+    assert second.run_fingerprint == first.run_fingerprint
+    assert second.subtitle_timing_source == first.subtitle_timing_source
+    assert fx["narration"].synthesize_segment_audio.call_count == narration_calls_before
+
+
+@pytest.mark.asyncio
+async def test_subtitle_semantics_version_changes_fingerprint(
+    v2_service_fixture, monkeypatch
+):
+    fx = v2_service_fixture
+    _setup_v2_mocks(fx, text="one two three four five", duration_ms=2000)
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    first = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+    monkeypatch.setattr(
+        "omega.application.visual_production_v2_service.SUBTITLE_SEMANTICS_VERSION",
+        SUBTITLE_SEMANTICS_VERSION + 1,
+    )
+    second = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+
+    assert second.run_fingerprint != first.run_fingerprint
+    assert second.output_path != first.output_path
 
 
 @pytest.mark.asyncio

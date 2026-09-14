@@ -12,6 +12,7 @@ from omega.application.storyboard_engine import (
 )
 from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.application.visual_production_v2_service import (
+    SUBTITLE_SEMANTICS_VERSION,
     VerticalSliceError,
     VisualProductionV2Service,
 )
@@ -408,6 +409,7 @@ async def test_provenance_backward_compatibility(mock_session, base_service_kwar
         manifest_path = run_dir / "manifest.json"
         manifest_path.write_text(json.dumps({
             "run_fingerprint": "fake_fingerprint",
+            "subtitle_semantics_version": SUBTITLE_SEMANTICS_VERSION,
             "content_sha256": "fake_sha",
             "scene_count": 1,
             "template_scene_count": 1,
@@ -664,6 +666,7 @@ async def test_provenance_old_manifest_backward_compatibility(mock_session, base
         manifest_path = run_dir / "manifest.json"
         manifest_path.write_text(json.dumps({
             "run_fingerprint": "fake_fingerprint_2",
+            "subtitle_semantics_version": SUBTITLE_SEMANTICS_VERSION,
             "content_sha256": "fake_sha",
             "scene_count": 1,
             "template_scene_count": 1,
@@ -906,6 +909,7 @@ async def test_provenance_legacy_manifest_karaoke_backward_compatibility(mock_se
         manifest_path = run_dir / "manifest.json"
         manifest_path.write_text(json.dumps({
             "run_fingerprint": "fake_fingerprint_legacy_sub",
+            "subtitle_semantics_version": SUBTITLE_SEMANTICS_VERSION,
             "content_sha256": "fake_sha",
             "scene_count": 1,
             "template_scene_count": 1,

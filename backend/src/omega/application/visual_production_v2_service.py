@@ -80,12 +80,19 @@ class VerticalSliceError(Exception):
 
 
 KARAOKE_SUBTITLE_VERSION = "v1"
+SUBTITLE_SEMANTICS_VERSION = 2
 KARAOKE_MAX_WORDS_PER_CUE = 5
 KARAOKE_MAX_CHARS_PER_CUE = 36
 SENTENCE_MAX_WORDS_PER_CUE = 16
 SENTENCE_MAX_CHARS_PER_CUE = 80
 
 VISUAL_DIRECTOR_VERSION = "v2"
+
+
+def _has_current_subtitle_semantics_version(manifest: dict[str, Any]) -> bool:
+    """Return whether a cached render uses the current physical subtitle semantics."""
+    value = manifest.get("subtitle_semantics_version")
+    return type(value) is int and value == SUBTITLE_SEMANTICS_VERSION
 
 
 def _derived_karaoke_timing_error(text: str, duration_ms: Any) -> str | None:
@@ -540,7 +547,8 @@ class VisualProductionV2Service:
             f"omega-vertical-slice-v0:{mission_execution_id}:"
             f"{content_request_id}:{script_version.id}:{fps}:"
             f"visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:"
-            f"visual-asset-mode:{self._visual_asset_mode}"
+            f"visual-asset-mode:{self._visual_asset_mode}:"
+            f"subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}"
         )
         if style_profile:
             fingerprint_input += f":style-profile-v1:{style_profile.model_dump_json()}"
@@ -610,14 +618,34 @@ class VisualProductionV2Service:
 
             fingerprint_input += ":audio-mix-v1:" + json.dumps(audio_mix_fp, sort_keys=True)
 
-        run_fingerprint = hashlib.sha256(fingerprint_input.encode("utf-8")).hexdigest()
+        # Subtitle semantics affect the physical burned output.  Never reinterpret,
+        # rewrite, or delete an incompatible cached render.  If an incompatible
+        # manifest occupies the current deterministic slot, advance to another
+        # deterministic slot and perform a fresh render there.
+        cache_slot = 0
+        while True:
+            cache_fingerprint_input = fingerprint_input
+            if cache_slot:
+                cache_fingerprint_input += f":incompatible-cache-slot={cache_slot}"
+            run_fingerprint = hashlib.sha256(
+                cache_fingerprint_input.encode("utf-8")
+            ).hexdigest()
+            run_dir = self._output_root / str(mission_execution_id) / run_fingerprint
+            final_mp4_path = run_dir / "final.mp4"
+            manifest_path = run_dir / "manifest.json"
 
-        run_dir = self._output_root / str(mission_execution_id) / run_fingerprint
-        final_mp4_path = run_dir / "final.mp4"
-        manifest_path = run_dir / "manifest.json"
-
-        final_exists = final_mp4_path.is_file()
-        manifest_exists = manifest_path.is_file()
+            final_exists = final_mp4_path.is_file()
+            manifest_exists = manifest_path.is_file()
+            if not manifest_exists:
+                break
+            try:
+                with open(manifest_path, encoding="utf-8") as f:
+                    cached_manifest = json.load(f)
+            except (OSError, json.JSONDecodeError):
+                break
+            if _has_current_subtitle_semantics_version(cached_manifest):
+                break
+            cache_slot += 1
 
         if final_exists and manifest_exists:
             try:
@@ -1353,6 +1381,7 @@ class VisualProductionV2Service:
 
             manifest_content = {
                 "run_fingerprint": run_fingerprint,
+                "subtitle_semantics_version": SUBTITLE_SEMANTICS_VERSION,
                 "visual_asset_mode": self._visual_asset_mode,
                 "scene_artifacts_version": "v1",
                 "resolved_brand_spec": resolved_brand.model_dump(mode="json"),

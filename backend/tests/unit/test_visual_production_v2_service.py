@@ -22,6 +22,7 @@ from omega.application.visual_asset_engine import (
 from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import VisualAssetKind
 from omega.application.visual_production_v2_service import (
+    SUBTITLE_SEMANTICS_VERSION,
     ScriptStoryboardAdapter,
     VerticalSliceBackgroundMusicInput,
     VerticalSliceError,
@@ -483,7 +484,7 @@ async def test_visual_director_v2_fingerprint(tmp_path: Path, lineage_data):
 
     res = await svc.render_mission_execution(session, lineage_data["mission_execution"].id, lineage_data["content_request"].id, fps=12)
     expected_fp = (
-        f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2:visual-asset-mode:PEXELS"
+        f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2:visual-asset-mode:PEXELS:subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}"
         f":style-profile-v1:{ChannelStyleProfile().model_dump_json()}"
     )
     expected_hash = hashlib.sha256(expected_fp.encode("utf-8")).hexdigest()
@@ -1068,7 +1069,7 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
     script_version_id = req.scripts[0].id
     from omega.application.visual_production_v2_service import VISUAL_DIRECTOR_VERSION
     expected_silent_fp = (
-        f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:visual-asset-mode:PEXELS"
+        f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:visual-asset-mode:PEXELS:subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}"
         f":style-profile-v1:{ChannelStyleProfile().model_dump_json()}"
     )
     expected_silent_hash = hashlib.sha256(expected_silent_fp.encode("utf-8")).hexdigest()
