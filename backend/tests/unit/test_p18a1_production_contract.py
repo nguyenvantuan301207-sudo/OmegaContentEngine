@@ -1,3 +1,5 @@
+import json
+import math
 from uuid import uuid4
 
 import pytest
@@ -414,6 +416,104 @@ def test_invalid_voice_profile_objects_fail_closed():
     with pytest.raises((TypeError, ValidationError)):
         resolve_canonical_production_contract(
             _make_dummy_request(voice_profile={123: "numeric_key"})
+        )
+
+
+def test_strict_provenance_and_json_roundtrip_deep_nested_profile():
+    """Deep nested profile must thaw into strictly JSON-native types with perfect roundtrip equality."""
+    deep_profile = {
+        "voice_ref": "af_heart",
+        "nested": {
+            "levels": {
+                "pitch": 1.0,
+            }
+        },
+        "matrix": [
+            [1, 2],
+            [3, 4],
+        ],
+        "voices": [
+            {
+                "name": "a",
+                "alternates": ["b", "c"],
+            }
+        ],
+    }
+    req = _make_dummy_request(voice_profile=deep_profile)
+    contract = resolve_canonical_production_contract(req)
+
+    # 1. Inspect provenance recursively
+    prov = contract.to_provenance_dict()
+
+    def assert_strictly_json_native(val, path="$"):
+        if val is None or isinstance(val, (bool, str, int)):
+            return
+        if isinstance(val, float):
+            assert math.isfinite(val), f"Non-finite float at {path}"
+            return
+        if isinstance(val, dict):
+            for k, v in val.items():
+                assert isinstance(k, str), f"Non-string key {k!r} at {path}"
+                assert_strictly_json_native(v, f"{path}.{k}")
+            return
+        if isinstance(val, list):
+            for i, item in enumerate(val):
+                assert_strictly_json_native(item, f"{path}[{i}]")
+            return
+        pytest.fail(f"Non-JSON-native type {type(val).__name__} at {path}: {val!r}")
+
+    assert_strictly_json_native(prov)
+
+    # Verify voice_profile in provenance has lists, not tuples
+    assert isinstance(prov["policy"]["voice_profile"]["matrix"], list)
+    assert isinstance(prov["policy"]["voice_profile"]["matrix"][0], list)
+    assert isinstance(prov["policy"]["voice_profile"]["voices"][0]["alternates"], list)
+
+    # 2. JSON roundtrip with allow_nan=False
+    payload = json.dumps(
+        prov,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    restored = json.loads(payload)
+    assert restored == prov
+
+    # 3. Model serialization checks
+    dump_dict = contract.model_dump()
+    assert dump_dict["policy"]["voice_profile"] == restored["policy"]["voice_profile"]
+
+    dump_json_mode = contract.model_dump(mode="json")
+    assert_strictly_json_native(dump_json_mode)
+    assert dump_json_mode["policy"]["voice_profile"] == restored["policy"]["voice_profile"]
+
+    json_str = contract.model_dump_json()
+    assert "af_heart" in json_str
+
+
+@pytest.mark.parametrize("bad_float", [math.nan, math.inf, -math.inf])
+def test_non_finite_floats_fail_closed(bad_float: float):
+    """Non-finite floats (NaN, +Inf, -Inf) must fail closed at both top-level and nested positions."""
+    # Top-level float
+    with pytest.raises((ValueError, ValidationError)):
+        resolve_canonical_production_contract(
+            _make_dummy_request(voice_profile={"pitch": bad_float})
+        )
+
+    # Nested level float
+    with pytest.raises((ValueError, ValidationError)):
+        resolve_canonical_production_contract(
+            _make_dummy_request(
+                voice_profile={"nested": {"levels": {"pitch": bad_float}}}
+            )
+        )
+
+    # Inside nested list
+    with pytest.raises((ValueError, ValidationError)):
+        resolve_canonical_production_contract(
+            _make_dummy_request(
+                voice_profile={"matrix": [[1.0, bad_float], [3.0, 4.0]]}
+            )
         )
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import os
 from collections.abc import Mapping
 from typing import Any
@@ -154,16 +155,25 @@ class CanonicalProductionLineage(BaseModel):
     render_job_id: UUID | None = None
 
 
+def _thaw_json(value: Any) -> Any:
+    """Recursively thaw FrozenDict and tuple containers to native JSON dict and list structures."""
+    if isinstance(value, FrozenDict):
+        return {key: _thaw_json(value[key]) for key in sorted(value)}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
 class FrozenDict(Mapping):
     """Immutable snapshot dictionary for canonical production contracts.
 
     Recursively freezes:
     - nested mappings -> FrozenDict
     - nested lists/tuples -> tuple
-    - JSON scalars (str, int, float, bool, None) -> preserved
+    - JSON scalars (str, int, finite float, bool, None) -> preserved
 
     Any attempt to mutate raises TypeError or AttributeError.
-    Unsupported mutable types (e.g. set, custom objects) fail closed during construction.
+    Unsupported mutable types (e.g. set, custom objects) or non-finite floats fail closed.
     """
 
     __slots__ = ("_data", "_hash")
@@ -182,7 +192,13 @@ class FrozenDict(Mapping):
     def _freeze(cls, val: Any) -> Any:
         if isinstance(val, bool):
             return val
-        if isinstance(val, (str, int, float)) or val is None:
+        if isinstance(val, int):
+            return val
+        if isinstance(val, float):
+            if not math.isfinite(val):
+                raise ValueError(f"Non-finite float {val} is not allowed in canonical voice profile")
+            return val
+        if isinstance(val, str) or val is None:
             return val
         if isinstance(val, Mapping):
             return FrozenDict(val)
@@ -246,18 +262,7 @@ class FrozenDict(Mapping):
 
     def to_dict(self) -> dict[str, Any]:
         """Recursively thaw to a standard JSON-compatible Python dictionary."""
-        out: dict[str, Any] = {}
-        for k in sorted(self._data.keys()):
-            v = self._data[k]
-            if isinstance(v, FrozenDict):
-                out[k] = v.to_dict()
-            elif isinstance(v, tuple):
-                out[k] = [
-                    item.to_dict() if isinstance(item, FrozenDict) else item for item in v
-                ]
-            else:
-                out[k] = v
-        return out
+        return _thaw_json(self)
 
     def __repr__(self) -> str:
         return f"FrozenDict({self._data!r})"
