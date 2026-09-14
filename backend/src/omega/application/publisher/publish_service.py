@@ -571,6 +571,21 @@ class PublishExecutionService:
                 "Production PUBLISH_VIDEO requires MissionExecution identity."
             )
 
+        # Structural identity must be proven before attempt creation, OAuth,
+        # upload-session creation, or any provider adapter call. Canonical
+        # private canaries additionally require the complete scheduler graph.
+        from omega.application.publisher.canonical_canary_service import (
+            CanonicalCanaryError,
+            CanonicalCanaryService,
+        )
+
+        try:
+            await CanonicalCanaryService.validate_pre_provider_identity(
+                session, intent=intent, task=task, mission=mission
+            )
+        except CanonicalCanaryError as exc:
+            raise PublishExecutionError(str(exc)) from exc
+
         # Update intent claim fencing
         intent.state = PublishIntentState.CLAIMED.value
         intent.claim_token = claim_token
