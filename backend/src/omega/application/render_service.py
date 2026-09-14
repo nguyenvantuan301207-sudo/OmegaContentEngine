@@ -6,6 +6,7 @@ import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,12 +16,13 @@ from omega.application.durable_dispatch import DurableDispatchService
 from omega.application.ffmpeg_renderer import FFmpegExecutionError, FFmpegRenderer
 from omega.application.media_probe import MediaProbe
 from omega.application.media_storage import LocalMediaStorageProvider, compute_sha256
+from omega.application.production_contract import (
+    resolve_canonical_production_contract,
+)
 from omega.application.production_qa import ProductionQAEngine
-from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.application.template_payload_resolver import TemplatePayloadError
 from omega.domain.channel_style import (
     extract_channel_style_profile,
-    resolve_effective_subtitle_style,
 )
 from omega.domain.production import (
     AssetType,
@@ -797,31 +799,40 @@ class ProductionRenderService:
         if video_codec.lower() not in ("h264", "libx264"):
             raise ValueError(f"V2 unsupported codec: {video_codec}")
 
-        render_settings = dict(req.metadata_ or {}).get("render_settings", {})
-        raw_subtitle_style = render_settings.get("subtitle_style")
-
         channel_style = None
+        ch = None
         if req.channel_id:
             ch_res = await session.execute(select(Channel).where(Channel.id == req.channel_id))
             ch = ch_res.scalar_one_or_none()
             if ch:
                 channel_style = extract_channel_style_profile(ch.metadata_)
 
-        subtitle_style = resolve_effective_subtitle_style(
-            channel_style=channel_style,
-            request_subtitle_style=SubtitleRenderStyle.model_validate(raw_subtitle_style) if raw_subtitle_style else None,
-        )
+        contract = resolve_canonical_production_contract(req, channel=ch)
+        subtitle_style = contract.policy.subtitle_style
+        subtitle_mode = contract.policy.subtitle_mode
+        subtitle_fallback_policy = contract.policy.subtitle_fallback_policy
+
+        render_settings = (req.metadata_ or {}).get("render_settings") or {}
+        explicit_sub_mode = render_settings.get("subtitle_mode")
+
+        v2_kwargs: dict[str, Any] = {
+            "fps": fps,
+            "voice_profile": req.voice_profile,
+            "subtitle_enabled": (subtitle_mode.value != "OFF"),
+            "subtitle_style": subtitle_style,
+            "style_profile": channel_style,
+        }
+        if explicit_sub_mode is not None:
+            v2_kwargs["subtitle_mode"] = subtitle_mode
+            v2_kwargs["subtitle_fallback_policy"] = subtitle_fallback_policy
+            v2_kwargs["contract"] = contract
 
         # V2 execution
         result = await self.visual_production_service.render_mission_execution(
             session,
             req.mission_execution_id,
             req.content_request_id,
-            fps=fps,
-            voice_profile=req.voice_profile,
-            subtitle_enabled=True,
-            subtitle_style=subtitle_style,
-            style_profile=channel_style,
+            **v2_kwargs,
         )
 
         # Validate V2 Result Lineage
@@ -885,6 +896,14 @@ class ProductionRenderService:
                 for scene in runtime_scene_data
             ],
         }
+        if hasattr(result, "requested_subtitle_mode"):
+            render_provenance["requested_subtitle_mode"] = result.requested_subtitle_mode
+            render_provenance["effective_subtitle_mode"] = result.effective_subtitle_mode
+            render_provenance["subtitle_fallback_applied"] = result.subtitle_fallback_applied
+            render_provenance["subtitle_fallback_reason"] = result.subtitle_fallback_reason
+            render_provenance["subtitle_timing_source"] = result.subtitle_timing_source
+            if getattr(result, "subtitle_mode_decision", None) is not None:
+                render_provenance["subtitle_mode_decision"] = result.subtitle_mode_decision.model_dump()
 
         return (
             getattr(result, "narration_quality", None),

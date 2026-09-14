@@ -63,6 +63,89 @@ class SubtitleFallbackPolicy(enum.StrEnum):
     STANDARD_FALLBACK = "STANDARD_FALLBACK"
 
 
+class SubtitleTimingSource(enum.StrEnum):
+    """Authority source of subtitle timing data."""
+
+    PROVIDER_WORD_TIMING = "PROVIDER_WORD_TIMING"
+    DERIVED_SEGMENT_TIMING = "DERIVED_SEGMENT_TIMING"
+    NONE = "NONE"
+
+
+class SubtitleModeDecision(BaseModel):
+    """Deterministic decision result for subtitle rendering mode."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    requested_mode: SubtitleMode
+    effective_mode: SubtitleMode
+    fallback_applied: bool = False
+    fallback_reason: str | None = None
+    timing_source: SubtitleTimingSource = SubtitleTimingSource.NONE
+
+
+def evaluate_subtitle_mode_decision(
+    requested_mode: SubtitleMode,
+    fallback_policy: SubtitleFallbackPolicy = SubtitleFallbackPolicy.STANDARD_FALLBACK,
+    *,
+    has_word_timing: bool = False,
+    timing_available: bool = True,
+    timing_error_reason: str | None = None,
+    segment_timing_available: bool = True,
+) -> SubtitleModeDecision:
+    """Evaluate requested subtitle mode against timing capability to determine effective mode."""
+    if requested_mode == SubtitleMode.OFF:
+        return SubtitleModeDecision(
+            requested_mode=SubtitleMode.OFF,
+            effective_mode=SubtitleMode.OFF,
+            fallback_applied=False,
+            fallback_reason=None,
+            timing_source=SubtitleTimingSource.NONE,
+        )
+
+    if requested_mode == SubtitleMode.STANDARD:
+        return SubtitleModeDecision(
+            requested_mode=SubtitleMode.STANDARD,
+            effective_mode=SubtitleMode.STANDARD,
+            fallback_applied=False,
+            fallback_reason=None,
+            timing_source=SubtitleTimingSource.DERIVED_SEGMENT_TIMING
+            if segment_timing_available
+            else SubtitleTimingSource.NONE,
+        )
+
+    if requested_mode == SubtitleMode.KARAOKE:
+        if has_word_timing:
+            return SubtitleModeDecision(
+                requested_mode=SubtitleMode.KARAOKE,
+                effective_mode=SubtitleMode.KARAOKE,
+                fallback_applied=False,
+                fallback_reason=None,
+                timing_source=SubtitleTimingSource.PROVIDER_WORD_TIMING,
+            )
+        if timing_available:
+            return SubtitleModeDecision(
+                requested_mode=SubtitleMode.KARAOKE,
+                effective_mode=SubtitleMode.KARAOKE,
+                fallback_applied=False,
+                fallback_reason=None,
+                timing_source=SubtitleTimingSource.DERIVED_SEGMENT_TIMING,
+            )
+        if fallback_policy == SubtitleFallbackPolicy.STANDARD_FALLBACK:
+            return SubtitleModeDecision(
+                requested_mode=SubtitleMode.KARAOKE,
+                effective_mode=SubtitleMode.STANDARD,
+                fallback_applied=True,
+                fallback_reason=timing_error_reason
+                or "karaoke_word_timing_unavailable",
+                timing_source=SubtitleTimingSource.DERIVED_SEGMENT_TIMING
+                if segment_timing_available
+                else SubtitleTimingSource.NONE,
+            )
+        raise ValueError(f"Unsupported fallback policy: '{fallback_policy}'")
+
+    raise ValueError(f"Invalid subtitle_mode: '{requested_mode}'")
+
+
 class VisualAssetMode(enum.StrEnum):
     """Visual asset sourcing mode."""
 

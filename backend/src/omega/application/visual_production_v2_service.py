@@ -29,6 +29,11 @@ from omega.application.brand_asset_resolver import (
 from omega.application.ffmpeg_renderer import FFmpegRenderer
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.narration_provider import NarrationProvider
+from omega.application.production_contract import (
+    CanonicalProductionContract,
+    _normalize_subtitle_fallback_policy,
+    _normalize_subtitle_mode,
+)
 from omega.application.storyboard_engine import (
     StoryboardEngine,
     StoryboardScene,
@@ -47,6 +52,12 @@ from omega.application.visual_direction import VisualAssetKind, VisualDirector
 from omega.application.visual_template_renderer import VisualTemplateRenderer
 from omega.domain.channel_dna import BrandFormat, resolve_production_brand_spec
 from omega.domain.channel_style import ChannelStyleProfile, extract_channel_style_profile
+from omega.domain.production import (
+    SubtitleFallbackPolicy,
+    SubtitleMode,
+    SubtitleModeDecision,
+    evaluate_subtitle_mode_decision,
+)
 from omega.infrastructure.browser_capture_runtime import BrowserCaptureRuntime
 from omega.infrastructure.models import (
     Channel,
@@ -170,6 +181,12 @@ class VerticalSliceRenderResult(BaseModel):
     subtitle_enabled: bool = False
     karaoke_subtitles_enabled: bool = False
     subtitle_mode: str = "sentence"
+    requested_subtitle_mode: str = "STANDARD"
+    effective_subtitle_mode: str = "STANDARD"
+    subtitle_fallback_applied: bool = False
+    subtitle_fallback_reason: str | None = None
+    subtitle_timing_source: str = "DERIVED_SEGMENT_TIMING"
+    subtitle_mode_decision: SubtitleModeDecision | None = None
 
 
 _STOPWORDS = frozenset({
@@ -291,6 +308,9 @@ class VisualProductionV2Service:
         subtitle_enabled: bool = False,
         subtitle_style: SubtitleRenderStyle | None = None,
         style_profile: ChannelStyleProfile | None = None,
+        subtitle_mode: SubtitleMode | str | None = None,
+        subtitle_fallback_policy: SubtitleFallbackPolicy | str | None = None,
+        contract: CanonicalProductionContract | None = None,
     ) -> VerticalSliceRenderResult:
         audio_mix_enabled = background_music is not None or bool(sfx_inputs)
 
@@ -420,14 +440,41 @@ class VisualProductionV2Service:
         elif style_profile is None:
             style_profile = ChannelStyleProfile()
 
-        if subtitle_enabled and not self._narration_provider:
-            raise VerticalSliceError("Subtitles require narration")
+        # Resolve canonical subtitle mode and policy
+        if contract is not None:
+            canonical_sub_mode = contract.policy.subtitle_mode
+            canonical_sub_fallback = contract.policy.subtitle_fallback_policy
+            if subtitle_style is None:
+                subtitle_style = contract.policy.subtitle_style
+        else:
+            raw_sub_mode = subtitle_mode
+            canonical_sub_fallback = _normalize_subtitle_fallback_policy(subtitle_fallback_policy)
+            canonical_sub_mode = _normalize_subtitle_mode(
+                raw_mode=raw_sub_mode,
+                subtitle_enabled=subtitle_enabled if (raw_sub_mode is None and "subtitle_enabled" in locals()) else None,
+                style_karaoke=getattr(subtitle_style, "karaoke", None),
+            )
+
         if subtitle_style is not None:
             resolved_subtitle_style = subtitle_style
         elif style_profile is not None:
             resolved_subtitle_style = style_profile.resolve_effective_style()
         else:
             resolved_subtitle_style = SubtitleRenderStyle()
+
+        # Check narration prerequisite if subtitles are requested
+        if canonical_sub_mode != SubtitleMode.OFF and not self._narration_provider:
+            raise VerticalSliceError("Subtitles require narration")
+
+        # Evaluate preliminary subtitle mode decision
+        subtitle_decision = evaluate_subtitle_mode_decision(
+            requested_mode=canonical_sub_mode,
+            fallback_policy=canonical_sub_fallback,
+            has_word_timing=False,
+            timing_available=True,
+        )
+
+        effective_subtitle_enabled = (subtitle_decision.effective_mode != SubtitleMode.OFF)
 
         # 3. Deterministic Run Fingerprint & Idempotency Check
         fingerprint_input = (
@@ -456,10 +503,11 @@ class VisualProductionV2Service:
             if voice_profile:
                 normalized_vp = json.dumps(voice_profile, sort_keys=True)
                 fingerprint_input += f":{normalized_vp}"
-            if subtitle_enabled:
+            if effective_subtitle_enabled:
                 subtitle_marker = f"karaoke:{KARAOKE_SUBTITLE_VERSION}:words={KARAOKE_MAX_WORDS_PER_CUE}:chars={KARAOKE_MAX_CHARS_PER_CUE}"
                 fingerprint_input += f":{subtitle_marker}"
                 fingerprint_input += ":style=" + resolved_subtitle_style.model_dump_json()
+                fingerprint_input += f":submode={subtitle_decision.effective_mode.value}"
         normalized_sfx = []
         if audio_mix_enabled:
             audio_mix_fp = {}
@@ -610,6 +658,25 @@ class VisualProductionV2Service:
                             ) else "sentence"
                         )
                     ),
+                    requested_subtitle_mode=manifest_data.get(
+                        "requested_subtitle_mode",
+                        "KARAOKE" if manifest_data.get("karaoke_subtitles_enabled") else ("STANDARD" if manifest_data.get("subtitle_enabled", True) else "OFF"),
+                    ),
+                    effective_subtitle_mode=manifest_data.get(
+                        "effective_subtitle_mode",
+                        "KARAOKE" if manifest_data.get("karaoke_subtitles_enabled") else ("STANDARD" if manifest_data.get("subtitle_enabled", True) else "OFF"),
+                    ),
+                    subtitle_fallback_applied=bool(manifest_data.get("subtitle_fallback_applied", False)),
+                    subtitle_fallback_reason=manifest_data.get("subtitle_fallback_reason"),
+                    subtitle_timing_source=manifest_data.get(
+                        "subtitle_timing_source",
+                        "DERIVED_SEGMENT_TIMING" if manifest_data.get("subtitle_enabled", True) else "NONE",
+                    ),
+                    subtitle_mode_decision=(
+                        SubtitleModeDecision(**manifest_data["subtitle_mode_decision"])
+                        if manifest_data.get("subtitle_mode_decision")
+                        else None
+                    ),
                 )
             except Exception as e:
                 raise VerticalSliceError(f"Incomplete or corrupt prior run: {e}") from e
@@ -737,18 +804,62 @@ class VisualProductionV2Service:
 
                         scene_subtitle_cues = 0
                         scene_subtitle_text_truncated = False
-                        if subtitle_enabled:
+                        ass_path = None
+                        if effective_subtitle_enabled:
+                            text_for_cues = scene.narration_excerpt or ""
+                            words_in_excerpt = [w for w in text_for_cues.split() if w]
+                            # Validate karaoke timing authority/sufficiency if karaoke was requested
+                            if subtitle_decision.requested_mode == SubtitleMode.KARAOKE:
+                                has_provider_word_timing = bool(
+                                    audio_asset.get("word_timing") or audio_asset.get("word_timings")
+                                )
+                                karaoke_timing_available = audio_asset.get("karaoke_timing_available", True)
+                                karaoke_timing_error = audio_asset.get("karaoke_timing_error")
+
+                                if has_provider_word_timing:
+                                    subtitle_decision = evaluate_subtitle_mode_decision(
+                                        requested_mode=canonical_sub_mode,
+                                        fallback_policy=canonical_sub_fallback,
+                                        has_word_timing=True,
+                                        timing_available=True,
+                                    )
+                                elif not karaoke_timing_available or karaoke_timing_error:
+                                    subtitle_decision = evaluate_subtitle_mode_decision(
+                                        requested_mode=canonical_sub_mode,
+                                        fallback_policy=canonical_sub_fallback,
+                                        has_word_timing=False,
+                                        timing_available=False,
+                                        timing_error_reason=karaoke_timing_error or "karaoke_word_timing_unavailable",
+                                    )
+                                elif not words_in_excerpt or duration_ms < len(words_in_excerpt) or duration_ms <= 0:
+                                    subtitle_decision = evaluate_subtitle_mode_decision(
+                                        requested_mode=canonical_sub_mode,
+                                        fallback_policy=canonical_sub_fallback,
+                                        has_word_timing=False,
+                                        timing_available=False,
+                                        timing_error_reason="insufficient_word_timing_duration",
+                                    )
+                                else:
+                                    subtitle_decision = evaluate_subtitle_mode_decision(
+                                        requested_mode=canonical_sub_mode,
+                                        fallback_policy=canonical_sub_fallback,
+                                        has_word_timing=False,
+                                        timing_available=True,
+                                    )
+
+                            effective_mode = subtitle_decision.effective_mode
+                            use_karaoke_highlight = (effective_mode == SubtitleMode.KARAOKE)
                             segment = {
-                                "text": scene.narration_excerpt,
+                                "text": text_for_cues,
                                 "start_ms": 0,
                                 "duration_ms": duration_ms,
                             }
                             try:
                                 scene_cues = generate_karaoke_cues(
                                     [segment],
-                                    max_words_per_cue=KARAOKE_MAX_WORDS_PER_CUE if resolved_subtitle_style.karaoke else SENTENCE_MAX_WORDS_PER_CUE,
-                                    max_chars_per_cue=KARAOKE_MAX_CHARS_PER_CUE if resolved_subtitle_style.karaoke else SENTENCE_MAX_CHARS_PER_CUE,
-                                    sentence_mode=not resolved_subtitle_style.karaoke,
+                                    max_words_per_cue=KARAOKE_MAX_WORDS_PER_CUE if use_karaoke_highlight else SENTENCE_MAX_WORDS_PER_CUE,
+                                    max_chars_per_cue=KARAOKE_MAX_CHARS_PER_CUE if use_karaoke_highlight else SENTENCE_MAX_CHARS_PER_CUE,
+                                    sentence_mode=not use_karaoke_highlight,
                                 )
                                 scene_subtitle_cues = len(scene_cues)
 
@@ -772,11 +883,14 @@ class VisualProductionV2Service:
                                     )
                                     runtime_cue_order += 1
 
+                                # Build effective style with karaoke flag matching effective mode
+                                effective_style = resolved_subtitle_style.model_copy(update={"karaoke": use_karaoke_highlight})
+
                                 ass_document = generate_karaoke_ass_document(
                                     scene_cues,
                                     width=1920,
                                     height=1080,
-                                    style=resolved_subtitle_style,
+                                    style=effective_style,
                                 )
                                 ass_content = ass_document.content
                                 scene_subtitle_text_truncated = any(
@@ -788,7 +902,7 @@ class VisualProductionV2Service:
                                 if not ass_path.exists() or ass_path.stat().st_size <= 0:
                                     raise VerticalSliceError(f"ASS file missing or empty for scene {scene.sequence_index}")
                             except Exception as e:
-                                raise VerticalSliceError(f"Karaoke generation failed: {self._sanitize_error(e)}") from e
+                                raise VerticalSliceError(f"Subtitle generation failed: {self._sanitize_error(e)}") from e
 
                     # Meaningful query fallback for IMAGE and BROLL
                     if effective_strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
@@ -884,7 +998,7 @@ class VisualProductionV2Service:
 
                     if self._narration_provider:
                         mux_video_input = scene_visual_out_path
-                        if subtitle_enabled:
+                        if effective_subtitle_enabled and ass_path is not None:
                             scene_subtitled_visual_path = work_dir / f"scene_{scene.sequence_index:03d}_subtitled.mp4"
                             try:
                                 await self._ffmpeg_renderer.burn_ass_subtitles(
@@ -929,8 +1043,8 @@ class VisualProductionV2Service:
                             content_sha256=final_scene_sha,
                             audio_content_sha256=audio_sha,
                             audio_duration_seconds=audio_duration_sec,
-                            subtitle_cue_count=scene_subtitle_cues if subtitle_enabled else None,
-                            subtitle_text_truncated=scene_subtitle_text_truncated if subtitle_enabled else None,
+                            subtitle_cue_count=scene_subtitle_cues if effective_subtitle_enabled else None,
+                            subtitle_text_truncated=scene_subtitle_text_truncated if effective_subtitle_enabled else None,
                             text_fitting=tuple(
                                 decision.model_dump() for decision in document.text_fitting
                             ),
@@ -1191,19 +1305,26 @@ class VisualProductionV2Service:
                 "content_sha256": final_sha,
                 **audio_mix_manifest,
                 "narration_enabled": bool(self._narration_provider),
-                "subtitle_enabled": subtitle_enabled,
+                "subtitle_enabled": effective_subtitle_enabled,
                 "karaoke_subtitles_enabled": bool(
-                    subtitle_enabled
-                    and resolved_subtitle_style is not None
-                    and getattr(resolved_subtitle_style, "karaoke", False)
+                    effective_subtitle_enabled
+                    and subtitle_decision.effective_mode == SubtitleMode.KARAOKE
                 ),
                 "subtitle_mode": (
                     "karaoke"
-                    if (resolved_subtitle_style is not None and getattr(resolved_subtitle_style, "karaoke", False))
+                    if subtitle_decision.effective_mode == SubtitleMode.KARAOKE
                     else "sentence"
                 ),
+                "requested_subtitle_mode": subtitle_decision.requested_mode.value,
+                "effective_subtitle_mode": subtitle_decision.effective_mode.value,
+                "subtitle_fallback_applied": subtitle_decision.fallback_applied,
+                "subtitle_fallback_reason": subtitle_decision.fallback_reason,
+                "subtitle_timing_source": subtitle_decision.timing_source.value,
+                "subtitle_mode_decision": subtitle_decision.model_dump(),
                 "subtitle_style_applied": (
-                    resolved_subtitle_style.model_dump() if subtitle_enabled else None
+                    resolved_subtitle_style.model_copy(update={"karaoke": subtitle_decision.effective_mode == SubtitleMode.KARAOKE}).model_dump()
+                    if effective_subtitle_enabled
+                    else None
                 ),
                 "style_profile_applied": (
                     style_profile.model_dump() if style_profile else None
@@ -1248,20 +1369,29 @@ class VisualProductionV2Service:
             runtime_narration_segments=tuple(runtime_narration_segments),
             runtime_subtitle_cues=tuple(runtime_subtitle_cues),
             runtime_scenes=tuple(scene_results),
-            subtitle_style_applied=resolved_subtitle_style if subtitle_enabled else None,
+            subtitle_style_applied=(
+                resolved_subtitle_style.model_copy(update={"karaoke": subtitle_decision.effective_mode == SubtitleMode.KARAOKE})
+                if effective_subtitle_enabled
+                else None
+            ),
             style_profile_applied=style_profile,
             effective_fps_mode="CFR",
-            subtitle_enabled=subtitle_enabled,
+            subtitle_enabled=effective_subtitle_enabled,
             karaoke_subtitles_enabled=bool(
-                subtitle_enabled
-                and resolved_subtitle_style is not None
-                and getattr(resolved_subtitle_style, "karaoke", False)
+                effective_subtitle_enabled
+                and subtitle_decision.effective_mode == SubtitleMode.KARAOKE
             ),
             subtitle_mode=(
                 "karaoke"
-                if (resolved_subtitle_style is not None and getattr(resolved_subtitle_style, "karaoke", False))
+                if subtitle_decision.effective_mode == SubtitleMode.KARAOKE
                 else "sentence"
             ),
+            requested_subtitle_mode=subtitle_decision.requested_mode.value,
+            effective_subtitle_mode=subtitle_decision.effective_mode.value,
+            subtitle_fallback_applied=subtitle_decision.fallback_applied,
+            subtitle_fallback_reason=subtitle_decision.fallback_reason,
+            subtitle_timing_source=subtitle_decision.timing_source.value,
+            subtitle_mode_decision=subtitle_decision,
         )
 
 

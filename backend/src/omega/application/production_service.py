@@ -20,6 +20,7 @@ from omega.domain.production import (
     ProductionRequestCreate,
     ProductionRequestStatus,
     RenderJobState,
+    SubtitleMode,
 )
 from omega.infrastructure.models import (
     AssetRequirement,
@@ -67,6 +68,7 @@ class ProductionService:
         channel_id: uuid.UUID,
         request_id: uuid.UUID,
         subtitle_style: SubtitleRenderStyle,
+        subtitle_mode: SubtitleMode | str | None = None,
     ) -> ProductionRequest:
         """Persist validated V2 render settings in existing request metadata JSON."""
         stmt = select(ProductionRequest).where(
@@ -80,9 +82,22 @@ class ProductionService:
             raise ProductionStateError("Render settings cannot change while a render is running.")
 
         metadata = dict(request.metadata_ or {})
-        metadata["render_settings"] = {
-            "subtitle_style": subtitle_style.model_dump(),
-        }
+        render_settings = dict(metadata.get("render_settings") or {})
+        render_settings["subtitle_style"] = subtitle_style.model_dump()
+        if subtitle_mode is not None:
+            if isinstance(subtitle_mode, SubtitleMode):
+                render_settings["subtitle_mode"] = subtitle_mode.value
+            else:
+                s = str(subtitle_mode).strip().upper()
+                if s in ("OFF", "DISABLED", "NONE", "FALSE"):
+                    render_settings["subtitle_mode"] = SubtitleMode.OFF.value
+                elif s in ("STANDARD", "SENTENCE", "TRUE"):
+                    render_settings["subtitle_mode"] = SubtitleMode.STANDARD.value
+                elif s in ("KARAOKE",):
+                    render_settings["subtitle_mode"] = SubtitleMode.KARAOKE.value
+                else:
+                    raise ValueError(f"Invalid subtitle_mode: '{subtitle_mode}'")
+        metadata["render_settings"] = render_settings
         request.metadata_ = metadata
         await session.commit()
         await session.refresh(request)

@@ -33,6 +33,7 @@ from omega.domain.production import (
     ProductionSceneResponse,
     RenderPlanResponse,
     SubtitleCueResponse,
+    SubtitleMode,
 )
 from omega.infrastructure.database import get_async_session
 from omega.infrastructure.models import (
@@ -57,6 +58,7 @@ class ProductionRenderSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     subtitle_style: SubtitleRenderStyle
+    subtitle_mode: SubtitleMode | str | None = None
 
 
 def _get_production_service() -> ProductionService:
@@ -148,8 +150,9 @@ async def update_render_settings(
             channel_id,
             request_id,
             payload.subtitle_style,
+            payload.subtitle_mode,
         )
-    except (ProductionLineageError, ProductionStateError) as exc:
+    except (ProductionLineageError, ProductionStateError, ValueError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
