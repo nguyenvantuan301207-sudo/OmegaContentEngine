@@ -1970,12 +1970,56 @@ class MediaArtifact(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    runtime_truth: Mapped[ProductionRuntimeTruth | None] = relationship(
+        "ProductionRuntimeTruth",
+        back_populates="artifact",
+        cascade="all, delete-orphan",
+        uselist=False,
+    )
     guardian_checks: Mapped[list[GuardianCheck]] = relationship(
         "GuardianCheck", back_populates="media_artifact"
     )
 
     def __repr__(self) -> str:
         return f"<MediaArtifact id={self.id} type={self.artifact_type} v={self.version} current={self.is_current}>"
+
+
+class ProductionRuntimeTruth(Base):
+    """Immutable runtime truth snapshot owned by exactly one media artifact."""
+
+    __tablename__ = "production_runtime_truth"
+    __table_args__ = (
+        CheckConstraint(
+            "schema_version > 0",
+            name="ck_production_runtime_truth_schema_version_positive",
+        ),
+        CheckConstraint(
+            "length(manifest_run_fingerprint) = 64",
+            name="ck_production_runtime_truth_manifest_fingerprint_length",
+        ),
+    )
+
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("media_artifacts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    manifest_run_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    artifact: Mapped[MediaArtifact] = relationship(
+        "MediaArtifact", back_populates="runtime_truth"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ProductionRuntimeTruth artifact_id={self.artifact_id} "
+            f"schema_version={self.schema_version}>"
+        )
 
 
 class ProductionQAResult(Base):
