@@ -397,6 +397,7 @@ class PublisherOperationsQueryService:
                     "title": intent.title,
                     "intent_state": intent.state,
                     "requested_privacy_status": intent.requested_privacy_status,
+                    "effective_privacy_status": attempt.effective_privacy_status,
                     "attempt_id": attempt.id,
                     "attempt_number": attempt.attempt_number,
                     "attempt_state": attempt.state,
@@ -718,6 +719,7 @@ class PublisherOperationsQueryService:
                     "channel_id": intent.channel_id,
                     "channel_name": ch.name if ch else None,
                     "requested_privacy_status": intent.requested_privacy_status,
+                    "effective_privacy_status": attempt.effective_privacy_status,
                 }
             )
 
@@ -795,6 +797,7 @@ class PublisherOperationsQueryService:
                     "started_at": att.started_at,
                     "completed_at": att.completed_at,
                     "duration_seconds": duration,
+                    "effective_privacy_status": att.effective_privacy_status,
                 }
             )
 

@@ -79,6 +79,7 @@ class ActivePublicationItem(BaseModel):
     title: str
     intent_state: str
     requested_privacy_status: str
+    effective_privacy_status: str | None = None
     attempt_id: UUID
     attempt_number: int
     attempt_state: str
@@ -209,6 +210,7 @@ class PublicationHistoryItem(BaseModel):
     channel_id: UUID
     channel_name: str | None = None
     requested_privacy_status: str
+    effective_privacy_status: str | None = None
 
 
 class PublicationHistoryListResponse(BaseModel):
@@ -243,6 +245,7 @@ class AttemptHistoryDetail(BaseModel):
     started_at: datetime
     completed_at: datetime | None = None
     duration_seconds: float | None = None
+    effective_privacy_status: str | None = None
 
 
 class UploadSessionDetail(BaseModel):

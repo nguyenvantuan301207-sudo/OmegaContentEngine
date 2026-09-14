@@ -643,7 +643,8 @@ async def test_timezone_normalization_and_naive_rejection(db_session: AsyncSessi
     # 3. +07:00 timezone -> normalized to UTC
     tz_vn = zoneinfo.ZoneInfo("Asia/Ho_Chi_Minh")
     local_vn = datetime(2026, 9, 14, 10, 0, 0, tzinfo=tz_vn)
-    norm_utc = PublishCalendarService.normalize_schedule_timestamp(local_vn, now=now)
+    fixed_now = datetime(2026, 9, 14, 2, 59, 0, tzinfo=UTC)
+    norm_utc = PublishCalendarService.normalize_schedule_timestamp(local_vn, now=fixed_now)
     assert norm_utc.tzinfo == UTC
     assert norm_utc.hour == 3  # 10:00 +07 -> 03:00 UTC
 

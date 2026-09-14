@@ -34,6 +34,7 @@ from omega.application.publisher.failure_policy import (
     determine_publisher_recovery_action,
 )
 from omega.application.publisher.recovery_operations import PublisherRecoveryOperationsService
+from omega.application.publisher.visibility_policy import ControlledVisibilityPolicy
 from omega.config import get_settings
 from omega.domain.guardian import GuardianCheckpoint
 from omega.domain.mission import MissionState
@@ -49,6 +50,7 @@ from omega.domain.publisher import (
 )
 from omega.domain.task import TaskState
 from omega.infrastructure.models import (
+    Channel,
     CredentialVault,
     MediaArtifact,
     Mission,
@@ -194,16 +196,20 @@ class PublishExecutionService:
             ):
                 account_valid = False
                 errors.append("Private canary mode permits YouTube publication only.")
-            try:
-                requested_privacy = PrivacyStatus(intent.requested_privacy_status)
-                privacy_valid = requested_privacy == PrivacyStatus.PRIVATE or (
-                    not settings.publisher_private_canary_mode
-                    and bool(intent.platform_custom_options.get("privacy_fallback_allowed", False))
+            channel = await session.get(Channel, intent.channel_id)
+            decision = ControlledVisibilityPolicy.evaluate_visibility(
+                intent=intent,
+                channel=channel,
+                account=account,
+                settings=settings,
+            )
+            if not decision.is_allowed:
+                errors.append(
+                    decision.error_message or "Controlled visibility policy rejected intent."
                 )
-                if not privacy_valid:
-                    errors.append("Requested privacy contract is not internally valid.")
-            except ValueError as exc:
-                errors.append(f"Invalid requested privacy status: {exc}")
+                privacy_valid = False
+            else:
+                privacy_valid = True
 
         guardian_valid = False
         if artifact is not None and mission is not None and not errors:
@@ -396,24 +402,23 @@ class PublishExecutionService:
             account_valid = True
 
         effective_privacy = PrivacyStatus.PRIVATE
-        try:
-            requested_privacy = PrivacyStatus(intent.requested_privacy_status)
-            effective_privacy = requested_privacy
-            privacy_fallback_allowed = bool(
-                intent.platform_custom_options.get("privacy_fallback_allowed", False)
+        channel = await session.get(Channel, intent.channel_id) if intent else None
+        settings = get_settings()
+        decision = ControlledVisibilityPolicy.evaluate_visibility(
+            intent=intent,
+            channel=channel,
+            account=account,
+            settings=settings,
+        )
+        if not decision.is_allowed:
+            errors.append(
+                decision.error_message or "Controlled visibility policy rejected intent."
             )
-            if requested_privacy != PrivacyStatus.PRIVATE:
-                if not privacy_fallback_allowed:
-                    errors.append(
-                        "Requested privacy status requires verified YouTube API project (privacy fallback disabled)."
-                    )
-                else:
-                    effective_privacy = PrivacyStatus.PRIVATE
-                    privacy_valid = True
-            else:
-                privacy_valid = True
-        except ValueError as e:
-            errors.append(f"Invalid requested privacy status: {e}")
+            privacy_valid = False
+            effective_privacy = decision.effective_privacy
+        else:
+            privacy_valid = True
+            effective_privacy = decision.effective_privacy
 
         # 5. Credential Decryptability & Token Readiness
         if account_valid and account:
@@ -706,72 +711,51 @@ class PublishExecutionService:
             if not account or account.status != "ACTIVE":
                 raise PublishExecutionError("PlatformAccount is not ACTIVE.")
 
-            requested_privacy = PrivacyStatus(intent.requested_privacy_status)
-            effective_privacy = requested_privacy
+            channel = await session.get(Channel, intent.channel_id)
+            if settings.publisher_private_canary_mode and account.platform != "YOUTUBE":
+                raise PublishExecutionError(
+                    "Private canary mode permits YouTube publication only."
+                )
 
-            if settings.publisher_private_canary_mode:
-                if account.platform != "YOUTUBE":
-                    raise PublishExecutionError(
-                        "Private canary mode permits YouTube publication only."
-                    )
-                if requested_privacy != PrivacyStatus.PRIVATE:
-                    await cls._transition_attempt(
-                        session=session,
-                        attempt_id=attempt.id,
-                        new_state=PublishAttemptState.BLOCKED_GUARDIAN,
-                        error_category=PublisherErrorCategory.PRIVACY_RESTRICTION_BLOCKED,
-                        error_message=(
-                            "Private canary mode rejects PUBLIC and UNLISTED requests; "
-                            "submit an explicitly PRIVATE intent."
-                        ),
-                        reason="Server-controlled private canary safety gate rejected intent.",
-                        actor=effective_worker_id,
-                    )
-                    await cls._release_intent(session, intent.id)
-                    await session.commit()
-                    return (
-                        await session.execute(
-                            select(PublishAttempt).where(PublishAttempt.id == attempt.id)
-                        )
-                    ).scalar_one()
-
-            # Core v1: unverified project restriction handling
-            # If requested is PUBLIC/UNLISTED and provider requires PRIVATE:
-            # Check if channel DNA / custom options allows fallback
-            privacy_fallback_allowed = bool(
-                intent.platform_custom_options.get("privacy_fallback_allowed", False)
+            decision = ControlledVisibilityPolicy.evaluate_visibility(
+                intent=intent,
+                channel=channel,
+                account=account,
+                settings=settings,
             )
-            if requested_privacy != PrivacyStatus.PRIVATE:
-                if not privacy_fallback_allowed:
-                    # Default: Block with clear error
-                    await cls._transition_attempt(
-                        session=session,
-                        attempt_id=attempt.id,
-                        new_state=PublishAttemptState.BLOCKED_GUARDIAN,
-                        error_category=PublisherErrorCategory.PRIVACY_RESTRICTION_BLOCKED,
-                        error_message="Requested privacy status requires verified YouTube API project (privacy fallback disabled).",
-                        reason="Privacy restriction check failed without fallback policy.",
-                        actor=effective_worker_id,
-                    )
-                    await cls._release_intent(session, intent.id)
-                    await session.commit()
-                    res_att = await session.execute(
+            if not decision.is_allowed:
+                await cls._transition_attempt(
+                    session=session,
+                    attempt_id=attempt.id,
+                    new_state=PublishAttemptState.BLOCKED_GUARDIAN,
+                    error_category=decision.error_category or PublisherErrorCategory.PRIVACY_RESTRICTION_BLOCKED,
+                    error_message=decision.error_message or "Controlled visibility policy rejected intent.",
+                    reason="Controlled visibility policy rejected intent.",
+                    actor=effective_worker_id,
+                    effective_privacy_status=decision.effective_privacy,
+                )
+                await cls._release_intent(session, intent.id)
+                await session.commit()
+                return (
+                    await session.execute(
                         select(PublishAttempt).where(PublishAttempt.id == attempt.id)
                     )
-                    return res_att.scalar_one()
+                ).scalar_one()
 
-                else:
-                    effective_privacy = PrivacyStatus.PRIVATE
-                    session.add(
-                        PublishAttemptTransition(
-                            id=uuid4(),
-                            publish_attempt_id=attempt.id,
-                            from_state=PublishAttemptState.CREATED.value,
-                            to_state=PublishAttemptState.CREATED.value,
-                            reason="Effective privacy downgraded to PRIVATE per explicit channel fallback policy.",
-                            actor=effective_worker_id,
-                        )
+            effective_privacy = decision.effective_privacy
+            attempt.effective_privacy_status = effective_privacy.value
+
+            if decision.fallback_applied:
+                session.add(
+                    PublishAttemptTransition(
+                        id=uuid4(),
+                        publish_attempt_id=attempt.id,
+                        from_state=PublishAttemptState.CREATED.value,
+                        to_state=PublishAttemptState.CREATED.value,
+                        reason=decision.fallback_reason or "Effective privacy downgraded to PRIVATE per explicit channel fallback policy.",
+                        actor=effective_worker_id,
                     )
+                )
 
             # ── 5. OAuth Token Decryption & Refresh ──
             vault_res = await session.execute(
