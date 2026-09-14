@@ -88,6 +88,65 @@ SENTENCE_MAX_CHARS_PER_CUE = 80
 VISUAL_DIRECTOR_VERSION = "v2"
 
 
+def _derived_karaoke_timing_error(text: str, duration_ms: Any) -> str | None:
+    """Return a deterministic capability error for derived karaoke timing."""
+    normalized_text = " ".join(str(text).split())
+    if not normalized_text:
+        return "blank_subtitle_text"
+    if isinstance(duration_ms, bool) or not isinstance(duration_ms, int):
+        return "missing_or_invalid_segment_duration"
+    if duration_ms <= 0:
+        return "non_positive_segment_duration"
+
+    try:
+        cues = generate_karaoke_cues(
+            [{"text": normalized_text, "start_ms": 0, "duration_ms": duration_ms}],
+            max_words_per_cue=KARAOKE_MAX_WORDS_PER_CUE,
+            max_chars_per_cue=KARAOKE_MAX_CHARS_PER_CUE,
+            sentence_mode=False,
+        )
+    except (TypeError, ValueError):
+        return "derived_karaoke_generation_failed"
+
+    if not cues:
+        return "no_derived_karaoke_cues"
+
+    previous_end_ms = 0
+    allocated_duration_ms = 0
+    for cue in cues:
+        start_ms = cue.get("start_ms")
+        end_ms = cue.get("end_ms")
+        if (
+            not isinstance(start_ms, int)
+            or not isinstance(end_ms, int)
+            or start_ms != previous_end_ms
+            or end_ms <= start_ms
+            or end_ms > duration_ms
+        ):
+            return "non_monotonic_derived_karaoke_cues"
+        words = cue.get("words") or []
+        if not words:
+            return "derived_karaoke_cue_without_words"
+        cue_word_duration_ms = 0
+        for word in words:
+            word_duration_ms = word.get("duration_ms")
+            if (
+                isinstance(word_duration_ms, bool)
+                or not isinstance(word_duration_ms, int)
+                or word_duration_ms < 10
+            ):
+                return "zero_centisecond_karaoke_unit"
+            cue_word_duration_ms += word_duration_ms
+        if cue_word_duration_ms != end_ms - start_ms:
+            return "derived_karaoke_cue_duration_mismatch"
+        allocated_duration_ms += cue_word_duration_ms
+        previous_end_ms = end_ms
+
+    if previous_end_ms != duration_ms or allocated_duration_ms != duration_ms:
+        return "derived_karaoke_duration_not_conserved"
+    return None
+
+
 class VerticalSliceRuntimeNarrationSegment(BaseModel):
     model_config = ConfigDict(frozen=True)
 
@@ -728,13 +787,113 @@ class VisualProductionV2Service:
 
             sorted_scenes = sorted(storyboard.scenes, key=lambda s: s.sequence_index)
 
+            # Resolve narration timing for every scene before any visual render or
+            # subtitle burn.  SubtitleModeDecision is production-render state and
+            # must not change as individual scenes are processed.
+            prepared_narration: dict[int, dict[str, Any]] = {}
+            for scene in sorted_scenes:
+                if scene.estimated_duration_seconds <= 0:
+                    raise VerticalSliceError(
+                        f"Scene {scene.sequence_index} duration {scene.estimated_duration_seconds} <= 0"
+                    )
+                if not self._narration_provider:
+                    continue
+
+                narration_text = " ".join(str(scene.narration_excerpt or "").split())
+                if not narration_text:
+                    raise VerticalSliceError(
+                        f"Empty narration text for scene {scene.sequence_index}"
+                    )
+                try:
+                    audio_asset = await self._narration_provider.synthesize_segment_audio(
+                        channel_id=mission.channel_id,
+                        request_id=content_request_id,
+                        segment={"text": narration_text},
+                        voice_profile=voice_profile,
+                    )
+                except Exception as e:
+                    raise VerticalSliceError(
+                        f"Narration provider failed: {self._sanitize_error(e)}"
+                    ) from e
+
+                rel_uri = audio_asset.get("storage_uri")
+                if not rel_uri:
+                    raise VerticalSliceError("Audio asset missing storage_uri")
+                audio_path = self._narration_storage.resolve_stored_uri(
+                    mission.channel_id, content_request_id, rel_uri
+                )
+                if not audio_path.exists() or audio_path.stat().st_size <= 0:
+                    raise VerticalSliceError("Audio file missing or empty")
+
+                duration_ms = audio_asset.get("duration_ms")
+                if (
+                    isinstance(duration_ms, bool)
+                    or not isinstance(duration_ms, int)
+                    or duration_ms <= 0
+                ):
+                    raise VerticalSliceError("Audio duration missing or zero")
+                if not audio_asset.get("content_hash"):
+                    raise VerticalSliceError("Audio asset missing content_hash")
+
+                scene_start_ms = runtime_cursor_ms
+                scene_end_ms = scene_start_ms + duration_ms
+                runtime_narration_segments.append(
+                    VerticalSliceRuntimeNarrationSegment(
+                        scene_index=scene.sequence_index,
+                        start_ms=scene_start_ms,
+                        end_ms=scene_end_ms,
+                        duration_ms=duration_ms,
+                    )
+                )
+                runtime_cursor_ms = scene_end_ms
+                narration_total_duration_ms += duration_ms
+
+                narration_quality = audio_asset.get("narration_quality")
+                if narration_quality:
+                    narration_qualities.append(narration_quality)
+                narration_ref = audio_asset.get("source_ref")
+                if narration_ref and narration_ref not in narration_source_refs_list:
+                    narration_source_refs_list.append(narration_ref)
+
+                prepared_narration[scene.sequence_index] = {
+                    "asset": audio_asset,
+                    "path": audio_path,
+                    "duration_ms": duration_ms,
+                    "start_ms": scene_start_ms,
+                    "end_ms": scene_end_ms,
+                    "text": narration_text,
+                }
+
+            if canonical_sub_mode == SubtitleMode.KARAOKE:
+                capability_error = None
+                for scene in sorted_scenes:
+                    prepared = prepared_narration.get(scene.sequence_index)
+                    if prepared is None:
+                        capability_error = (
+                            f"scene_{scene.sequence_index}:missing_narration_timing"
+                        )
+                        break
+                    timing_error = _derived_karaoke_timing_error(
+                        prepared["text"], prepared["duration_ms"]
+                    )
+                    if timing_error is not None:
+                        capability_error = f"scene_{scene.sequence_index}:{timing_error}"
+                        break
+                subtitle_decision = evaluate_subtitle_mode_decision(
+                    requested_mode=canonical_sub_mode,
+                    fallback_policy=canonical_sub_fallback,
+                    has_word_timing=False,
+                    timing_available=capability_error is None,
+                    timing_error_reason=capability_error,
+                    segment_timing_available=True,
+                )
+
+            effective_subtitle_enabled = (
+                subtitle_decision.effective_mode != SubtitleMode.OFF
+            )
+
             async with self._browser_runtime_factory() as browser:
                 for scene in sorted_scenes:
-                    if scene.estimated_duration_seconds <= 0:
-                        raise VerticalSliceError(
-                            f"Scene {scene.sequence_index} duration {scene.estimated_duration_seconds} <= 0"
-                        )
-
                     original_strategy = scene.visual_strategy
                     effective_scene = self._apply_v0_compatibility(scene)
                     effective_scene = self._apply_visual_asset_mode_policy(effective_scene)
@@ -744,113 +903,24 @@ class VisualProductionV2Service:
                     audio_duration_sec: float | None = None
                     actual_scene_duration_seconds = effective_scene.estimated_duration_seconds
                     audio_path: Path | None = None
+                    scene_subtitle_cues = 0
+                    scene_subtitle_text_truncated = False
+                    ass_path = None
 
                     if self._narration_provider:
-                        if not scene.narration_excerpt:
-                            raise VerticalSliceError(f"Empty narration text for scene {scene.sequence_index}")
-
-                        try:
-                            audio_asset = await self._narration_provider.synthesize_segment_audio(
-                                channel_id=mission.channel_id,
-                                request_id=content_request_id,
-                                segment={"text": scene.narration_excerpt},
-                                voice_profile=voice_profile,
-                            )
-                        except Exception as e:
-                            raise VerticalSliceError(f"Narration provider failed: {self._sanitize_error(e)}") from e
-
-                        rel_uri = audio_asset.get("storage_uri")
-                        if not rel_uri:
-                            raise VerticalSliceError("Audio asset missing storage_uri")
-
-                        audio_path = self._narration_storage.resolve_stored_uri(
-                            mission.channel_id, content_request_id, rel_uri
-                        )
-
-                        if not audio_path.exists() or audio_path.stat().st_size <= 0:
-                            raise VerticalSliceError("Audio file missing or empty")
-
-                        duration_ms = audio_asset.get("duration_ms")
-                        if not duration_ms or duration_ms <= 0:
-                            raise VerticalSliceError("Audio duration missing or zero")
-
-                        if not audio_asset.get("content_hash"):
-                            raise VerticalSliceError("Audio asset missing content_hash")
-
+                        prepared = prepared_narration[scene.sequence_index]
+                        audio_asset = prepared["asset"]
+                        audio_path = prepared["path"]
+                        duration_ms = prepared["duration_ms"]
+                        scene_start_ms = prepared["start_ms"]
                         audio_duration_sec = duration_ms / 1000.0
                         actual_scene_duration_seconds = audio_duration_sec
                         audio_sha = audio_asset["content_hash"]
-                        narration_total_duration_ms += duration_ms
-
-                        scene_start_ms = runtime_cursor_ms
-                        scene_end_ms = scene_start_ms + duration_ms
-
-                        runtime_narration_segments.append(
-                            VerticalSliceRuntimeNarrationSegment(
-                                scene_index=scene.sequence_index,
-                                start_ms=scene_start_ms,
-                                end_ms=scene_end_ms,
-                                duration_ms=duration_ms,
-                            )
-                        )
-                        runtime_cursor_ms = scene_end_ms
-
-                        n_qual = audio_asset.get("narration_quality")
-                        if n_qual:
-                            narration_qualities.append(n_qual)
-                        n_ref = audio_asset.get("source_ref")
-                        if n_ref and n_ref not in narration_source_refs_list:
-                            narration_source_refs_list.append(n_ref)
-
-                        scene_subtitle_cues = 0
-                        scene_subtitle_text_truncated = False
-                        ass_path = None
                         if effective_subtitle_enabled:
-                            text_for_cues = scene.narration_excerpt or ""
-                            words_in_excerpt = [w for w in text_for_cues.split() if w]
-                            # Validate karaoke timing authority/sufficiency if karaoke was requested
-                            if subtitle_decision.requested_mode == SubtitleMode.KARAOKE:
-                                has_provider_word_timing = bool(
-                                    audio_asset.get("word_timing") or audio_asset.get("word_timings")
-                                )
-                                karaoke_timing_available = audio_asset.get("karaoke_timing_available", True)
-                                karaoke_timing_error = audio_asset.get("karaoke_timing_error")
-
-                                if has_provider_word_timing:
-                                    subtitle_decision = evaluate_subtitle_mode_decision(
-                                        requested_mode=canonical_sub_mode,
-                                        fallback_policy=canonical_sub_fallback,
-                                        has_word_timing=True,
-                                        timing_available=True,
-                                    )
-                                elif not karaoke_timing_available or karaoke_timing_error:
-                                    subtitle_decision = evaluate_subtitle_mode_decision(
-                                        requested_mode=canonical_sub_mode,
-                                        fallback_policy=canonical_sub_fallback,
-                                        has_word_timing=False,
-                                        timing_available=False,
-                                        timing_error_reason=karaoke_timing_error or "karaoke_word_timing_unavailable",
-                                    )
-                                elif not words_in_excerpt or duration_ms < len(words_in_excerpt) or duration_ms <= 0:
-                                    subtitle_decision = evaluate_subtitle_mode_decision(
-                                        requested_mode=canonical_sub_mode,
-                                        fallback_policy=canonical_sub_fallback,
-                                        has_word_timing=False,
-                                        timing_available=False,
-                                        timing_error_reason="insufficient_word_timing_duration",
-                                    )
-                                else:
-                                    subtitle_decision = evaluate_subtitle_mode_decision(
-                                        requested_mode=canonical_sub_mode,
-                                        fallback_policy=canonical_sub_fallback,
-                                        has_word_timing=False,
-                                        timing_available=True,
-                                    )
-
                             effective_mode = subtitle_decision.effective_mode
                             use_karaoke_highlight = (effective_mode == SubtitleMode.KARAOKE)
                             segment = {
-                                "text": text_for_cues,
+                                "text": prepared["text"],
                                 "start_ms": 0,
                                 "duration_ms": duration_ms,
                             }

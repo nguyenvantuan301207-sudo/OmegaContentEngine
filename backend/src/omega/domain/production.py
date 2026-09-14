@@ -114,14 +114,10 @@ def evaluate_subtitle_mode_decision(
         )
 
     if requested_mode == SubtitleMode.KARAOKE:
-        if has_word_timing:
-            return SubtitleModeDecision(
-                requested_mode=SubtitleMode.KARAOKE,
-                effective_mode=SubtitleMode.KARAOKE,
-                fallback_applied=False,
-                fallback_reason=None,
-                timing_source=SubtitleTimingSource.PROVIDER_WORD_TIMING,
-            )
+        # No production narration provider currently exposes a validated word-timing
+        # contract.  Keep the argument for caller compatibility, but never infer
+        # provider authority from a truthy, unvalidated object.
+        _ = has_word_timing
         if timing_available:
             return SubtitleModeDecision(
                 requested_mode=SubtitleMode.KARAOKE,

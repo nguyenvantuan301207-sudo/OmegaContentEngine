@@ -19,19 +19,26 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+from httpx import ASGITransport, AsyncClient
 
+from omega.api.production import _get_production_service
 from omega.application.production_contract import (
     SubtitleFallbackPolicy,
     SubtitleMode,
     SubtitleTimingSource,
     _normalize_subtitle_mode,
     evaluate_subtitle_mode_decision,
+    resolve_canonical_production_contract,
 )
 from omega.application.production_service import ProductionService
 from omega.application.render_service import ProductionRenderService
@@ -42,10 +49,14 @@ from omega.application.subtitle_engine import (
     generate_karaoke_cues,
 )
 from omega.application.visual_production_v2_service import (
+    VerticalSliceError,
     VisualProductionV2Service,
+    _derived_karaoke_timing_error,
 )
+from omega.infrastructure.database import get_async_session
 from omega.infrastructure.models import ProductionRequest
 from omega.infrastructure.visual_v2_video_renderer import VisualV2VideoRenderResult
+from omega.main import app
 
 VALID_MP4_HEADER = b"\x00\x00\x00\x20ftypisom\x00\x00\x02\x00isomiso2avc1mp41"
 
@@ -154,7 +165,7 @@ def test_decision_karaoke_provider_word_timing():
     assert d.requested_mode == SubtitleMode.KARAOKE
     assert d.effective_mode == SubtitleMode.KARAOKE
     assert d.fallback_applied is False
-    assert d.timing_source == SubtitleTimingSource.PROVIDER_WORD_TIMING
+    assert d.timing_source == SubtitleTimingSource.DERIVED_SEGMENT_TIMING
 
 
 def test_decision_karaoke_fallback_to_standard():
@@ -249,6 +260,20 @@ def test_karaoke_ass_output_contains_kf_and_conserves_duration():
     # Check that word durations are conserved within total segment duration
     total_word_ms = sum(w["duration_ms"] for cue in cues for w in cue["words"])
     assert total_word_ms == 2000
+    assert all(int(value) > 0 for value in re.findall(r"\\kf(\d+)", doc.content))
+
+
+@pytest.mark.parametrize(
+    ("text", "duration_ms", "expected_error"),
+    [
+        ("   ", 1000, "blank_subtitle_text"),
+        ("words", 0, "non_positive_segment_duration"),
+        ("words", -1, "non_positive_segment_duration"),
+        ("one two three four five", 49, "zero_centisecond_karaoke_unit"),
+    ],
+)
+def test_derived_karaoke_capability_validation(text, duration_ms, expected_error):
+    assert _derived_karaoke_timing_error(text, duration_ms) == expected_error
 
 
 def test_ass_escaping_preserved():
@@ -441,10 +466,20 @@ def _make_mock_session_and_lineage():
 
 
 @pytest.mark.asyncio
-async def test_v2_off_path(v2_service_fixture):
+async def test_v2_off_path(v2_service_fixture, monkeypatch):
     fx = v2_service_fixture
     captured_ass = _setup_v2_mocks(fx)
     session, m_exec_id, req_id = _make_mock_session_and_lineage()
+    cue_generation = MagicMock(side_effect=AssertionError("OFF generated subtitle cues"))
+    ass_generation = MagicMock(side_effect=AssertionError("OFF generated ASS"))
+    monkeypatch.setattr(
+        "omega.application.visual_production_v2_service.generate_karaoke_cues",
+        cue_generation,
+    )
+    monkeypatch.setattr(
+        "omega.application.visual_production_v2_service.generate_karaoke_ass_document",
+        ass_generation,
+    )
 
     result = await fx["service"].render_mission_execution(
         session,
@@ -455,7 +490,11 @@ async def test_v2_off_path(v2_service_fixture):
 
     # Subtitle burning was never invoked
     fx["ffmpeg"].burn_ass_subtitles.assert_not_called()
+    cue_generation.assert_not_called()
+    ass_generation.assert_not_called()
     assert len(captured_ass) == 0
+    assert not list(fx["tmp_path"].rglob("*.ass"))
+    assert not list(fx["tmp_path"].rglob("*.srt"))
 
     # Video/Audio rendering and concatenation continued normally
     fx["video_renderer"].render_clip.assert_called_once()
@@ -497,6 +536,40 @@ async def test_v2_standard_path(v2_service_fixture):
     assert result.subtitle_timing_source == "DERIVED_SEGMENT_TIMING"
     assert result.subtitle_enabled is True
     assert result.karaoke_subtitles_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_v2_blank_narration_fails_before_render(v2_service_fixture):
+    fx = v2_service_fixture
+    _setup_v2_mocks(fx, text="   ", duration_ms=1000)
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    with pytest.raises(VerticalSliceError, match="Empty narration text"):
+        await fx["service"].render_mission_execution(
+            session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+        )
+
+    fx["video_renderer"].render_clip.assert_not_called()
+    fx["ffmpeg"].burn_ass_subtitles.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duration_ms", [None, 0, -10])
+async def test_v2_invalid_narration_duration_fails_before_render(
+    v2_service_fixture, duration_ms
+):
+    fx = v2_service_fixture
+    _setup_v2_mocks(fx, text="valid subtitle text", duration_ms=1000)
+    fx["narration"].synthesize_segment_audio.return_value["duration_ms"] = duration_ms
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    with pytest.raises(VerticalSliceError, match="Audio duration missing or zero"):
+        await fx["service"].render_mission_execution(
+            session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+        )
+
+    fx["video_renderer"].render_clip.assert_not_called()
+    fx["ffmpeg"].burn_ass_subtitles.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -548,7 +621,7 @@ async def test_v2_karaoke_path_provider_word_timing(v2_service_fixture):
 
     assert result.requested_subtitle_mode == "KARAOKE"
     assert result.effective_subtitle_mode == "KARAOKE"
-    assert result.subtitle_timing_source == "PROVIDER_WORD_TIMING"
+    assert result.subtitle_timing_source == "DERIVED_SEGMENT_TIMING"
     assert len(captured_ass) == 1
     assert "\\kf" in captured_ass[0]
 
@@ -559,14 +632,12 @@ async def test_v2_karaoke_fallback_on_insufficient_timing(v2_service_fixture):
     captured_ass = _setup_v2_mocks(
         fx,
         text="word1 word2 word3 word4 word5",
-        duration_ms=3000,
+        duration_ms=49,
     )
     fx["narration"].synthesize_segment_audio.return_value = {
         "storage_uri": "channels/test/1.wav",
-        "duration_ms": 3000,
+        "duration_ms": 49,
         "content_hash": "mock-audio-sha256",
-        "karaoke_timing_available": False,
-        "karaoke_timing_error": "karaoke_word_timing_unavailable",
     }
     session, m_exec_id, req_id = _make_mock_session_and_lineage()
 
@@ -581,12 +652,151 @@ async def test_v2_karaoke_fallback_on_insufficient_timing(v2_service_fixture):
     assert result.requested_subtitle_mode == "KARAOKE"
     assert result.effective_subtitle_mode == "STANDARD"
     assert result.subtitle_fallback_applied is True
-    assert result.subtitle_fallback_reason == "karaoke_word_timing_unavailable"
+    assert result.subtitle_fallback_reason == "scene_1:zero_centisecond_karaoke_unit"
     assert result.subtitle_timing_source == "DERIVED_SEGMENT_TIMING"
 
     # Static subtitle burned without \kf tags
     assert len(captured_ass) == 1
     assert "\\kf" not in captured_ass[0]
+
+
+@pytest.mark.asyncio
+async def test_v2_karaoke_fallback_is_render_wide_and_sticky(v2_service_fixture):
+    fx = v2_service_fixture
+    captured_ass = _setup_v2_mocks(fx)
+    scene_specs = [
+        ("scene one is karaoke capable", 1200),
+        ("one two three four five", 49),
+        ("scene three is karaoke capable", 1200),
+    ]
+    fx["narration"].synthesize_segment_audio.side_effect = [
+        {
+            "storage_uri": f"channels/test/{index}.wav",
+            "duration_ms": duration_ms,
+            "content_hash": f"mock-audio-sha256-{index}",
+        }
+        for index, (_, duration_ms) in enumerate(scene_specs, start=1)
+    ]
+    fx["service"]._storyboard_engine.generate_storyboard = MagicMock(
+        return_value=StoryboardPlan(
+            title="P18-B Multi Scene",
+            estimated_duration_seconds=sum(duration for _, duration in scene_specs) / 1000,
+            scenes=[
+                StoryboardScene(
+                    sequence_index=index,
+                    section_id=f"sec-{index}",
+                    purpose="body",
+                    source_statement_references=[],
+                    narration_excerpt=text,
+                    estimated_duration_seconds=duration_ms / 1000,
+                    visual_strategy=VisualStrategy.TITLE_MOTION,
+                    visual_brief=f"scene {index}",
+                )
+                for index, (text, duration_ms) in enumerate(scene_specs, start=1)
+            ],
+        )
+    )
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    result = await fx["service"].render_mission_execution(
+        session,
+        m_exec_id,
+        req_id,
+        subtitle_mode=SubtitleMode.KARAOKE,
+    )
+
+    assert result.requested_subtitle_mode == "KARAOKE"
+    assert result.effective_subtitle_mode == "STANDARD"
+    assert result.subtitle_fallback_applied is True
+    assert result.subtitle_fallback_reason == "scene_2:zero_centisecond_karaoke_unit"
+    assert result.subtitle_timing_source == "DERIVED_SEGMENT_TIMING"
+    assert len(captured_ass) == 3
+    assert all("\\kf" not in ass for ass in captured_ass)
+
+
+@pytest.mark.asyncio
+async def test_canonical_contract_mode_wins_conflicting_legacy_style(v2_service_fixture):
+    fx = v2_service_fixture
+    captured_ass = _setup_v2_mocks(
+        fx, text="one two three four five", duration_ms=2000
+    )
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    standard_contract = resolve_canonical_production_contract(
+        _make_dummy_request(metadata_={"render_settings": {"subtitle_mode": "STANDARD"}})
+    )
+    standard_result = await fx["service"].render_mission_execution(
+        session,
+        m_exec_id,
+        req_id,
+        subtitle_enabled=True,
+        subtitle_style=SubtitleRenderStyle(karaoke=True),
+        contract=standard_contract,
+    )
+
+    karaoke_contract = resolve_canonical_production_contract(
+        _make_dummy_request(metadata_={"render_settings": {"subtitle_mode": "KARAOKE"}})
+    )
+    karaoke_result = await fx["service"].render_mission_execution(
+        session,
+        m_exec_id,
+        req_id,
+        subtitle_enabled=False,
+        subtitle_style=SubtitleRenderStyle(karaoke=False),
+        contract=karaoke_contract,
+    )
+
+    assert standard_result.effective_subtitle_mode == "STANDARD"
+    assert "\\kf" not in captured_ass[0]
+    assert karaoke_result.effective_subtitle_mode == "KARAOKE"
+    assert "\\kf" in captured_ass[1]
+
+
+@pytest.mark.asyncio
+async def test_partial_provider_timing_never_claims_provider_authority(v2_service_fixture):
+    fx = v2_service_fixture
+    _setup_v2_mocks(fx, text="one two three four five", duration_ms=2000)
+    fx["narration"].synthesize_segment_audio.return_value.update(
+        {"word_timing": [{"word": "one", "start_ms": 0, "end_ms": 400}]}
+    )
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    result = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+
+    assert result.effective_subtitle_mode == "KARAOKE"
+    assert result.subtitle_timing_source == "DERIVED_SEGMENT_TIMING"
+
+
+@pytest.mark.asyncio
+async def test_fallback_provenance_is_idempotent(v2_service_fixture):
+    fx = v2_service_fixture
+    _setup_v2_mocks(fx, text="one two three four five", duration_ms=49)
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+
+    first = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+    second = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+
+    first_provenance = (
+        first.requested_subtitle_mode,
+        first.effective_subtitle_mode,
+        first.subtitle_fallback_applied,
+        first.subtitle_fallback_reason,
+        first.subtitle_timing_source,
+    )
+    second_provenance = (
+        second.requested_subtitle_mode,
+        second.effective_subtitle_mode,
+        second.subtitle_fallback_applied,
+        second.subtitle_fallback_reason,
+        second.subtitle_timing_source,
+    )
+    assert first_provenance == second_provenance
 
 
 @pytest.mark.asyncio
@@ -644,6 +854,31 @@ async def test_update_render_settings_accepts_canonical_subtitle_mode():
 
 
 @pytest.mark.asyncio
+async def test_update_render_settings_mode_only_preserves_existing_style():
+    existing_style = SubtitleRenderStyle(font_size=56).model_dump()
+    request = SimpleNamespace(
+        status="PENDING",
+        metadata_={"render_settings": {"subtitle_style": existing_style}},
+    )
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = request
+    session = AsyncMock()
+    session.execute.return_value = exec_result
+
+    updated = await ProductionService.update_render_settings(
+        object.__new__(ProductionService),
+        session,
+        uuid4(),
+        uuid4(),
+        None,
+        subtitle_mode=SubtitleMode.KARAOKE,
+    )
+
+    assert updated.metadata_["render_settings"]["subtitle_style"] == existing_style
+    assert updated.metadata_["render_settings"]["subtitle_mode"] == "KARAOKE"
+
+
+@pytest.mark.asyncio
 async def test_update_render_settings_rejects_invalid_subtitle_mode():
     request = SimpleNamespace(status="PENDING", metadata_={})
     exec_result = MagicMock()
@@ -660,3 +895,165 @@ async def test_update_render_settings_rejects_invalid_subtitle_mode():
             SubtitleRenderStyle(),
             subtitle_mode="SUPER_KARAOKE",
         )
+
+
+def _api_production_request(metadata: dict[str, Any]) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=uuid4(),
+        channel_id=uuid4(),
+        script_version_id=uuid4(),
+        content_request_id=uuid4(),
+        channel_dna_revision_id=uuid4(),
+        mission_execution_id=None,
+        mode="INTERACTIVE",
+        status="DRAFT",
+        outcome=None,
+        target_width=1920,
+        target_height=1080,
+        fps=30,
+        video_codec="h264",
+        audio_codec="aac",
+        container_format="mp4",
+        created_at=datetime.now(UTC),
+        started_at=None,
+        completed_at=None,
+        failed_at=None,
+        metadata_=metadata,
+    )
+
+
+class _RenderSettingsAPIFake:
+    def __init__(self, request: SimpleNamespace) -> None:
+        self.request = request
+        self.calls: list[tuple[SubtitleRenderStyle | None, SubtitleMode | None]] = []
+
+    async def update_render_settings(
+        self,
+        _session: Any,
+        _channel_id: Any,
+        _request_id: Any,
+        subtitle_style: SubtitleRenderStyle | None,
+        subtitle_mode: SubtitleMode | None,
+    ) -> SimpleNamespace:
+        self.calls.append((subtitle_style, subtitle_mode))
+        render_settings = dict(self.request.metadata_.get("render_settings") or {})
+        if subtitle_style is not None:
+            render_settings["subtitle_style"] = subtitle_style.model_dump()
+        if subtitle_mode is not None:
+            render_settings["subtitle_mode"] = subtitle_mode.value
+        self.request.metadata_["render_settings"] = render_settings
+        return self.request
+
+
+@pytest.mark.asyncio
+async def test_render_settings_endpoint_accepts_mode_only_and_preserves_style():
+    existing_style = SubtitleRenderStyle(font_size=52).model_dump()
+    request = _api_production_request(
+        {"render_settings": {"subtitle_style": existing_style}}
+    )
+    service = _RenderSettingsAPIFake(request)
+
+    async def override_session() -> AsyncIterator[object]:
+        yield object()
+
+    app.dependency_overrides[get_async_session] = override_session
+    app.dependency_overrides[_get_production_service] = lambda: service
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.patch(
+                f"/api/v1/channels/{request.channel_id}/production/{request.id}/render-settings",
+                json={"subtitle_mode": "KARAOKE"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_async_session, None)
+        app.dependency_overrides.pop(_get_production_service, None)
+
+    assert response.status_code == 200
+    assert service.calls == [(None, SubtitleMode.KARAOKE)]
+    assert request.metadata_["render_settings"]["subtitle_style"] == existing_style
+    assert request.metadata_["render_settings"]["subtitle_mode"] == "KARAOKE"
+
+
+@pytest.mark.asyncio
+async def test_render_settings_endpoint_accepts_legacy_style_only():
+    request = _api_production_request({})
+    service = _RenderSettingsAPIFake(request)
+    style = SubtitleRenderStyle(karaoke=True)
+
+    async def override_session() -> AsyncIterator[object]:
+        yield object()
+
+    app.dependency_overrides[get_async_session] = override_session
+    app.dependency_overrides[_get_production_service] = lambda: service
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.patch(
+                f"/api/v1/channels/{request.channel_id}/production/{request.id}/render-settings",
+                json={"subtitle_style": style.model_dump()},
+            )
+    finally:
+        app.dependency_overrides.pop(get_async_session, None)
+        app.dependency_overrides.pop(_get_production_service, None)
+
+    assert response.status_code == 200
+    assert service.calls == [(style, None)]
+
+
+@pytest.mark.asyncio
+async def test_render_settings_endpoint_accepts_mode_and_style():
+    request = _api_production_request({})
+    service = _RenderSettingsAPIFake(request)
+    style = SubtitleRenderStyle(font_size=50)
+
+    async def override_session() -> AsyncIterator[object]:
+        yield object()
+
+    app.dependency_overrides[get_async_session] = override_session
+    app.dependency_overrides[_get_production_service] = lambda: service
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.patch(
+                f"/api/v1/channels/{request.channel_id}/production/{request.id}/render-settings",
+                json={
+                    "subtitle_mode": "STANDARD",
+                    "subtitle_style": style.model_dump(),
+                },
+            )
+    finally:
+        app.dependency_overrides.pop(get_async_session, None)
+        app.dependency_overrides.pop(_get_production_service, None)
+
+    assert response.status_code == 200
+    assert service.calls == [(style, SubtitleMode.STANDARD)]
+
+
+@pytest.mark.asyncio
+async def test_render_settings_endpoint_rejects_unknown_mode():
+    request = _api_production_request({})
+    service = _RenderSettingsAPIFake(request)
+
+    async def override_session() -> AsyncIterator[object]:
+        yield object()
+
+    app.dependency_overrides[get_async_session] = override_session
+    app.dependency_overrides[_get_production_service] = lambda: service
+    try:
+        async with AsyncClient(
+            transport=ASGITransport(app=app), base_url="http://test"
+        ) as client:
+            response = await client.patch(
+                f"/api/v1/channels/{request.channel_id}/production/{request.id}/render-settings",
+                json={"subtitle_mode": "SUPER_KARAOKE"},
+            )
+    finally:
+        app.dependency_overrides.pop(get_async_session, None)
+        app.dependency_overrides.pop(_get_production_service, None)
+
+    assert response.status_code == 422
+    assert service.calls == []

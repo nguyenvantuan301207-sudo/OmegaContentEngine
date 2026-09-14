@@ -67,7 +67,7 @@ class ProductionService:
         session: AsyncSession,
         channel_id: uuid.UUID,
         request_id: uuid.UUID,
-        subtitle_style: SubtitleRenderStyle,
+        subtitle_style: SubtitleRenderStyle | None,
         subtitle_mode: SubtitleMode | str | None = None,
     ) -> ProductionRequest:
         """Persist validated V2 render settings in existing request metadata JSON."""
@@ -83,7 +83,8 @@ class ProductionService:
 
         metadata = dict(request.metadata_ or {})
         render_settings = dict(metadata.get("render_settings") or {})
-        render_settings["subtitle_style"] = subtitle_style.model_dump()
+        if subtitle_style is not None:
+            render_settings["subtitle_style"] = subtitle_style.model_dump()
         if subtitle_mode is not None:
             if isinstance(subtitle_mode, SubtitleMode):
                 render_settings["subtitle_mode"] = subtitle_mode.value

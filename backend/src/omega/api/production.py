@@ -8,7 +8,7 @@ from uuid import UUID
 import structlog
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -57,8 +57,14 @@ router = APIRouter(prefix="/api/v1/channels/{channel_id}/production", tags=["Pro
 class ProductionRenderSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    subtitle_style: SubtitleRenderStyle
-    subtitle_mode: SubtitleMode | str | None = None
+    subtitle_style: SubtitleRenderStyle | None = None
+    subtitle_mode: SubtitleMode | None = None
+
+    @model_validator(mode="after")
+    def require_setting(self) -> ProductionRenderSettingsUpdate:
+        if self.subtitle_style is None and self.subtitle_mode is None:
+            raise ValueError("At least one render setting must be supplied")
+        return self
 
 
 def _get_production_service() -> ProductionService:

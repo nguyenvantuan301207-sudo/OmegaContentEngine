@@ -21,6 +21,28 @@ def create_fake_mp4(path: Path, content: bytes = b"ftyp...mp4data") -> str:
     return hashlib.sha256(content).hexdigest()
 
 
+def create_v2_request(**overrides) -> ProductionRequest:
+    values = {
+        "id": uuid.uuid4(),
+        "channel_id": uuid.uuid4(),
+        "script_version_id": uuid.uuid4(),
+        "content_request_id": uuid.uuid4(),
+        "channel_dna_revision_id": uuid.uuid4(),
+        "mission_execution_id": uuid.uuid4(),
+        "mode": "MISSION_EXECUTION",
+    }
+    values.update(overrides)
+    return ProductionRequest(**values)
+
+
+def create_v2_session() -> AsyncMock:
+    session = AsyncMock(spec=AsyncSession)
+    channel_result = MagicMock()
+    channel_result.scalar_one_or_none.return_value = None
+    session.execute.return_value = channel_result
+    return session
+
+
 @pytest.fixture
 def mock_v2_service():
     return AsyncMock()
@@ -37,14 +59,14 @@ def render_service(tmp_path, mock_v2_service):
 async def test_resolve_mission_id_direct_fk(render_service):
     execution_id = uuid.uuid4()
     mission_id = uuid.uuid4()
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=execution_id,
         content_request_id=uuid.uuid4(),
     )
 
     result = MagicMock()
     result.scalar_one_or_none.return_value = mission_id
-    session = AsyncMock(spec=AsyncSession)
+    session = create_v2_session()
     session.execute.return_value = result
 
     resolved = await render_service._resolve_mission_id(session, req)
@@ -58,7 +80,7 @@ async def test_resolve_mission_id_content_request_fallback(render_service):
     content_request_id = uuid.uuid4()
     execution_id = uuid.uuid4()
     mission_id = uuid.uuid4()
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=None,
         content_request_id=content_request_id,
     )
@@ -78,19 +100,19 @@ async def test_resolve_mission_id_content_request_fallback(render_service):
 
 
 def test_selection_interactive_no_v2():
-    req = ProductionRequest(mode="INTERACTIVE")
+    req = create_v2_request(mode="INTERACTIVE")
     svc = ProductionRenderService(visual_production_service=AsyncMock())
     assert svc._should_use_v2(req) is False
 
 
 def test_selection_mission_no_v2():
-    req = ProductionRequest(mode="MISSION_EXECUTION")
+    req = create_v2_request(mode="MISSION_EXECUTION")
     svc = ProductionRenderService(visual_production_service=None)
     assert svc._should_use_v2(req) is False
 
 
 def test_selection_mission_with_v2():
-    req = ProductionRequest(mode="MISSION_EXECUTION")
+    req = create_v2_request(mode="MISSION_EXECUTION")
     svc = ProductionRenderService(visual_production_service=AsyncMock())
     assert svc._should_use_v2(req) is True
 
@@ -170,7 +192,7 @@ async def test_record_job_failure_sets_terminal_timestamp_once(render_service):
 
 @pytest.mark.asyncio
 async def test_v2_helper_success(render_service, tmp_path, mock_v2_service):
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
         voice_profile={"provider": "test"},
@@ -191,21 +213,22 @@ async def test_v2_helper_success(render_service, tmp_path, mock_v2_service):
 
     mock_v2_service.render_mission_execution.return_value = FakeResult()
 
-    session = AsyncMock(spec=AsyncSession)
+    session = create_v2_session()
     await render_service._render_v2_staging(
         session, req, 30, 1920, 1080, "mp4", "h264", staging_out
     )
 
-    mock_v2_service.render_mission_execution.assert_called_once_with(
-        session,
-        req.mission_execution_id,
-        req.content_request_id,
-        fps=30,
-        voice_profile=req.voice_profile,
-        subtitle_enabled=True,
-        subtitle_style=SubtitleRenderStyle(),
-        style_profile=None,
-    )
+    mock_v2_service.render_mission_execution.assert_awaited_once()
+    call = mock_v2_service.render_mission_execution.call_args
+    assert call.args == (session, req.mission_execution_id, req.content_request_id)
+    assert call.kwargs["fps"] == 30
+    assert call.kwargs["voice_profile"] == req.voice_profile
+    assert call.kwargs["subtitle_enabled"] is True
+    assert call.kwargs["subtitle_style"] == SubtitleRenderStyle()
+    assert call.kwargs["style_profile"] is None
+    assert call.kwargs["subtitle_mode"].value == "STANDARD"
+    assert call.kwargs["subtitle_fallback_policy"].value == "STANDARD_FALLBACK"
+    assert call.kwargs["contract"].lineage.production_request_id == req.id
 
     assert staging_out.exists()
     assert v2_out.exists()
@@ -217,7 +240,7 @@ async def test_v2_helper_success(render_service, tmp_path, mock_v2_service):
 
 @pytest.mark.asyncio
 async def test_v2_helper_sha_mismatch(render_service, tmp_path, mock_v2_service):
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
     )
@@ -238,13 +261,13 @@ async def test_v2_helper_sha_mismatch(render_service, tmp_path, mock_v2_service)
 
     with pytest.raises(ValueError, match="V2 output SHA mismatch"):
         await render_service._render_v2_staging(
-            AsyncMock(), req, 30, 1920, 1080, "mp4", "h264", staging_out
+            create_v2_session(), req, 30, 1920, 1080, "mp4", "h264", staging_out
         )
 
 
 @pytest.mark.asyncio
 async def test_v2_helper_lineage_mismatch(render_service, tmp_path, mock_v2_service):
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
     )
@@ -258,13 +281,13 @@ async def test_v2_helper_lineage_mismatch(render_service, tmp_path, mock_v2_serv
 
     with pytest.raises(ValueError, match="V2 result mission_execution_id mismatch"):
         await render_service._render_v2_staging(
-            AsyncMock(), req, 30, 1920, 1080, "mp4", "h264", staging_out
+            create_v2_session(), req, 30, 1920, 1080, "mp4", "h264", staging_out
         )
 
 
 @pytest.mark.asyncio
 async def test_v2_helper_missing_output(render_service, tmp_path, mock_v2_service):
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
     )
@@ -282,13 +305,13 @@ async def test_v2_helper_missing_output(render_service, tmp_path, mock_v2_servic
 
     with pytest.raises(ValueError, match="V2 output artifact missing"):
         await render_service._render_v2_staging(
-            AsyncMock(), req, 30, 1920, 1080, "mp4", "h264", staging_out
+            create_v2_session(), req, 30, 1920, 1080, "mp4", "h264", staging_out
         )
 
 
 @pytest.mark.asyncio
 async def test_v2_helper_unsupported_target(render_service, tmp_path):
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
     )
@@ -307,7 +330,7 @@ async def test_v2_helper_unsupported_target(render_service, tmp_path):
 
 @pytest.mark.asyncio
 async def test_v2_helper_exception_propagates(render_service, tmp_path, mock_v2_service):
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
     )
@@ -315,13 +338,13 @@ async def test_v2_helper_exception_propagates(render_service, tmp_path, mock_v2_
 
     with pytest.raises(RuntimeError, match="V2 Failed"):
         await render_service._render_v2_staging(
-            AsyncMock(), req, 30, 1920, 1080, "mp4", "h264", tmp_path / "staging.mp4"
+            create_v2_session(), req, 30, 1920, 1080, "mp4", "h264", tmp_path / "staging.mp4"
         )
 
 
 @pytest.mark.asyncio
 async def test_v2_helper_dimension_fps_mismatch(render_service, tmp_path, mock_v2_service):
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
     )
@@ -342,7 +365,7 @@ async def test_v2_helper_dimension_fps_mismatch(render_service, tmp_path, mock_v
 
     with pytest.raises(ValueError, match="V2 result dimension mismatch"):
         await render_service._render_v2_staging(
-            AsyncMock(), req, 30, 1920, 1080, "mp4", "h264", staging_out
+            create_v2_session(), req, 30, 1920, 1080, "mp4", "h264", staging_out
         )
 
 
@@ -354,7 +377,7 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
         outline_width=3,
         margin_v=135,
     )
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
         metadata_={"render_settings": {"subtitle_style": selected_style.model_dump()}},
@@ -417,7 +440,7 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
         effective_fps_mode = "CFR"
 
     mock_v2_service.render_mission_execution.return_value = FakeResult()
-    session = AsyncMock(spec=AsyncSession)
+    session = create_v2_session()
 
     result = await render_service._render_v2_staging(
         session, req, 30, 1920, 1080, "mp4", "h264", staging_out
@@ -481,7 +504,7 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_v2_helper_backward_compatibility(render_service, tmp_path, mock_v2_service):
-    req = ProductionRequest(
+    req = create_v2_request(
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
     )
@@ -499,7 +522,7 @@ async def test_v2_helper_backward_compatibility(render_service, tmp_path, mock_v
         content_sha256 = sha
 
     mock_v2_service.render_mission_execution.return_value = FakeResult()
-    session = AsyncMock(spec=AsyncSession)
+    session = create_v2_session()
 
     result = await render_service._render_v2_staging(
         session, req, 30, 1920, 1080, "mp4", "h264", staging_out

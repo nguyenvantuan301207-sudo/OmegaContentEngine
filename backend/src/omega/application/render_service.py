@@ -6,7 +6,6 @@ import os
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -812,27 +811,19 @@ class ProductionRenderService:
         subtitle_mode = contract.policy.subtitle_mode
         subtitle_fallback_policy = contract.policy.subtitle_fallback_policy
 
-        render_settings = (req.metadata_ or {}).get("render_settings") or {}
-        explicit_sub_mode = render_settings.get("subtitle_mode")
-
-        v2_kwargs: dict[str, Any] = {
-            "fps": fps,
-            "voice_profile": req.voice_profile,
-            "subtitle_enabled": (subtitle_mode.value != "OFF"),
-            "subtitle_style": subtitle_style,
-            "style_profile": channel_style,
-        }
-        if explicit_sub_mode is not None:
-            v2_kwargs["subtitle_mode"] = subtitle_mode
-            v2_kwargs["subtitle_fallback_policy"] = subtitle_fallback_policy
-            v2_kwargs["contract"] = contract
-
         # V2 execution
         result = await self.visual_production_service.render_mission_execution(
             session,
             req.mission_execution_id,
             req.content_request_id,
-            **v2_kwargs,
+            fps=fps,
+            voice_profile=req.voice_profile,
+            subtitle_enabled=(subtitle_mode.value != "OFF"),
+            subtitle_style=subtitle_style,
+            style_profile=channel_style,
+            subtitle_mode=subtitle_mode,
+            subtitle_fallback_policy=subtitle_fallback_policy,
+            contract=contract,
         )
 
         # Validate V2 Result Lineage

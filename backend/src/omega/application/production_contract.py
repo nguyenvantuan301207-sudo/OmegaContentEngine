@@ -146,11 +146,11 @@ class CanonicalProductionLineage(BaseModel):
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    channel_id: UUID | None = None
-    production_request_id: UUID | None = None
-    content_request_id: UUID | None = None
-    script_version_id: UUID | None = None
-    channel_dna_revision_id: UUID | None = None
+    channel_id: UUID
+    production_request_id: UUID
+    content_request_id: UUID
+    script_version_id: UUID
+    channel_dna_revision_id: UUID
 
     mission_id: UUID | None = None
     mission_execution_id: UUID | None = None
@@ -352,11 +352,11 @@ class CanonicalProductionContract(BaseModel):
             "contract_version": self.contract_version,
             "mode": self.mode.value,
             "lineage": {
-                "channel_id": str(self.lineage.channel_id) if self.lineage.channel_id else None,
-                "production_request_id": str(self.lineage.production_request_id) if self.lineage.production_request_id else None,
-                "content_request_id": str(self.lineage.content_request_id) if self.lineage.content_request_id else None,
-                "script_version_id": str(self.lineage.script_version_id) if self.lineage.script_version_id else None,
-                "channel_dna_revision_id": str(self.lineage.channel_dna_revision_id) if self.lineage.channel_dna_revision_id else None,
+                "channel_id": str(self.lineage.channel_id),
+                "production_request_id": str(self.lineage.production_request_id),
+                "content_request_id": str(self.lineage.content_request_id),
+                "script_version_id": str(self.lineage.script_version_id),
+                "channel_dna_revision_id": str(self.lineage.channel_dna_revision_id),
                 "mission_id": str(self.lineage.mission_id) if self.lineage.mission_id else None,
                 "mission_execution_id": str(self.lineage.mission_execution_id)
                 if self.lineage.mission_execution_id
