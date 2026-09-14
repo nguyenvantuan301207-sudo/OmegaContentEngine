@@ -141,6 +141,27 @@ def _setup_mock_db(mock_session, execution_id, request_id):
     return script_version
 
 
+def _off_subtitle_manifest_fields():
+    return {
+        "subtitle_enabled": False,
+        "karaoke_subtitles_enabled": False,
+        "subtitle_mode": "sentence",
+        "requested_subtitle_mode": "OFF",
+        "effective_subtitle_mode": "OFF",
+        "subtitle_fallback_applied": False,
+        "subtitle_fallback_reason": None,
+        "subtitle_timing_source": "NONE",
+        "subtitle_mode_decision": {
+            "requested_mode": "OFF",
+            "effective_mode": "OFF",
+            "fallback_applied": False,
+            "fallback_reason": None,
+            "timing_source": "NONE",
+        },
+        "runtime_subtitle_cues": [],
+    }
+
+
 @pytest.mark.asyncio
 async def test_provenance_neural_production(mock_session, base_service_kwargs):
     service = VisualProductionV2Service(**base_service_kwargs)
@@ -418,7 +439,8 @@ async def test_provenance_backward_compatibility(mock_session, base_service_kwar
             "duration_seconds": 2.0,
             "width": 1920,
             "height": 1080,
-            "fps": 12
+            "fps": 12,
+            **_off_subtitle_manifest_fields(),
             # Notice NO narration_quality or narration_source_refs
         }))
 
@@ -675,7 +697,8 @@ async def test_provenance_old_manifest_backward_compatibility(mock_session, base
             "duration_seconds": 2.0,
             "width": 1920,
             "height": 1080,
-            "fps": 12
+            "fps": 12,
+            **_off_subtitle_manifest_fields(),
         }))
 
         with patch.object(service, "_compute_streaming_sha", return_value="fake_sha"):
@@ -889,7 +912,7 @@ async def test_provenance_subtitles_require_narration_wording(mock_session, base
 
 
 @pytest.mark.asyncio
-async def test_provenance_legacy_manifest_karaoke_backward_compatibility(mock_session, base_service_kwargs):
+async def test_provenance_current_manifest_subtitle_defaults(mock_session, base_service_kwargs):
     service = VisualProductionV2Service(**base_service_kwargs)
     exec_id = uuid.uuid4()
     req_id = uuid.uuid4()
@@ -919,12 +942,12 @@ async def test_provenance_legacy_manifest_karaoke_backward_compatibility(mock_se
             "width": 1920,
             "height": 1080,
             "fps": 24,
-            "karaoke_subtitles_enabled": True,
+            **_off_subtitle_manifest_fields(),
         }))
 
         with patch.object(service, "_compute_streaming_sha", return_value="fake_sha"):
             res = await service.render_mission_execution(mock_session, exec_id, req_id)
 
-            assert res.subtitle_enabled is True
-            assert res.karaoke_subtitles_enabled is True
-            assert res.subtitle_mode == "karaoke"
+            assert res.subtitle_enabled is False
+            assert res.karaoke_subtitles_enabled is False
+            assert res.subtitle_mode == "sentence"

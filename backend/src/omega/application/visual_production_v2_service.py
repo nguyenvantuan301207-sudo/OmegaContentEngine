@@ -95,6 +95,106 @@ def _has_current_subtitle_semantics_version(manifest: dict[str, Any]) -> bool:
     return type(value) is int and value == SUBTITLE_SEMANTICS_VERSION
 
 
+def _validate_cached_subtitle_semantics(
+    *,
+    manifest: dict[str, Any],
+    canonical_requested_mode: SubtitleMode,
+    fallback_policy: SubtitleFallbackPolicy,
+) -> bool:
+    """Validate cached subtitle provenance against current render semantics."""
+    if not _has_current_subtitle_semantics_version(manifest):
+        return False
+
+    try:
+        requested_mode = SubtitleMode(manifest["requested_subtitle_mode"])
+        cached_decision = SubtitleModeDecision.model_validate(
+            manifest["subtitle_mode_decision"]
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    if requested_mode != canonical_requested_mode:
+        return False
+
+    capability_error: str | None = None
+    if requested_mode == SubtitleMode.KARAOKE:
+        scenes = manifest.get("scenes")
+        narration_segments = manifest.get("runtime_narration_segments")
+        subtitle_cues = manifest.get("runtime_subtitle_cues")
+        if not all(isinstance(items, list) for items in (scenes, narration_segments, subtitle_cues)):
+            return False
+
+        try:
+            scene_indices = [scene["sequence_index"] for scene in scenes]
+            if (
+                not scene_indices
+                or any(type(index) is not int or index <= 0 for index in scene_indices)
+                or len(set(scene_indices)) != len(scene_indices)
+            ):
+                return False
+
+            segment_by_scene: dict[int, dict[str, Any]] = {}
+            for segment in narration_segments:
+                scene_index = segment["scene_index"]
+                if scene_index in segment_by_scene:
+                    return False
+                segment_by_scene[scene_index] = segment
+
+            cues_by_scene: dict[int, list[dict[str, Any]]] = {}
+            for cue in subtitle_cues:
+                cues_by_scene.setdefault(cue["scene_index"], []).append(cue)
+
+            scene_by_index = {scene["sequence_index"]: scene for scene in scenes}
+            for scene_index in sorted(scene_indices):
+                segment = segment_by_scene.get(scene_index)
+                scene_cues = cues_by_scene.get(scene_index)
+                if segment is None or not scene_cues:
+                    return False
+                if scene_by_index[scene_index].get("subtitle_cue_count") != len(scene_cues):
+                    return False
+                ordered_cues = sorted(scene_cues, key=lambda cue: cue["cue_order"])
+                text = " ".join(str(cue["text"]).strip() for cue in ordered_cues)
+                timing_error = _derived_karaoke_timing_error(
+                    text, segment.get("duration_ms")
+                )
+                if timing_error is not None:
+                    capability_error = f"scene_{scene_index}:{timing_error}"
+                    break
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    expected_decision = evaluate_subtitle_mode_decision(
+        requested_mode=requested_mode,
+        fallback_policy=fallback_policy,
+        has_word_timing=False,
+        timing_available=capability_error is None,
+        timing_error_reason=capability_error,
+        segment_timing_available=True,
+    )
+    expected_enabled = expected_decision.effective_mode != SubtitleMode.OFF
+    expected_karaoke = expected_decision.effective_mode == SubtitleMode.KARAOKE
+    expected_subtitle_mode = "karaoke" if expected_karaoke else "sentence"
+
+    return (
+        cached_decision == expected_decision
+        and manifest.get("effective_subtitle_mode")
+        == expected_decision.effective_mode.value
+        and manifest.get("subtitle_fallback_applied")
+        is expected_decision.fallback_applied
+        and manifest.get("subtitle_fallback_reason")
+        == expected_decision.fallback_reason
+        and manifest.get("subtitle_timing_source")
+        == expected_decision.timing_source.value
+        and manifest.get("subtitle_enabled") is expected_enabled
+        and manifest.get("karaoke_subtitles_enabled") is expected_karaoke
+        and manifest.get("subtitle_mode") == expected_subtitle_mode
+        and (
+            requested_mode != SubtitleMode.OFF
+            or manifest.get("runtime_subtitle_cues") == []
+        )
+    )
+
+
 def _derived_karaoke_timing_error(text: str, duration_ms: Any) -> str | None:
     """Return a deterministic capability error for derived karaoke timing."""
     normalized_text = " ".join(str(text).split())
@@ -235,6 +335,7 @@ class VerticalSliceRenderResult(BaseModel):
     output_path: Path
     content_sha256: str
     run_fingerprint: str
+    subtitle_semantics_version: int
     narration_quality: str | None = None
     narration_source_refs: tuple[str, ...] = ()
     runtime_timeline_duration_ms: int | None = None
@@ -643,7 +744,11 @@ class VisualProductionV2Service:
                     cached_manifest = json.load(f)
             except (OSError, json.JSONDecodeError):
                 break
-            if _has_current_subtitle_semantics_version(cached_manifest):
+            if _validate_cached_subtitle_semantics(
+                manifest=cached_manifest,
+                canonical_requested_mode=canonical_sub_mode,
+                fallback_policy=canonical_sub_fallback,
+            ):
                 break
             cache_slot += 1
 
@@ -698,6 +803,9 @@ class VisualProductionV2Service:
                     output_path=final_mp4_path,
                     content_sha256=actual_sha,
                     run_fingerprint=run_fingerprint,
+                    subtitle_semantics_version=manifest_data[
+                        "subtitle_semantics_version"
+                    ],
                     narration_quality=manifest_data.get("narration_quality"),
                     narration_source_refs=tuple(manifest_data.get("narration_source_refs", [])),
                     runtime_timeline_duration_ms=manifest_data.get("runtime_timeline_duration_ms"),
@@ -1462,6 +1570,7 @@ class VisualProductionV2Service:
             output_path=final_mp4_path,
             content_sha256=final_sha,
             run_fingerprint=run_fingerprint,
+            subtitle_semantics_version=SUBTITLE_SEMANTICS_VERSION,
             narration_quality=final_narration_quality,
             narration_source_refs=final_narration_source_refs,
             runtime_timeline_duration_ms=runtime_timeline_duration_ms,
@@ -1601,6 +1710,9 @@ class VisualProductionV2Service:
                 output_path=rev_final_mp4,
                 content_sha256=rev_manifest["content_sha256"],
                 run_fingerprint=rev_fingerprint,
+                subtitle_semantics_version=rev_manifest[
+                    "subtitle_semantics_version"
+                ],
                 narration_quality=rev_manifest.get("narration_quality"),
                 narration_source_refs=tuple(rev_manifest.get("narration_source_refs", [])),
                 runtime_timeline_duration_ms=rev_manifest.get("runtime_timeline_duration_ms"),
@@ -1825,6 +1937,9 @@ class VisualProductionV2Service:
                 output_path=final_mp4_path,
                 content_sha256=final_sha,
                 run_fingerprint=rev_fingerprint,
+                subtitle_semantics_version=rev_manifest[
+                    "subtitle_semantics_version"
+                ],
                 narration_quality=rev_manifest.get("narration_quality"),
                 narration_source_refs=tuple(rev_manifest.get("narration_source_refs", [])),
                 runtime_timeline_duration_ms=rev_manifest.get("runtime_timeline_duration_ms"),

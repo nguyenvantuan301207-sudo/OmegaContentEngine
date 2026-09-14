@@ -789,6 +789,7 @@ async def test_fallback_provenance_is_idempotent(v2_service_fixture):
         first.subtitle_fallback_applied,
         first.subtitle_fallback_reason,
         first.subtitle_timing_source,
+        first.subtitle_semantics_version,
     )
     second_provenance = (
         second.requested_subtitle_mode,
@@ -796,6 +797,7 @@ async def test_fallback_provenance_is_idempotent(v2_service_fixture):
         second.subtitle_fallback_applied,
         second.subtitle_fallback_reason,
         second.subtitle_timing_source,
+        second.subtitle_semantics_version,
     )
     assert first_provenance == second_provenance
 
@@ -823,6 +825,7 @@ async def test_v2_manifest_provenance_roundtrip(v2_service_fixture):
     assert manifest_data["subtitle_timing_source"] == "DERIVED_SEGMENT_TIMING"
     assert "subtitle_mode_decision" in manifest_data
     assert manifest_data["subtitle_semantics_version"] == SUBTITLE_SEMANTICS_VERSION
+    assert result.subtitle_semantics_version == SUBTITLE_SEMANTICS_VERSION
 
 
 @pytest.mark.asyncio
@@ -865,6 +868,110 @@ async def test_incompatible_subtitle_semantics_cache_is_a_miss(
         (second.output_path.parent / "manifest.json").read_text("utf-8")
     )
     assert current_manifest["subtitle_semantics_version"] == SUBTITLE_SEMANTICS_VERSION
+    narration_calls_after_fresh_render = (
+        fx["narration"].synthesize_segment_audio.call_count
+    )
+
+    third = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=SubtitleMode.KARAOKE
+    )
+
+    assert third.output_path == second.output_path
+    assert third.run_fingerprint == second.run_fingerprint
+    assert (
+        fx["narration"].synthesize_segment_audio.call_count
+        == narration_calls_after_fresh_render
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "provider_timing",
+        "canonical_mode_mismatch",
+        "invalid_transition",
+        "invalid_fallback",
+        "invalid_standard_fallback",
+        "false_karaoke_capability",
+    ],
+)
+async def test_current_version_invalid_subtitle_semantics_cache_is_a_miss(
+    v2_service_fixture, corruption
+):
+    fx = v2_service_fixture
+    duration_ms = 49 if corruption in {"invalid_fallback", "false_karaoke_capability"} else 2000
+    text = "one two three four five"
+    _setup_v2_mocks(fx, text=text, duration_ms=duration_ms)
+    session, m_exec_id, req_id = _make_mock_session_and_lineage()
+    canonical_mode = (
+        SubtitleMode.STANDARD
+        if corruption
+        in {
+            "canonical_mode_mismatch",
+            "invalid_transition",
+            "invalid_standard_fallback",
+        }
+        else SubtitleMode.KARAOKE
+    )
+
+    first = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=canonical_mode
+    )
+    manifest_path = first.output_path.parent / "manifest.json"
+    manifest = json.loads(manifest_path.read_text("utf-8"))
+
+    if corruption == "provider_timing":
+        manifest["subtitle_timing_source"] = "PROVIDER_WORD_TIMING"
+        manifest["subtitle_mode_decision"]["timing_source"] = "PROVIDER_WORD_TIMING"
+    elif corruption == "canonical_mode_mismatch":
+        manifest["requested_subtitle_mode"] = "KARAOKE"
+        manifest["effective_subtitle_mode"] = "KARAOKE"
+        manifest["karaoke_subtitles_enabled"] = True
+        manifest["subtitle_mode"] = "karaoke"
+        manifest["subtitle_mode_decision"].update(
+            requested_mode="KARAOKE", effective_mode="KARAOKE"
+        )
+    elif corruption == "invalid_transition":
+        manifest["effective_subtitle_mode"] = "KARAOKE"
+        manifest["karaoke_subtitles_enabled"] = True
+        manifest["subtitle_mode"] = "karaoke"
+        manifest["subtitle_mode_decision"]["effective_mode"] = "KARAOKE"
+    elif corruption == "invalid_fallback":
+        manifest["subtitle_fallback_applied"] = False
+        manifest["subtitle_mode_decision"]["fallback_applied"] = False
+    elif corruption == "invalid_standard_fallback":
+        manifest["subtitle_fallback_applied"] = True
+        manifest["subtitle_fallback_reason"] = "unexpected_standard_fallback"
+        manifest["subtitle_mode_decision"].update(
+            fallback_applied=True,
+            fallback_reason="unexpected_standard_fallback",
+        )
+    else:
+        manifest["effective_subtitle_mode"] = "KARAOKE"
+        manifest["subtitle_fallback_applied"] = False
+        manifest["subtitle_fallback_reason"] = None
+        manifest["karaoke_subtitles_enabled"] = True
+        manifest["subtitle_mode"] = "karaoke"
+        manifest["subtitle_mode_decision"].update(
+            effective_mode="KARAOKE",
+            fallback_applied=False,
+            fallback_reason=None,
+        )
+
+    manifest_path.write_text(json.dumps(manifest, indent=2), "utf-8")
+    old_video_bytes = first.output_path.read_bytes()
+    narration_calls_before = fx["narration"].synthesize_segment_audio.call_count
+
+    second = await fx["service"].render_mission_execution(
+        session, m_exec_id, req_id, subtitle_mode=canonical_mode
+    )
+
+    assert second.output_path != first.output_path
+    assert second.subtitle_timing_source == "DERIVED_SEGMENT_TIMING"
+    assert fx["narration"].synthesize_segment_audio.call_count == narration_calls_before + 1
+    assert first.output_path.read_bytes() == old_video_bytes
+    assert json.loads(manifest_path.read_text("utf-8")) == manifest
 
 
 @pytest.mark.asyncio
@@ -913,6 +1020,7 @@ async def test_current_subtitle_semantics_cache_hit_is_idempotent(v2_service_fix
     assert second.output_path == first.output_path
     assert second.run_fingerprint == first.run_fingerprint
     assert second.subtitle_timing_source == first.subtitle_timing_source
+    assert second.subtitle_semantics_version == first.subtitle_semantics_version
     assert fx["narration"].synthesize_segment_audio.call_count == narration_calls_before
 
 

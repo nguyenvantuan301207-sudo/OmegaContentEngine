@@ -438,6 +438,13 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
         )
         subtitle_style_applied = selected_style
         effective_fps_mode = "CFR"
+        requested_subtitle_mode = "STANDARD"
+        effective_subtitle_mode = "STANDARD"
+        subtitle_fallback_applied = False
+        subtitle_fallback_reason = None
+        subtitle_timing_source = "DERIVED_SEGMENT_TIMING"
+        subtitle_semantics_version = 2
+        subtitle_mode_decision = None
 
     mock_v2_service.render_mission_execution.return_value = FakeResult()
     session = create_v2_session()
@@ -495,6 +502,12 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
             "effective_fps_mode": "CFR",
             "text_truncated": True,
             "scenes": [{"sequence_index": 1, "text_truncated": True}],
+            "requested_subtitle_mode": "STANDARD",
+            "effective_subtitle_mode": "STANDARD",
+            "subtitle_fallback_applied": False,
+            "subtitle_fallback_reason": None,
+            "subtitle_timing_source": "DERIVED_SEGMENT_TIMING",
+            "subtitle_semantics_version": 2,
         },
     )
 

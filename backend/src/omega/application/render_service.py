@@ -893,6 +893,9 @@ class ProductionRenderService:
             render_provenance["subtitle_fallback_applied"] = result.subtitle_fallback_applied
             render_provenance["subtitle_fallback_reason"] = result.subtitle_fallback_reason
             render_provenance["subtitle_timing_source"] = result.subtitle_timing_source
+            render_provenance["subtitle_semantics_version"] = (
+                result.subtitle_semantics_version
+            )
             if getattr(result, "subtitle_mode_decision", None) is not None:
                 render_provenance["subtitle_mode_decision"] = result.subtitle_mode_decision.model_dump()
 
