@@ -249,6 +249,174 @@ def test_contract_immutability_and_source_mutation_isolation():
         contract.lineage.mission_id = uuid4()
 
 
+def test_exact_voice_profile_mutation_bug_reproduction():
+    """Exact reproduction probe: mutating nested dict contents must be blocked and fingerprint remain stable."""
+    req = _make_dummy_request(voice_profile={"voice_ref": "af_heart", "speed": 1.0})
+    contract = resolve_canonical_production_contract(req)
+
+    before = contract.canonical_fingerprint()
+
+    # Attempt top-level nested dict item assignment
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        contract.policy.voice_profile["probe"] = "mutated"
+
+    after = contract.canonical_fingerprint()
+    assert before == after
+    assert "probe" not in contract.policy.voice_profile
+
+
+def test_nested_dict_voice_profile_mutation_blocked():
+    """Nested mappings inside voice_profile must also be deeply immutable."""
+    source = {
+        "provider": {
+            "voice": "af_heart",
+            "nested_settings": {"gain": 0.5},
+        }
+    }
+    req = _make_dummy_request(voice_profile=source)
+    contract = resolve_canonical_production_contract(req)
+
+    before = contract.canonical_fingerprint()
+
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        contract.policy.voice_profile["provider"]["voice"] = "mutated"
+
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        contract.policy.voice_profile["provider"]["nested_settings"]["gain"] = 1.0
+
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        contract.policy.voice_profile["provider"]["new_key"] = "forbidden"
+
+    after = contract.canonical_fingerprint()
+    assert before == after
+    assert contract.policy.voice_profile["provider"]["voice"] == "af_heart"
+    assert contract.policy.voice_profile["provider"]["nested_settings"]["gain"] == 0.5
+
+
+def test_nested_list_voice_profile_mutation_blocked():
+    """Nested lists inside voice_profile must be converted to tuples and mutation blocked."""
+    source = {
+        "preferred_voices": ["af_heart", "af_bella"],
+        "matrix": [["v1", "v2"], ["v3"]],
+    }
+    req = _make_dummy_request(voice_profile=source)
+    contract = resolve_canonical_production_contract(req)
+
+    before = contract.canonical_fingerprint()
+
+    # Attempt list append
+    with pytest.raises(AttributeError):
+        contract.policy.voice_profile["preferred_voices"].append("af_sky")
+
+    # Attempt list item assignment
+    with pytest.raises(TypeError):
+        contract.policy.voice_profile["preferred_voices"][0] = "mutated"
+
+    # Attempt inner list append
+    with pytest.raises(AttributeError):
+        contract.policy.voice_profile["matrix"][0].append("v_extra")
+
+    after = contract.canonical_fingerprint()
+    assert before == after
+    assert contract.policy.voice_profile["preferred_voices"] == ("af_heart", "af_bella")
+
+
+def test_voice_profile_serialization_roundtrip_and_key_order_independence():
+    """Serialization roundtrips cleanly and key insertion order does not affect fingerprint."""
+    common_id = uuid4()
+    channel_id = uuid4()
+
+    def make_req_with_vp(vp: dict):
+        return ProductionRequest(
+            id=common_id,
+            channel_id=channel_id,
+            script_version_id=uuid4(),
+            content_request_id=uuid4(),
+            channel_dna_revision_id=uuid4(),
+            mode="MISSION_EXECUTION",
+            target_width=1920,
+            target_height=1080,
+            fps=24,
+            voice_profile=vp,
+            metadata_={},
+        )
+
+    vp_order1 = {
+        "voice_ref": "af_heart",
+        "speed": 1.0,
+        "nested": {"a": 1, "b": 2},
+        "voices": ["a", "b"],
+    }
+    vp_order2 = {
+        "speed": 1.0,
+        "nested": {"b": 2, "a": 1},
+        "voices": ["a", "b"],
+        "voice_ref": "af_heart",
+    }
+
+    script_id = uuid4()
+    content_id = uuid4()
+    dna_id = uuid4()
+
+    req1 = make_req_with_vp(vp_order1)
+    req1.script_version_id = script_id
+    req1.content_request_id = content_id
+    req1.channel_dna_revision_id = dna_id
+
+    req2 = make_req_with_vp(vp_order2)
+    req2.script_version_id = script_id
+    req2.content_request_id = content_id
+    req2.channel_dna_revision_id = dna_id
+
+    contract1 = resolve_canonical_production_contract(req1)
+    contract2 = resolve_canonical_production_contract(req2)
+
+    # 1. model_dump() succeeds and yields native types
+    dump1 = contract1.model_dump()
+    assert dump1["policy"]["voice_profile"] == {
+        "nested": {"a": 1, "b": 2},
+        "speed": 1.0,
+        "voice_ref": "af_heart",
+        "voices": ["a", "b"],
+    }
+
+    # 2. model_dump_json() succeeds
+    json1 = contract1.model_dump_json()
+    assert "af_heart" in json1
+
+    # 3. to_provenance_dict() matches across key orders
+    prov1 = contract1.to_provenance_dict()
+    prov2 = contract2.to_provenance_dict()
+    assert prov1 == prov2
+
+    # 4. Fingerprint is identical regardless of key order
+    assert contract1.canonical_fingerprint() == contract2.canonical_fingerprint()
+
+
+def test_invalid_voice_profile_objects_fail_closed():
+    """Unsupported mutable or non-JSON types must fail closed during resolution."""
+    # Set is not allowed
+    with pytest.raises((TypeError, ValidationError)):
+        resolve_canonical_production_contract(
+            _make_dummy_request(voice_profile={"tags": {"tag1", "tag2"}})
+        )
+
+    # Custom mutable class instance is not allowed
+    class CustomObject:
+        pass
+
+    with pytest.raises((TypeError, ValidationError)):
+        resolve_canonical_production_contract(
+            _make_dummy_request(voice_profile={"custom": CustomObject()})
+        )
+
+    # Non-string keys are not allowed
+    with pytest.raises((TypeError, ValidationError)):
+        resolve_canonical_production_contract(
+            _make_dummy_request(voice_profile={123: "numeric_key"})
+        )
+
+
 # ── 6. Determinism & Provenance Serialization ──
 
 def test_contract_deterministic_fingerprint():

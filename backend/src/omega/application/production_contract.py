@@ -11,10 +11,12 @@ import copy
 import hashlib
 import json
 import os
+from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler
+from pydantic_core import core_schema
 
 from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.domain.channel_style import (
@@ -152,6 +154,153 @@ class CanonicalProductionLineage(BaseModel):
     render_job_id: UUID | None = None
 
 
+class FrozenDict(Mapping):
+    """Immutable snapshot dictionary for canonical production contracts.
+
+    Recursively freezes:
+    - nested mappings -> FrozenDict
+    - nested lists/tuples -> tuple
+    - JSON scalars (str, int, float, bool, None) -> preserved
+
+    Any attempt to mutate raises TypeError or AttributeError.
+    Unsupported mutable types (e.g. set, custom objects) fail closed during construction.
+    """
+
+    __slots__ = ("_data", "_hash")
+
+    def __init__(self, data: Mapping[str, Any] | None = None) -> None:
+        raw = dict(data or {})
+        frozen: dict[str, Any] = {}
+        for k, v in raw.items():
+            if not isinstance(k, str):
+                raise TypeError(f"Voice profile keys must be strings, got {type(k).__name__}")
+            frozen[k] = self._freeze(v)
+        object.__setattr__(self, "_data", frozen)
+        object.__setattr__(self, "_hash", None)
+
+    @classmethod
+    def _freeze(cls, val: Any) -> Any:
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, (str, int, float)) or val is None:
+            return val
+        if isinstance(val, Mapping):
+            return FrozenDict(val)
+        if isinstance(val, (list, tuple)):
+            return tuple(cls._freeze(item) for item in val)
+        raise TypeError(f"Unsupported voice profile value type: {type(val).__name__}")
+
+    def __getitem__(self, key: str) -> Any:
+        return self._data[key]
+
+    def __iter__(self):
+        return iter(self._data)
+
+    def __len__(self) -> int:
+        return len(self._data)
+
+    def __contains__(self, key: object) -> bool:
+        return key in self._data
+
+    def get(self, key: str, default: Any = None) -> Any:
+        return self._data.get(key, default)
+
+    def keys(self):
+        return self._data.keys()
+
+    def values(self):
+        return self._data.values()
+
+    def items(self):
+        return self._data.items()
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        raise TypeError(f"'{self.__class__.__name__}' object does not support item assignment")
+
+    def __delitem__(self, key: Any) -> None:
+        raise TypeError(f"'{self.__class__.__name__}' object does not support item deletion")
+
+    def pop(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError(f"'{self.__class__.__name__}' object is immutable")
+
+    def clear(self) -> None:
+        raise TypeError(f"'{self.__class__.__name__}' object is immutable")
+
+    def update(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError(f"'{self.__class__.__name__}' object is immutable")
+
+    def setdefault(self, *args: Any, **kwargs: Any) -> None:
+        raise TypeError(f"'{self.__class__.__name__}' object is immutable")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError(f"'{self.__class__.__name__}' object is immutable")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(f"'{self.__class__.__name__}' object is immutable")
+
+    def __copy__(self) -> FrozenDict:
+        return self
+
+    def __deepcopy__(self, memo: Any) -> FrozenDict:
+        return self
+
+    def to_dict(self) -> dict[str, Any]:
+        """Recursively thaw to a standard JSON-compatible Python dictionary."""
+        out: dict[str, Any] = {}
+        for k in sorted(self._data.keys()):
+            v = self._data[k]
+            if isinstance(v, FrozenDict):
+                out[k] = v.to_dict()
+            elif isinstance(v, tuple):
+                out[k] = [
+                    item.to_dict() if isinstance(item, FrozenDict) else item for item in v
+                ]
+            else:
+                out[k] = v
+        return out
+
+    def __repr__(self) -> str:
+        return f"FrozenDict({self._data!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, Mapping):
+            return dict(self) == dict(other)
+        return False
+
+    def __hash__(self) -> int:
+        h = self._hash
+        if h is None:
+            items = tuple(
+                sorted(
+                    (k, v if not isinstance(v, tuple) else tuple(v))
+                    for k, v in self._data.items()
+                )
+            )
+            h = hash(items)
+            object.__setattr__(self, "_hash", h)
+        return h
+
+    @classmethod
+    def __get_pydantic_core_schema__(
+        cls, source_type: Any, handler: GetCoreSchemaHandler
+    ):
+        def validate(val: Any) -> FrozenDict:
+            if isinstance(val, FrozenDict):
+                return val
+            if isinstance(val, Mapping):
+                return FrozenDict(val)
+            raise TypeError(f"Expected mapping for voice_profile, got {type(val).__name__}")
+
+        return core_schema.no_info_after_validator_function(
+            validate,
+            core_schema.any_schema(),
+            serialization=core_schema.plain_serializer_function_ser_schema(
+                lambda v: v.to_dict() if isinstance(v, FrozenDict) else v,
+                return_schema=core_schema.dict_schema(),
+            ),
+        )
+
+
 class CanonicalProductionPolicy(BaseModel):
     """Normalized production rendering policy snapshot."""
 
@@ -176,7 +325,7 @@ class CanonicalProductionPolicy(BaseModel):
     outro_enabled: bool = True
     brand_spec_reference: str | None = None
 
-    voice_profile: dict[str, Any] = Field(default_factory=dict)
+    voice_profile: FrozenDict = Field(default_factory=FrozenDict)
 
 
 class CanonicalProductionContract(BaseModel):
@@ -226,7 +375,9 @@ class CanonicalProductionContract(BaseModel):
                 "intro_enabled": self.policy.intro_enabled,
                 "outro_enabled": self.policy.outro_enabled,
                 "brand_spec_reference": self.policy.brand_spec_reference,
-                "voice_profile": copy.deepcopy(self.policy.voice_profile),
+                "voice_profile": self.policy.voice_profile.to_dict()
+                if hasattr(self.policy.voice_profile, "to_dict")
+                else copy.deepcopy(self.policy.voice_profile),
             },
         }
 
@@ -410,8 +561,15 @@ def resolve_canonical_production_contract(
     )
 
     # 9. Voice Profile Snapshot
-    vp = copy.deepcopy(dict(_get_val(production_request, "voice_profile", None) or {}))
-    if "voice_profile" in overrides and isinstance(overrides["voice_profile"], dict):
+    raw_vp = _get_val(production_request, "voice_profile", None)
+    if isinstance(raw_vp, BaseModel):
+        vp = raw_vp.model_dump()
+    elif isinstance(raw_vp, Mapping):
+        vp = dict(raw_vp)
+    else:
+        vp = dict(raw_vp or {})
+
+    if "voice_profile" in overrides and isinstance(overrides["voice_profile"], Mapping):
         vp.update(overrides["voice_profile"])
 
     policy = CanonicalProductionPolicy(
