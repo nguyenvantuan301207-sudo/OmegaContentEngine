@@ -49,6 +49,35 @@ class ProductionFormat(enum.StrEnum):
     YOUTUBE_VIDEO_MP4 = "YOUTUBE_VIDEO_MP4"
 
 
+class SubtitleMode(enum.StrEnum):
+    """Canonical subtitle rendering mode."""
+
+    OFF = "OFF"
+    STANDARD = "STANDARD"
+    KARAOKE = "KARAOKE"
+
+
+class SubtitleFallbackPolicy(enum.StrEnum):
+    """Fallback policy when requested subtitle mode cannot be satisfied."""
+
+    STANDARD_FALLBACK = "STANDARD_FALLBACK"
+
+
+class VisualAssetMode(enum.StrEnum):
+    """Visual asset sourcing mode."""
+
+    LOCAL_TEMPLATE_ONLY = "LOCAL_TEMPLATE_ONLY"
+    PEXELS = "PEXELS"
+
+
+class NarrationProviderType(enum.StrEnum):
+    """Supported narration synthesis provider type."""
+
+    LOCAL_TTS = "LOCAL_TTS"
+    GEMINI = "GEMINI"
+    NEURAL = "NEURAL"
+
+
 class SceneType(enum.StrEnum):
     """Semantic type of a production scene."""
 
