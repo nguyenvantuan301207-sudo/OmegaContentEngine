@@ -168,7 +168,7 @@ async def update_render_settings(
 @router.post(
     "/{request_id}/prepare",
     response_model=ProductionRequestResponse,
-    summary="Run Scene Planner, placeholder visual assets, narration, subtitles, and RenderPlan v1",
+    summary="Plan canonical scenes, asset requirements, and RenderPlan v1",
 )
 async def prepare_production(
     channel_id: UUID,
@@ -287,7 +287,7 @@ async def get_srt_file(
     if not asset:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="SRT subtitle file not found. Call /prepare first.",
+            detail="No rendered SRT subtitle artifact is available.",
         )
     file_path = storage.resolve_stored_uri(channel_id, request_id, asset.storage_uri)
     if not file_path.exists():

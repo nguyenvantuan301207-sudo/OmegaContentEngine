@@ -9,12 +9,12 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from omega.application.asset_provider import LocalAssetProvider
 from omega.application.media_storage import LocalMediaStorageProvider
-from omega.application.narration_provider import get_narration_provider
-from omega.application.production_timeline import align_production_timeline
-from omega.application.scene_planner import plan_scenes_from_script
-from omega.application.subtitle_engine import SubtitleEngine, SubtitleRenderStyle
+from omega.application.scene_composition import SceneCompositionEngine
+from omega.application.storyboard_engine import StoryboardEngine
+from omega.application.subtitle_engine import SubtitleRenderStyle
+from omega.application.visual_production_v2_service import ScriptStoryboardAdapter
+from omega.domain.channel_style import extract_channel_style_profile
 from omega.domain.production import (
     ProductionMode,
     ProductionRequestCreate,
@@ -26,15 +26,13 @@ from omega.infrastructure.models import (
     AssetRequirement,
     Channel,
     ContentGenerationRequest,
-    NarrationSegment,
-    ProductionAsset,
     ProductionRenderJob,
     ProductionRequest,
     ProductionScene,
     RenderPlan,
     ScriptSection,
+    ScriptStatement,
     ScriptVersion,
-    SubtitleCue,
 )
 from omega.logging import get_logger
 
@@ -58,9 +56,8 @@ class ProductionService:
 
     def __init__(self, storage: LocalMediaStorageProvider | None = None) -> None:
         self.storage = storage or LocalMediaStorageProvider()
-        self.asset_provider = LocalAssetProvider(self.storage)
-        self.narration_provider = get_narration_provider(self.storage)
-        self.subtitle_engine = SubtitleEngine(self.storage)
+        self.storyboard_engine = StoryboardEngine()
+        self.scene_composition_engine = SceneCompositionEngine()
 
     async def update_render_settings(
         self,
@@ -208,7 +205,7 @@ class ProductionService:
         channel_id: uuid.UUID,
         request_id: uuid.UUID,
     ) -> ProductionRequest:
-        """Run Scene Planner, generate placeholder visual assets, narration, and RenderPlan v1."""
+        """Persist canonical planned scenes and a RenderPlan without physical media work."""
         # 1. Load request and script
         req_stmt = (
             select(ProductionRequest)
@@ -216,9 +213,9 @@ class ProductionService:
             .options(
                 selectinload(ProductionRequest.script_version)
                 .selectinload(ScriptVersion.sections)
-                .selectinload(ScriptSection.statements),
+                .selectinload(ScriptSection.statements)
+                .selectinload(ScriptStatement.citations),
                 selectinload(ProductionRequest.scenes),
-                selectinload(ProductionRequest.assets),
             )
         )
         res = await session.execute(req_stmt)
@@ -229,197 +226,77 @@ class ProductionService:
             )
 
         script = req.script_version
-        script_dict = {
-            "id": script.id,
-            "title": script.title,
-            "hook_text": script.hook_text,
-            "closing_text": script.closing_text,
-            "cta_text": script.cta_text,
-            "sections": [
-                {
-                    "id": s.id,
-                    "section_order": s.section_order,
-                    "heading": s.heading,
-                    "statements": [
-                        {
-                            "id": st.id,
-                            "statement_order": st.statement_order,
-                            "statement_text": st.statement_text,
-                            "statement_type": st.statement_type,
-                        }
-                        for st in s.statements
-                    ],
-                }
-                for s in script.sections
-            ],
-        }
+        script_dict = ScriptStoryboardAdapter.to_script_dict(script)
+        channel = await session.get(Channel, channel_id)
+        style_profile = (
+            extract_channel_style_profile(channel.metadata_) if channel else None
+        )
+        pacing = style_profile.pacing if style_profile else "BALANCED"
+        storyboard = self.storyboard_engine.generate_storyboard(
+            script_dict,
+            pacing=pacing,
+        )
 
-        # 2. Deterministic Scene Planning
-        planned_scenes = plan_scenes_from_script(req.id, script_dict)
-
-        # Clear any existing draft scenes and assets
+        # Clear existing planned scenes before replacing the plan. Physical assets
+        # are intentionally outside preparation authority and are not touched.
         for sc in list(req.scenes):
             await session.delete(sc)
-        for a in list(req.assets):
-            await session.delete(a)
         await session.flush()
 
-        # 3. Create Scene & Asset Requirement records
-        db_scenes: list[ProductionScene] = []
-        db_requirements: list[AssetRequirement] = []
-        for s_data in planned_scenes:
+        sections_by_heading = {
+            section.heading: section for section in script.sections
+        }
+
+        # Persist the canonical storyboard as planned truth only.
+        for planned_scene in storyboard.scenes:
+            section = sections_by_heading.get(planned_scene.section_id)
+            statements_by_order = (
+                {statement.statement_order: statement for statement in section.statements}
+                if section is not None
+                else {}
+            )
+            referenced_statements = [
+                statements_by_order[order]
+                for order in planned_scene.source_statement_references
+                if order in statements_by_order
+            ]
             scene_obj = ProductionScene(
-                id=s_data["id"],
+                id=uuid.uuid4(),
                 production_request_id=req.id,
-                scene_order=s_data["scene_order"],
-                script_section_id=s_data["script_section_id"],
-                start_statement_id=s_data["start_statement_id"],
-                end_statement_id=s_data["end_statement_id"],
-                scene_type=s_data["scene_type"],
-                narration_text=s_data["narration_text"],
-                estimated_duration_ms=s_data["estimated_duration_ms"],
-                visual_intent=s_data["visual_intent"],
-                transition_in=s_data["transition_in"],
-                transition_out=s_data["transition_out"],
+                scene_order=planned_scene.sequence_index,
+                script_section_id=section.id if section is not None else None,
+                start_statement_id=(
+                    referenced_statements[0].id if referenced_statements else None
+                ),
+                end_statement_id=(
+                    referenced_statements[-1].id if referenced_statements else None
+                ),
+                scene_type=planned_scene.visual_strategy.value,
+                narration_text=planned_scene.narration_excerpt,
+                estimated_duration_ms=round(
+                    planned_scene.estimated_duration_seconds * 1000
+                ),
+                visual_intent=planned_scene.visual_brief,
+                transition_in=None,
+                transition_out=planned_scene.motion_hint,
             )
             session.add(scene_obj)
-            db_scenes.append(scene_obj)
 
-            for r_data in s_data.get("asset_requirements", []):
-                req_obj = AssetRequirement(
-                    id=r_data["id"],
+            composition = self.scene_composition_engine.compose(planned_scene)
+            for planned_requirement in composition.asset_requirements:
+                session.add(AssetRequirement(
+                    id=uuid.uuid4(),
                     scene_id=scene_obj.id,
-                    asset_type=r_data["asset_type"],
-                    purpose=r_data["purpose"],
-                    query_hint=r_data.get("query_hint"),
-                    required=r_data.get("required", True),
-                    status=r_data["status"],
-                    license_requirement=r_data["license_requirement"],
-                )
-                session.add(req_obj)
-                db_requirements.append(req_obj)
+                    asset_type=planned_requirement.kind,
+                    purpose=planned_requirement.purpose,
+                    query_hint=planned_requirement.query,
+                    required=True,
+                    status="PENDING",
+                    license_requirement="COMMERCIAL_ALLOWED",
+                ))
 
-        await session.flush()
-
-        # 4. Resolve Visual Placeholder Assets
-        db_assets: list[ProductionAsset] = []
-        for req_obj in db_requirements:
-            asset_dict = await self.asset_provider.resolve_asset_requirement(
-                channel_id=channel_id,
-                request_id=req.id,
-                requirement={"id": req_obj.id, "asset_type": req_obj.asset_type},
-                width=req.target_width,
-                height=req.target_height,
-            )
-            req_obj.status = "RESOLVED"
-            asset_record = ProductionAsset(
-                id=asset_dict["id"],
-                channel_id=channel_id,
-                production_request_id=req.id,
-                asset_requirement_id=req_obj.id,
-                asset_type=asset_dict["asset_type"],
-                provider_type=asset_dict["provider_type"],
-                storage_uri=asset_dict["storage_uri"],
-                content_hash=asset_dict["content_hash"],
-                mime_type=asset_dict["mime_type"],
-                width=asset_dict["width"],
-                height=asset_dict["height"],
-                duration_ms=asset_dict["duration_ms"],
-                license_status=asset_dict["license_status"],
-                source_ref=asset_dict["source_ref"],
-                attribution=asset_dict["attribution"],
-            )
-            session.add(asset_record)
-            db_assets.append(asset_record)
-
-        # 5. Timeline Alignment, Narration Audio, and Subtitles
-        narration_plans, subtitle_plans, total_dur_ms = align_production_timeline(planned_scenes)
-
-        resolved_narration_policy = None
-        if self.narration_provider:
-            from omega.application.local_tts.policy import resolve_narration_policy
-
-            channel = await session.get(Channel, channel_id)
-            resolved_narration_policy = resolve_narration_policy(
-                request_policy=req.voice_profile,
-                request_metadata=req.metadata_,
-                channel_policy=channel.metadata_ if channel and channel.metadata_ else None,
-                actual_provider="LOCAL_TTS",
-            )
-
-        for n_plan in narration_plans:
-            audio_dict = await self.narration_provider.synthesize_segment_audio(
-                channel_id=channel_id,
-                request_id=req.id,
-                segment=n_plan,
-                voice_profile=resolved_narration_policy,
-            )
-            audio_asset = ProductionAsset(
-                id=audio_dict["id"],
-                channel_id=channel_id,
-                production_request_id=req.id,
-                asset_requirement_id=None,
-                asset_type=audio_dict["asset_type"],
-                provider_type=audio_dict["provider_type"],
-                storage_uri=audio_dict["storage_uri"],
-                content_hash=audio_dict["content_hash"],
-                mime_type=audio_dict["mime_type"],
-                width=None,
-                height=None,
-                duration_ms=audio_dict["duration_ms"],
-                license_status=audio_dict["license_status"],
-                source_ref=audio_dict["source_ref"],
-                attribution=audio_dict["attribution"],
-            )
-            session.add(audio_asset)
-
-            narr_seg = NarrationSegment(
-                id=uuid.uuid4(),
-                production_request_id=req.id,
-                scene_id=n_plan["scene_id"],
-                audio_asset_id=audio_asset.id,
-                text=n_plan["text"],
-                start_ms=n_plan["start_ms"],
-                end_ms=n_plan["end_ms"],
-                duration_ms=n_plan["duration_ms"],
-            )
-            session.add(narr_seg)
-
-        for s_plan in subtitle_plans:
-            sub_cue = SubtitleCue(
-                id=uuid.uuid4(),
-                production_request_id=req.id,
-                scene_id=s_plan["scene_id"],
-                cue_order=s_plan["cue_order"],
-                start_ms=s_plan["start_ms"],
-                end_ms=s_plan["end_ms"],
-                text=s_plan["text"],
-            )
-            session.add(sub_cue)
-
-        # Export SRT file
-        srt_asset_dict = self.subtitle_engine.export_srt_file(
-            channel_id=channel_id,
-            request_id=req.id,
-            subtitle_cues=subtitle_plans,
-        )
-        srt_asset = ProductionAsset(
-            id=srt_asset_dict["id"],
-            channel_id=channel_id,
-            production_request_id=req.id,
-            asset_requirement_id=None,
-            asset_type=srt_asset_dict["asset_type"],
-            provider_type=srt_asset_dict["provider_type"],
-            storage_uri=srt_asset_dict["storage_uri"],
-            content_hash=srt_asset_dict["content_hash"],
-            mime_type=srt_asset_dict["mime_type"],
-            license_status=srt_asset_dict["license_status"],
-            source_ref=srt_asset_dict["source_ref"],
-            attribution=srt_asset_dict["attribution"],
-        )
-        session.add(srt_asset)
-
-        # 6. Create Initial RenderPlan (v1)
+        # The RenderPlan is a planning manifest. Runtime narration, subtitles,
+        # and artifact truth are produced only by canonical V2 rendering.
         render_plan = RenderPlan(
             id=uuid.uuid4(),
             production_request_id=req.id,
@@ -430,35 +307,17 @@ class ProductionService:
             video_codec=req.video_codec,
             audio_codec=req.audio_codec,
             container=req.container_format,
-            total_duration_ms=total_dur_ms,
+            total_duration_ms=round(storyboard.estimated_duration_seconds * 1000),
             scene_manifest=[
                 {
-                    "scene_order": s["scene_order"],
-                    "type": s["scene_type"],
-                    "duration_ms": s["estimated_duration_ms"],
+                    "scene_order": scene.sequence_index,
+                    "type": scene.visual_strategy.value,
+                    "duration_ms": round(scene.estimated_duration_seconds * 1000),
                 }
-                for s in planned_scenes
+                for scene in storyboard.scenes
             ],
-            audio_manifest=[
-                {
-                    "scene_id": str(n["scene_id"]),
-                    "text": n["text"],
-                    "start_ms": n["start_ms"],
-                    "end_ms": n["end_ms"],
-                    "duration_ms": n["duration_ms"],
-                }
-                for n in narration_plans
-            ],
-            subtitle_manifest=[
-                {
-                    "scene_id": str(s["scene_id"]),
-                    "cue_order": s["cue_order"],
-                    "start_ms": s["start_ms"],
-                    "end_ms": s["end_ms"],
-                    "text": s["text"],
-                }
-                for s in subtitle_plans
-            ],
+            audio_manifest=[],
+            subtitle_manifest=[],
         )
         session.add(render_plan)
 

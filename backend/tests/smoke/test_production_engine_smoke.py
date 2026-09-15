@@ -142,7 +142,8 @@ async def test_production_engine_e2e_smoke(
         assert prep_res.status_code == 200
         assert prep_res.json()["status"] == "READY"
 
-        # Verify scenes, assets, narration, subtitles, and render plan
+        # Preparation persists planning truth only. Physical media and runtime
+        # timelines are owned by canonical V2 rendering.
         scenes_res = await client.get(
             f"/api/v1/channels/{channel_id}/production/{prod_req_id}/scenes"
         )
@@ -153,19 +154,19 @@ async def test_production_engine_e2e_smoke(
             f"/api/v1/channels/{channel_id}/production/{prod_req_id}/assets"
         )
         assert assets_res.status_code == 200
-        assert len(assets_res.json()) >= 1
+        assert assets_res.json() == []
 
         narr_res = await client.get(
             f"/api/v1/channels/{channel_id}/production/{prod_req_id}/narration"
         )
         assert narr_res.status_code == 200
-        assert len(narr_res.json()) >= 1
+        assert narr_res.json() == []
 
         sub_res = await client.get(
             f"/api/v1/channels/{channel_id}/production/{prod_req_id}/subtitles"
         )
         assert sub_res.status_code == 200
-        assert len(sub_res.json()) >= 1
+        assert sub_res.json() == []
 
         plan_res = await client.get(
             f"/api/v1/channels/{channel_id}/production/{prod_req_id}/render-plan"
