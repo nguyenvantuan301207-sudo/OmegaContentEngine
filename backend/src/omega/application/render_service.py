@@ -290,7 +290,12 @@ class ProductionRenderService:
             for a in req.assets
         ]
         reqs_list = [
-            {"id": r.id, "purpose": r.purpose, "required": r.required}
+            {
+                "id": r.id,
+                "scene_index": s.scene_order,
+                "purpose": r.purpose,
+                "required": r.required,
+            }
             for s in req.scenes
             for r in s.asset_requirements
         ]

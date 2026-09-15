@@ -16,6 +16,66 @@ from omega.domain.production import (
 )
 
 
+def _runtime_value(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, dict):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _runtime_subtitle_render_present(
+    snapshot: ProductionRuntimeTruthSnapshot,
+) -> bool:
+    subtitles = snapshot.subtitles
+    effective_mode = str(_runtime_value(subtitles, "effective_mode", "")).upper()
+    if effective_mode == "OFF":
+        return True
+    if effective_mode not in ("STANDARD", "KARAOKE"):
+        return False
+    return bool(
+        _runtime_value(subtitles, "burn_applied", False)
+        and _runtime_value(subtitles, "cues", ())
+        and _runtime_value(subtitles, "artifacts", ())
+    )
+
+
+def _runtime_contentful_visual_scene_indexes(
+    snapshot: ProductionRuntimeTruthSnapshot,
+) -> set[int]:
+    rendered_scenes = {
+        int(_runtime_value(scene, "sequence_index", 0)): scene
+        for scene in snapshot.scenes
+        if _runtime_value(scene, "scene_content_sha256")
+        and int(_runtime_value(scene, "duration_ms", 0)) > 0
+    }
+    contentful: set[int] = set()
+    for visual in snapshot.visuals:
+        scene_index = int(_runtime_value(visual, "scene_index", 0))
+        scene = rendered_scenes.get(scene_index)
+        if scene is None:
+            continue
+        origin = str(_runtime_value(visual, "origin", "")).upper()
+        template_rendered = origin == "TEMPLATE" and bool(
+            _runtime_value(visual, "template_id")
+            or _runtime_value(scene, "template_id")
+        )
+        provider_rendered = (
+            origin == "PROVIDER"
+            and bool(_runtime_value(visual, "provider"))
+            and any(
+                _runtime_value(visual, field)
+                for field in (
+                    "provider_asset_id",
+                    "storage_reference",
+                    "content_sha256",
+                    "source_url",
+                )
+            )
+        )
+        if template_rendered or provider_rendered:
+            contentful.add(scene_index)
+    return contentful
+
+
 class ProductionQAEngine:
     """Evaluates the 17 canonical Production QA rules against production context and media probe."""
 
@@ -35,9 +95,6 @@ class ProductionQAEngine:
         runtime_truth_snapshot: ProductionRuntimeTruthSnapshot | None = None,
     ) -> tuple[ProductionQAStatus, list[ProductionQAFinding]]:
         """Run all 17 rules and return (status, findings)."""
-        # D1a carries the exact persisted snapshot through QA without changing
-        # any existing rule's input authority; P18-E owns rule-source migration.
-        _ = runtime_truth_snapshot
         findings: list[ProductionQAFinding] = []
 
         # ── 1. SCRIPT_PIN_MISMATCH (BLOCKING) ──
@@ -65,18 +122,43 @@ class ProductionQAEngine:
             )
 
         # ── 3. MISSING_REQUIRED_ASSET (BLOCKING) ──
-        resolved_req_ids = {
-            str(a.get("asset_requirement_id")) for a in assets_data if a.get("asset_requirement_id")
-        }
-        for req in requirements_data:
-            if req.get("required", True) and str(req.get("id")) not in resolved_req_ids:
-                findings.append(
-                    ProductionQAFinding(
-                        rule_code=ProductionQARuleCode.MISSING_REQUIRED_ASSET,
-                        severity=ProductionQASeverity.BLOCKING,
-                        message=f"Required asset requirement {req.get('id')} ({req.get('purpose')}) was not resolved.",
-                    )
+        if runtime_truth_snapshot is not None:
+            runtime_visual_scene_indexes = _runtime_contentful_visual_scene_indexes(
+                runtime_truth_snapshot
+            )
+            missing_requirements = [
+                req
+                for req in requirements_data
+                if req.get("required", True)
+                and int(req.get("scene_index") or 0)
+                not in runtime_visual_scene_indexes
+            ]
+        else:
+            resolved_req_ids = {
+                str(a.get("asset_requirement_id"))
+                for a in assets_data
+                if a.get("asset_requirement_id")
+            }
+            missing_requirements = [
+                req
+                for req in requirements_data
+                if req.get("required", True)
+                and str(req.get("id")) not in resolved_req_ids
+            ]
+        for req in missing_requirements:
+            evidence_verb = (
+                "rendered" if runtime_truth_snapshot is not None else "resolved"
+            )
+            findings.append(
+                ProductionQAFinding(
+                    rule_code=ProductionQARuleCode.MISSING_REQUIRED_ASSET,
+                    severity=ProductionQASeverity.BLOCKING,
+                    message=(
+                        f"Required asset requirement {req.get('id')} "
+                        f"({req.get('purpose')}) was not {evidence_verb}."
+                    ),
                 )
+            )
 
         # ── 4. BLOCKED_ASSET_RIGHTS (BLOCKING) ──
         for asset in assets_data:
@@ -299,9 +381,23 @@ class ProductionQAEngine:
         visual_assets = [
             a
             for a in assets_data
-            if str(a.get("asset_type", "")).upper() in ("BACKGROUND", "IMAGE", "VIDEO")
+            if str(a.get("asset_type", "")).upper()
+            in ("BACKGROUND", "IMAGE", "VIDEO")
         ]
-        if not visual_assets and requirements_data:
+        runtime_visual_scene_indexes = (
+            _runtime_contentful_visual_scene_indexes(runtime_truth_snapshot)
+            if runtime_truth_snapshot is not None
+            else None
+        )
+        if runtime_visual_scene_indexes is not None and not runtime_visual_scene_indexes:
+            findings.append(
+                ProductionQAFinding(
+                    rule_code=ProductionQARuleCode.NO_CONTENTFUL_VISUAL_ASSET,
+                    severity=ProductionQASeverity.BLOCKING,
+                    message="Runtime truth contains no rendered contentful visual.",
+                )
+            )
+        elif runtime_visual_scene_indexes is None and not visual_assets and requirements_data:
             findings.append(
                 ProductionQAFinding(
                     rule_code=ProductionQARuleCode.NO_CONTENTFUL_VISUAL_ASSET,
@@ -323,20 +419,30 @@ class ProductionQAEngine:
             )
 
         # ── 22. MISSING_SUBTITLE_RENDER (BLOCKING) ──
-        if subtitle_cues and len(subtitle_cues) > 0:
+        if runtime_truth_snapshot is not None:
+            subtitle_render_missing = not _runtime_subtitle_render_present(
+                runtime_truth_snapshot
+            )
+        else:
             has_sub_asset = any(
                 str(a.get("asset_type", "")).upper() in ("SUBTITLE", "TEXT")
                 or "subrip" in str(a.get("mime_type", ""))
                 for a in assets_data
             )
-            if not has_sub_asset:
-                findings.append(
-                    ProductionQAFinding(
-                        rule_code=ProductionQARuleCode.MISSING_SUBTITLE_RENDER,
-                        severity=ProductionQASeverity.BLOCKING,
-                        message=f"Subtitle cues exist ({len(subtitle_cues)} cues) but subtitle asset was not exported or rendered.",
-                    )
+            subtitle_render_missing = bool(subtitle_cues) and not has_sub_asset
+        if subtitle_render_missing:
+            findings.append(
+                ProductionQAFinding(
+                    rule_code=ProductionQARuleCode.MISSING_SUBTITLE_RENDER,
+                    severity=ProductionQASeverity.BLOCKING,
+                    message=(
+                        "Subtitle rendering required by physical runtime truth is missing."
+                        if runtime_truth_snapshot is not None
+                        else f"Subtitle cues exist ({len(subtitle_cues)} cues) but "
+                        "subtitle asset was not exported or rendered."
+                    ),
                 )
+            )
 
         # ── QA V2: ROBOTIC_FALLBACK_TTS (WARNING) ──
         is_fallback_tts = any(
