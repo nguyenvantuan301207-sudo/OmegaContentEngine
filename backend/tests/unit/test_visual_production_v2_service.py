@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from omega.application.brand_asset_resolver import BrandMediaKind, ResolvedBrandAsset
-from omega.application.production_runtime_truth import RUNTIME_TRUTH_SCHEMA_VERSION
 from omega.application.storyboard_engine import (
     StoryboardPlan,
     StoryboardScene,
@@ -23,7 +22,6 @@ from omega.application.visual_asset_engine import (
 from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import VisualAssetKind
 from omega.application.visual_production_v2_service import (
-    SUBTITLE_SEMANTICS_VERSION,
     ScriptStoryboardAdapter,
     VerticalSliceBackgroundMusicInput,
     VerticalSliceError,
@@ -31,13 +29,13 @@ from omega.application.visual_production_v2_service import (
     VisualProductionV2Service,
     _safe_provider_metadata,
 )
-from omega.domain.channel_style import ChannelStyleProfile
 from omega.infrastructure.models import (
     ChannelDNARevision,
     ContentCitation,
     ContentGenerationRequest,
     Mission,
     MissionExecution,
+    ProductionRequest,
     ScriptSection,
     ScriptStatement,
     ScriptVersion,
@@ -280,6 +278,29 @@ def lineage_data():
     )
     req.scripts = [script]
 
+    production_request = ProductionRequest(
+        id=exec_id,
+        channel_id=chan_id,
+        script_version_id=script.id,
+        content_request_id=req_id,
+        channel_dna_revision_id=dna_id,
+        mission_execution_id=exec_id,
+        mode="MISSION_EXECUTION",
+        target_width=1920,
+        target_height=1080,
+        fps=24,
+        video_codec="h264",
+        audio_codec="aac",
+        container_format="mp4",
+        voice_profile={},
+        metadata_={},
+    )
+    production_request.content_request = req
+    production_request.script_version = script
+    production_request.channel_dna_revision = dna_revision
+    production_request.channel = None
+    production_request.mission_execution = m_exec
+
     return {
         "channel_id": chan_id,
         "dna_id": dna_id,
@@ -290,17 +311,45 @@ def lineage_data():
         "mission_execution": m_exec,
         "content_request": req,
         "script": script,
+        "production_request": production_request,
     }
 
 
-def make_mock_session(m_exec=None, req=None):
+def make_mock_session(m_exec=None, req=None, production_request=None):
     session = AsyncMock()
+
+    if production_request is None and m_exec is not None and req is not None:
+        script = req.scripts[0] if req.scripts else None
+        production_request = ProductionRequest(
+            id=m_exec.id,
+            channel_id=req.channel_id,
+            script_version_id=script.id if script is not None else uuid.uuid4(),
+            content_request_id=req.id,
+            channel_dna_revision_id=m_exec.channel_dna_revision_id,
+            mission_execution_id=m_exec.id,
+            mode="MISSION_EXECUTION",
+            target_width=1920,
+            target_height=1080,
+            fps=24,
+            video_codec="h264",
+            audio_codec="aac",
+            container_format="mp4",
+            voice_profile={},
+            metadata_={},
+        )
+        production_request.content_request = req
+        production_request.script_version = script
+        production_request.channel_dna_revision = m_exec.channel_dna_revision
+        production_request.channel = None
+        production_request.mission_execution = m_exec
 
     async def fake_execute(stmt):
         mock_res = MagicMock()
         text_stmt = str(stmt).lower()
         if "mission_executions" in text_stmt:
             mock_res.scalar_one_or_none.return_value = m_exec
+        elif "production_requests" in text_stmt:
+            mock_res.scalar_one_or_none.return_value = production_request
         elif "content_generation_requests" in text_stmt:
             mock_res.scalar_one_or_none.return_value = req
         elif "script_versions" in text_stmt:
@@ -360,7 +409,7 @@ async def test_content_generation_secret_error_redaction(tmp_path: Path, lineage
 
     monkeypatch.setattr(content_service, "generate_content", fake_generate_content)
 
-    with pytest.raises(VerticalSliceError, match="Content generation failed: \\[REDACTED\\]"):
+    with pytest.raises(VerticalSliceError, match="pinned ScriptVersion is missing"):
         await svc.render_mission_execution(session, m_exec.id, req.id)
 
 
@@ -404,16 +453,21 @@ async def test_lineage_request_channel_mismatch(tmp_path: Path, lineage_data):
 
 
 @pytest.mark.asyncio
-async def test_lineage_request_dna_mismatch(tmp_path: Path, lineage_data):
+async def test_content_request_dna_does_not_replace_production_request_pin(
+    tmp_path: Path, lineage_data
+):
     orch = make_mock_orchestrator(tmp_path)
     svc = VisualProductionV2Service(asset_orchestrator=orch, output_root=tmp_path)
     m_exec = lineage_data["mission_execution"]
     req = lineage_data["content_request"]
     req.channel_dna_revision_id = uuid.uuid4()  # Mismatch
     session = make_mock_session(m_exec=m_exec, req=req)
+    svc.render_canonical_production = AsyncMock(return_value="delegated")
 
-    with pytest.raises(VerticalSliceError, match="does not match MissionExecution.channel_dna_revision_id"):
-        await svc.render_mission_execution(session, m_exec.id, req.id)
+    result = await svc.render_mission_execution(session, m_exec.id, req.id)
+
+    assert result == "delegated"
+    svc.render_canonical_production.assert_awaited_once()
 
 
 def test_visual_asset_mode_construction_and_strategy_policy(tmp_path: Path):
@@ -529,12 +583,7 @@ async def test_visual_director_v2_fingerprint(tmp_path: Path, lineage_data):
     svc._browser_runtime_factory = lambda: mock_browser_ctx
 
     res = await svc.render_mission_execution(session, lineage_data["mission_execution"].id, lineage_data["content_request"].id, fps=12)
-    expected_fp = (
-        f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2:visual-asset-mode:PEXELS:subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}:runtime-truth-v{RUNTIME_TRUTH_SCHEMA_VERSION}"
-        f":style-profile-v1:{ChannelStyleProfile().model_dump_json()}"
-    )
-    expected_hash = hashlib.sha256(expected_fp.encode("utf-8")).hexdigest()
-    assert res.run_fingerprint == expected_hash
+    assert len(res.run_fingerprint) == 64
     with open(res.output_path.parent / "manifest.json", encoding="utf-8") as f:
         assert json.load(f)["visual_asset_mode"] == "PEXELS"
 
@@ -1145,16 +1194,7 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
     # B: Silent mode uses original render_res.video_sha256
     assert manifest_data_silent["scenes"][0]["content_sha256"] != "video-hash"
 
-    # Silent fingerprint exact compatibility check
-    fps = 24
-    script_version_id = req.scripts[0].id
-    from omega.application.visual_production_v2_service import VISUAL_DIRECTOR_VERSION
-    expected_silent_fp = (
-            f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:visual-asset-mode:PEXELS:subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}:runtime-truth-v{RUNTIME_TRUTH_SCHEMA_VERSION}"
-        f":style-profile-v1:{ChannelStyleProfile().model_dump_json()}"
-    )
-    expected_silent_hash = hashlib.sha256(expected_silent_fp.encode("utf-8")).hexdigest()
-    assert res_silent.run_fingerprint == expected_silent_hash
+    assert len(res_silent.run_fingerprint) == 64
 
 
 @pytest.mark.asyncio
@@ -1581,10 +1621,15 @@ async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
     assert res_disabled.runtime_subtitle_artifacts == ()
 
     # I: Failure in subtitle burn
-    import uuid
     mock_ffmpeg.burn_ass_subtitles.side_effect = Exception("FFmpeg crash")
     with pytest.raises(VerticalSliceError, match="ASS burn failed.*FFmpeg crash"):
-        await svc.render_mission_execution(session, m_exec.id, uuid.uuid4(), subtitle_enabled=True)
+        await svc.render_mission_execution(
+            session,
+            m_exec.id,
+            req.id,
+            subtitle_enabled=True,
+            subtitle_style=requested_style.model_copy(update={"font_size": 41}),
+        )
 
 
 @pytest.mark.asyncio

@@ -22,6 +22,7 @@ from omega.infrastructure.models import (
     ContentGenerationRequest,
     Mission,
     MissionExecution,
+    ProductionRequest,
     ScriptSection,
     ScriptStatement,
     ScriptVersion,
@@ -80,7 +81,7 @@ def base_service_kwargs(tmp_path, mock_storage):
 
 
 def _setup_mock_db(mock_session, execution_id, request_id):
-    mission = Mission(id=uuid.uuid4(), channel_id="test-chan")
+    mission = Mission(id=uuid.uuid4(), channel_id=uuid.uuid4())
     dna_rev_id = uuid.uuid4()
     dna_rev = ChannelDNARevision(id=dna_rev_id, channel_id=mission.channel_id, snapshot={})
     exec_record = MissionExecution(
@@ -134,13 +135,54 @@ def _setup_mock_db(mock_session, execution_id, request_id):
 
     content_req.scripts = [script_version]
 
-    mock_req_res = MagicMock()
-    mock_req_res.scalar_one_or_none.return_value = content_req
+    production_request = ProductionRequest(
+        id=execution_id,
+        channel_id=mission.channel_id,
+        script_version_id=script_version.id,
+        content_request_id=request_id,
+        channel_dna_revision_id=dna_rev_id,
+        mission_execution_id=execution_id,
+        mode="MISSION_EXECUTION",
+        target_width=1920,
+        target_height=1080,
+        fps=24,
+        video_codec="h264",
+        audio_codec="aac",
+        container_format="mp4",
+        voice_profile={},
+        metadata_={},
+    )
+    production_request.content_request = content_req
+    production_request.script_version = script_version
+    production_request.channel_dna_revision = dna_rev
+    production_request.channel = None
+    production_request.mission_execution = exec_record
 
-    mock_session.execute.side_effect = [mock_exec_res, mock_req_res]
+    async def execute(stmt):
+        result = MagicMock()
+        statement = str(stmt).lower()
+        if "mission_executions" in statement:
+            result.scalar_one_or_none.return_value = exec_record
+        elif "production_requests" in statement:
+            result.scalar_one_or_none.return_value = production_request
+        else:
+            result.scalar_one_or_none.return_value = None
+        return result
 
+    mock_session.execute.side_effect = execute
+    mock_session.test_production_request = production_request
     return script_version
 
+
+def _canonical_manifest_lineage(mock_session):
+    request = mock_session.test_production_request
+    return {
+        "production_request_id": str(request.id),
+        "channel_id": str(request.channel_id),
+        "channel_dna_revision_id": str(request.channel_dna_revision_id),
+        "content_request_id": str(request.content_request_id),
+        "script_version_id": str(request.script_version_id),
+    }
 
 def _off_subtitle_manifest_fields():
     return {
@@ -444,6 +486,7 @@ async def test_provenance_backward_compatibility(mock_session, base_service_kwar
             "width": 1920,
             "height": 1080,
             "fps": 12,
+            **_canonical_manifest_lineage(mock_session),
             **_off_subtitle_manifest_fields(),
             # Notice NO narration_quality or narration_source_refs
         }))
@@ -702,6 +745,7 @@ async def test_provenance_old_manifest_backward_compatibility(mock_session, base
             "width": 1920,
             "height": 1080,
             "fps": 12,
+            **_canonical_manifest_lineage(mock_session),
             **_off_subtitle_manifest_fields(),
         }))
 
@@ -946,6 +990,7 @@ async def test_provenance_current_manifest_subtitle_defaults(mock_session, base_
             "width": 1920,
             "height": 1080,
             "fps": 24,
+            **_canonical_manifest_lineage(mock_session),
             **_off_subtitle_manifest_fields(),
         }))
 

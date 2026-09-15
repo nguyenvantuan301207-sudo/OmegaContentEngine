@@ -914,6 +914,9 @@ class ProductionRenderService:
             req.id,
             contract=contract,
             style_profile=channel_style,
+            mission_id=mission_id,
+            mission_execution_id=req.mission_execution_id,
+            render_job_id=render_job_id,
         )
 
         # Validate V2 Result Lineage

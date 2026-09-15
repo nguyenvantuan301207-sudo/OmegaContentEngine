@@ -4,6 +4,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from omega.application.media_storage import LocalMediaStorageProvider
+from omega.application.narration_provider import (
+    LocalTTSNarrationProvider,
+    NarrationProviderError,
+    get_narration_provider,
+)
 from omega.application.production_contract import (
     CanonicalProductionContract,
     CanonicalProductionLineage,
@@ -81,3 +86,41 @@ async def test_factory_pexels_contract_without_capability_fails_closed(tmp_path,
         await adapter.render_canonical_production(
             AsyncMock(), contract.lineage.production_request_id, contract=contract
         )
+
+
+def test_explicit_local_provider_maps_deterministically(tmp_path):
+    storage = LocalMediaStorageProvider(base_root=tmp_path)
+
+    provider = get_narration_provider(storage, "LOCAL_TTS")
+
+    assert isinstance(provider, LocalTTSNarrationProvider)
+
+
+def test_unknown_explicit_provider_fails_closed(tmp_path):
+    storage = LocalMediaStorageProvider(base_root=tmp_path)
+
+    with pytest.raises(NarrationProviderError, match="Unsupported explicit"):
+        get_narration_provider(storage, "unknown-provider")
+
+
+def test_explicit_cloud_provider_maps_without_network_call(tmp_path, monkeypatch):
+    storage = LocalMediaStorageProvider(base_root=tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "configured-for-construction-only")
+
+    with patch(
+        "omega.application.narration_provider.NeuralTTSNarrationProvider",
+        return_value=MagicMock(),
+    ) as provider_type:
+        selected = get_narration_provider(storage, "NEURAL")
+
+    assert selected is provider_type.return_value
+    provider_type.assert_called_once_with(storage)
+
+
+def test_omitted_provider_preserves_legacy_default(tmp_path, monkeypatch):
+    storage = LocalMediaStorageProvider(base_root=tmp_path)
+    monkeypatch.delenv("TTS_PROVIDER", raising=False)
+
+    provider = get_narration_provider(storage)
+
+    assert isinstance(provider, LocalTTSNarrationProvider)

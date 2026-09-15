@@ -444,6 +444,32 @@ def _make_mock_session_and_lineage():
     mock_content_req.channel_dna_revision_id = dna_rev_id
     mock_content_req.scripts = [mock_script]
 
+    mock_channel = MagicMock()
+    mock_channel.id = channel_id
+    mock_channel.metadata_ = {}
+
+    mock_production_request = MagicMock()
+    mock_production_request.id = uuid4()
+    mock_production_request.channel_id = channel_id
+    mock_production_request.script_version_id = script_id
+    mock_production_request.content_request_id = req_id
+    mock_production_request.channel_dna_revision_id = dna_rev_id
+    mock_production_request.mission_execution_id = m_exec_id
+    mock_production_request.mode = "MISSION_EXECUTION"
+    mock_production_request.target_width = 1920
+    mock_production_request.target_height = 1080
+    mock_production_request.fps = 24
+    mock_production_request.video_codec = "h264"
+    mock_production_request.audio_codec = "aac"
+    mock_production_request.container_format = "mp4"
+    mock_production_request.voice_profile = {}
+    mock_production_request.metadata_ = {}
+    mock_production_request.content_request = mock_content_req
+    mock_production_request.script_version = mock_script
+    mock_production_request.channel_dna_revision = mock_dna_rev
+    mock_production_request.channel = mock_channel
+    mock_production_request.mission_execution = mock_m_exec
+
     session = AsyncMock()
 
     async def mock_execute(stmt):
@@ -451,6 +477,8 @@ def _make_mock_session_and_lineage():
         stmt_str = str(stmt)
         if "mission_executions" in stmt_str:
             res.scalar_one_or_none.return_value = mock_m_exec
+        elif "production_requests" in stmt_str:
+            res.scalar_one_or_none.return_value = mock_production_request
         elif "content_generation_requests" in stmt_str:
             res.scalar_one_or_none.return_value = mock_content_req
         elif "channels" in stmt_str:
@@ -463,6 +491,8 @@ def _make_mock_session_and_lineage():
         return res
 
     session.execute.side_effect = mock_execute
+    session.test_production_request = mock_production_request
+    session.test_mission_id = mission_id
     return session, m_exec_id, req_id
 
 
@@ -723,8 +753,12 @@ async def test_canonical_contract_mode_wins_conflicting_legacy_style(v2_service_
     )
     session, m_exec_id, req_id = _make_mock_session_and_lineage()
 
+    request = session.test_production_request
     standard_contract = resolve_canonical_production_contract(
-        _make_dummy_request(metadata_={"render_settings": {"subtitle_mode": "STANDARD"}})
+        request,
+        channel=request.channel,
+        mission_id=session.test_mission_id,
+        overrides={"subtitle_mode": "STANDARD", "visual_asset_mode": "PEXELS"},
     )
     standard_result = await fx["service"].render_mission_execution(
         session,
@@ -736,7 +770,10 @@ async def test_canonical_contract_mode_wins_conflicting_legacy_style(v2_service_
     )
 
     karaoke_contract = resolve_canonical_production_contract(
-        _make_dummy_request(metadata_={"render_settings": {"subtitle_mode": "KARAOKE"}})
+        request,
+        channel=request.channel,
+        mission_id=session.test_mission_id,
+        overrides={"subtitle_mode": "KARAOKE", "visual_asset_mode": "PEXELS"},
     )
     karaoke_result = await fx["service"].render_mission_execution(
         session,

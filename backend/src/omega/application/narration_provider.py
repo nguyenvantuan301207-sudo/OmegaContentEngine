@@ -519,15 +519,26 @@ def get_narration_provider(
     provider_type: str | None = None,
 ) -> NarrationProvider:
     """Factory creating configured speech narration provider. Explicit, no silent fallback."""
-    provider_type = (provider_type or os.getenv("TTS_PROVIDER", "local")).lower()
-    if provider_type == "gemini":
+    explicit_provider = provider_type is not None
+    resolved_provider = (
+        provider_type if explicit_provider else os.getenv("TTS_PROVIDER", "local")
+    )
+    normalized_provider = str(resolved_provider).strip().lower()
+    if normalized_provider == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
             raise NarrationProviderError("GEMINI_API_KEY missing for gemini TTS provider")
         return GeminiTTSNarrationProvider(storage)
-    if provider_type in ("neural", "openai", "cloud"):
+    if normalized_provider in ("neural", "openai", "cloud"):
         if not os.getenv("OPENAI_API_KEY"):
             raise NarrationProviderError("OPENAI_API_KEY missing for neural/cloud TTS provider")
         return NeuralTTSNarrationProvider(storage)
+    if normalized_provider in ("local", "local_tts"):
+        return LocalTTSNarrationProvider(storage)
+    if explicit_provider:
+        raise NarrationProviderError(
+            f"Unsupported explicit narration provider: {provider_type!r}"
+        )
+    # Preserve the legacy configuration behavior for an omitted provider.
     return LocalTTSNarrationProvider(storage)
 
 

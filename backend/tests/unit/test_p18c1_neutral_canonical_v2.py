@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from omega.application.brand_asset_resolver import BrandMediaKind, ResolvedBrandAsset
 from omega.application.production_contract import (
     CanonicalProductionContract,
     CanonicalProductionLineage,
@@ -152,7 +153,12 @@ def _session_for(request: ProductionRequest):
     return session
 
 
-def _local_service(tmp_path: Path, *, with_narration: bool = False):
+def _local_service(
+    tmp_path: Path,
+    *,
+    with_narration: bool = False,
+    brand_asset_resolver=None,
+):
     video_renderer = AsyncMock()
 
     async def render_clip(*args, **kwargs):
@@ -218,6 +224,7 @@ def _local_service(tmp_path: Path, *, with_narration: bool = False):
         ffmpeg_renderer=ffmpeg,
         narration_provider=narration_provider,
         narration_storage=narration_storage,
+        brand_asset_resolver=brand_asset_resolver,
         visual_asset_mode="LOCAL_TEMPLATE_ONLY",
     )
     captured_scripts = []
@@ -337,23 +344,78 @@ def test_storyboard_adapter_preserves_hook_closing_and_cta():
 
 
 @pytest.mark.asyncio
-async def test_mission_wrapper_delegates_once_to_shared_core(tmp_path):
+async def test_mission_wrapper_delegates_to_public_neutral_entrypoint(tmp_path):
     service = VisualProductionV2Service(
         asset_orchestrator=None,
         output_root=tmp_path,
         visual_asset_mode="LOCAL_TEMPLATE_ONLY",
     )
-    service._render_canonical_production_core = AsyncMock(return_value="result")
     execution_id = uuid.uuid4()
     content_request_id = uuid.uuid4()
+    production_request_id = uuid.uuid4()
+    channel_id = uuid.uuid4()
+    script_version_id = uuid.uuid4()
+    dna_revision_id = uuid.uuid4()
+    mission = MagicMock(id=uuid.uuid4(), channel_id=channel_id)
+    mission_execution = MagicMock(id=execution_id, mission=mission)
+    content_request = MagicMock(
+        id=content_request_id,
+        mission_execution_id=execution_id,
+        channel_id=channel_id,
+    )
+    production_request = MagicMock(
+        id=production_request_id,
+        mission_execution_id=execution_id,
+        content_request_id=content_request_id,
+        channel_id=channel_id,
+        content_request=content_request,
+    )
+    contract = CanonicalProductionContract(
+        mode=ProductionMode.MISSION_EXECUTION,
+        lineage=CanonicalProductionLineage(
+            channel_id=channel_id,
+            production_request_id=production_request_id,
+            content_request_id=content_request_id,
+            script_version_id=script_version_id,
+            channel_dna_revision_id=dna_revision_id,
+            mission_id=mission.id,
+            mission_execution_id=execution_id,
+        ),
+        policy=CanonicalProductionPolicy(
+            visual_asset_mode=VisualAssetMode.LOCAL_TEMPLATE_ONLY,
+            narration_provider=NarrationProviderType.LOCAL_TTS,
+            subtitle_mode=SubtitleMode.OFF,
+            subtitle_fallback_policy=SubtitleFallbackPolicy.STANDARD_FALLBACK,
+            subtitle_style=SubtitleRenderStyle(),
+        ),
+    )
+    exec_result = MagicMock()
+    exec_result.scalar_one_or_none.return_value = mission_execution
+    request_result = MagicMock()
+    request_result.scalar_one_or_none.return_value = production_request
+    session = AsyncMock()
+    session.execute.side_effect = [exec_result, request_result]
+    service.render_canonical_production = AsyncMock(return_value="result")
 
-    result = await service.render_mission_execution(AsyncMock(), execution_id, content_request_id)
+    result = await service.render_mission_execution(
+        session,
+        execution_id,
+        content_request_id,
+        contract=contract,
+        production_request_id=production_request_id,
+    )
 
     assert result == "result"
-    service._render_canonical_production_core.assert_awaited_once()
-    assert (
-        service._render_canonical_production_core.await_args.kwargs["mission_execution_id"]
-        == execution_id
+    service.render_canonical_production.assert_awaited_once_with(
+        session=session,
+        production_request_id=production_request_id,
+        contract=contract,
+        mission_id=mission.id,
+        mission_execution_id=execution_id,
+        background_music=None,
+        sfx_inputs=None,
+        audio_mix_enabled=False,
+        style_profile=None,
     )
 
 
@@ -370,3 +432,228 @@ def test_unsupported_canonical_target_fails_closed():
 
 def test_subtitle_semantics_version_remains_two():
     assert SUBTITLE_SEMANTICS_VERSION == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mission_first", [True, False])
+async def test_mission_and_neutral_share_pinned_physical_cache(
+    tmp_path, mission_first
+):
+    request, pinned, latest, contract = _interactive_fixture()
+    execution_id = uuid.uuid4()
+    mission = MagicMock(id=uuid.uuid4(), channel_id=request.channel_id)
+    execution_dna = MagicMock(id=uuid.uuid4(), snapshot={"brand_name": "wrong"})
+    mission_execution = MagicMock(
+        id=execution_id,
+        mission=mission,
+        channel_dna_revision=execution_dna,
+        channel_dna_revision_id=execution_dna.id,
+    )
+    request.mode = ProductionMode.MISSION_EXECUTION.value
+    request.mission_execution_id = execution_id
+    request.mission_execution = mission_execution
+    request.content_request.mission_execution_id = execution_id
+    mission_contract = contract.model_copy(
+        update={
+            "mode": ProductionMode.MISSION_EXECUTION,
+            "lineage": contract.lineage.model_copy(
+                update={
+                    "mission_id": mission.id,
+                    "mission_execution_id": execution_id,
+                }
+            ),
+        }
+    )
+    session = AsyncMock()
+
+    async def execute(statement):
+        result = MagicMock()
+        if "mission_executions" in str(statement).lower():
+            result.scalar_one_or_none.return_value = mission_execution
+        else:
+            result.scalar_one_or_none.return_value = request
+        return result
+
+    session.execute.side_effect = execute
+    service, video_renderer, captured_scripts, _ = _local_service(tmp_path)
+
+    async def render_mission():
+        return await service.render_mission_execution(
+            session,
+            execution_id,
+            request.content_request_id,
+            contract=mission_contract,
+            production_request_id=request.id,
+        )
+
+    async def render_neutral():
+        return await service.render_canonical_production(
+            session,
+            request.id,
+            mission_contract,
+        )
+
+    if mission_first:
+        mission_result = await render_mission()
+        neutral_result = await render_neutral()
+    else:
+        neutral_result = await render_neutral()
+        mission_result = await render_mission()
+
+    assert mission_result.run_fingerprint == neutral_result.run_fingerprint
+    assert mission_result.script_version_id == pinned.id
+    assert mission_result.script_version_id != latest.id
+    assert mission_result.channel_dna_revision_id == request.channel_dna_revision_id
+    assert mission_result.channel_dna_revision_id != execution_dna.id
+    assert mission_result.mission_id == mission.id
+    assert mission_result.mission_execution_id == execution_id
+    assert neutral_result.mission_id is None
+    assert neutral_result.mission_execution_id is None
+    assert mission_result.runtime_scenes == neutral_result.runtime_scenes
+    assert mission_result.runtime_narration_segments == neutral_result.runtime_narration_segments
+    assert mission_result.runtime_subtitle_cues == neutral_result.runtime_subtitle_cues
+    assert mission_result.runtime_branding == neutral_result.runtime_branding
+    assert mission_result.width == neutral_result.width
+    assert mission_result.height == neutral_result.height
+    assert mission_result.fps == neutral_result.fps
+    assert (
+        mission_result.subtitle_semantics_version
+        == neutral_result.subtitle_semantics_version
+        == 2
+    )
+    assert captured_scripts[0]["title"] == "Pinned script"
+    assert video_renderer.render_clip.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_physical_contract_change_invalidates_neutral_cache(tmp_path):
+    request, _, _, contract = _interactive_fixture()
+    service, video_renderer, _, narration = _local_service(
+        tmp_path, with_narration=True
+    )
+    session = _session_for(request)
+
+    first = await service.render_canonical_production(session, request.id, contract)
+    changed = contract.model_copy(
+        update={
+            "policy": contract.policy.model_copy(
+                update={"subtitle_mode": SubtitleMode.STANDARD}
+            )
+        }
+    )
+    second = await service.render_canonical_production(session, request.id, changed)
+
+    assert first.run_fingerprint != second.run_fingerprint
+    assert video_renderer.render_clip.await_count == 2
+    assert narration.synthesize_segment_audio.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_canonical_brand_switches_gate_physical_application(tmp_path):
+    request, _, _, contract = _interactive_fixture()
+    logo_path = tmp_path / "logo.png"
+    intro_path = tmp_path / "intro.mp4"
+    outro_path = tmp_path / "outro.mp4"
+    logo_path.write_bytes(b"logo")
+    intro_path.write_bytes(VALID_MP4 + b"intro")
+    outro_path.write_bytes(VALID_MP4 + b"outro")
+    request.channel_dna_revision.snapshot = {
+        "brand_package": {
+            "logo_asset": {
+                "reference": "brand://channel/logo.png",
+                "content_hash": "a" * 64,
+                "mime_type": "image/png",
+            },
+            "intro_asset": {
+                "reference": "brand://channel/intro.mp4",
+                "content_hash": "b" * 64,
+                "mime_type": "video/mp4",
+            },
+            "outro_asset": {
+                "reference": "brand://channel/outro.mp4",
+                "content_hash": "c" * 64,
+                "mime_type": "video/mp4",
+            },
+            "channel_bug": {"enabled": True},
+            "long_form": {
+                "micro_intro_enabled": True,
+                "channel_bug_enabled": True,
+                "branded_outro_enabled": True,
+            },
+        }
+    }
+    resolver = MagicMock()
+    resolver.resolve_optional.side_effect = [
+        ResolvedBrandAsset(
+            local_path=logo_path,
+            content_hash="a" * 64,
+            media_kind=BrandMediaKind.IMAGE,
+            mime_type="image/png",
+            reference="brand://channel/logo.png",
+        ),
+        ResolvedBrandAsset(
+            local_path=intro_path,
+            content_hash="b" * 64,
+            media_kind=BrandMediaKind.VIDEO,
+            mime_type="video/mp4",
+            reference="brand://channel/intro.mp4",
+        ),
+        ResolvedBrandAsset(
+            local_path=outro_path,
+            content_hash="c" * 64,
+            media_kind=BrandMediaKind.VIDEO,
+            mime_type="video/mp4",
+            reference="brand://channel/outro.mp4",
+        ),
+    ]
+    service, _, _, _ = _local_service(
+        tmp_path / "disabled", brand_asset_resolver=resolver
+    )
+    disabled = contract.model_copy(
+        update={
+            "policy": contract.policy.model_copy(
+                update={
+                    "channel_bug_enabled": False,
+                    "intro_enabled": False,
+                    "outro_enabled": False,
+                }
+            )
+        }
+    )
+
+    result = await service.render_canonical_production(
+        _session_for(request), request.id, disabled
+    )
+
+    service._ffmpeg_renderer.overlay_logo.assert_not_awaited()
+    assert service._ffmpeg_renderer.concatenate_clips.await_count == 1
+    assert {item["role"]: item["applied"] for item in result.runtime_branding["assets"]} == {
+        "CHANNEL_BUG": False,
+        "INTRO": False,
+        "OUTRO": False,
+    }
+    assert result.runtime_branding["canonical_policy"] == {
+        "channel_bug_enabled": False,
+        "intro_enabled": False,
+        "outro_enabled": False,
+        "brand_spec_reference": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_unsupported_brand_spec_reference_fails_closed(tmp_path):
+    request, _, _, contract = _interactive_fixture()
+    service, video_renderer, _, _ = _local_service(tmp_path)
+    unsupported = contract.model_copy(
+        update={
+            "policy": contract.policy.model_copy(
+                update={"brand_spec_reference": "brand-spec://unsupported"}
+            )
+        }
+    )
+
+    with pytest.raises(VerticalSliceError, match="brand_spec_reference is unsupported"):
+        await service.render_canonical_production(
+            _session_for(request), request.id, unsupported
+        )
+    video_renderer.render_clip.assert_not_awaited()
