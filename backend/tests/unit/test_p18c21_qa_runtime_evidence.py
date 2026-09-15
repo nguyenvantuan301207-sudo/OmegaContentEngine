@@ -187,4 +187,3 @@ def test_legacy_prepared_evidence_behavior_remains_without_runtime_truth():
 
     assert ProductionQARuleCode.MISSING_REQUIRED_ASSET not in rules
     assert ProductionQARuleCode.NO_CONTENTFUL_VISUAL_ASSET not in rules
-
