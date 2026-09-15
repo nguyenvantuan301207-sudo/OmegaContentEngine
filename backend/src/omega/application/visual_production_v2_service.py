@@ -66,6 +66,7 @@ from omega.infrastructure.models import (
     ChannelDNARevision,
     ContentGenerationRequest,
     MissionExecution,
+    ProductionRequest,
     ScriptSection,
     ScriptStatement,
     ScriptVersion,
@@ -438,10 +439,13 @@ class VerticalSliceSFXInput:
 class VerticalSliceRenderResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    mission_id: UUID
-    mission_execution_id: UUID
+    mission_id: UUID | None
+    mission_execution_id: UUID | None
     content_request_id: UUID
     script_version_id: UUID
+    production_request_id: UUID | None = None
+    channel_id: UUID | None = None
+    channel_dna_revision_id: UUID | None = None
 
     scene_count: int
     template_scene_count: int
@@ -545,6 +549,62 @@ class ScriptStoryboardAdapter:
         if total_statements == 0:
             raise VerticalSliceError("ScriptVersion has no statements")
 
+        hook_text = str(getattr(script_version, "hook_text", None) or "").strip()
+        closing_text = str(
+            getattr(script_version, "closing_text", None) or ""
+        ).strip()
+        cta_text = str(getattr(script_version, "cta_text", None) or "").strip()
+        if hook_text:
+            sections_data.insert(
+                0,
+                {
+                    "section_order": -1,
+                    "heading": "Hook",
+                    "narration_text": hook_text,
+                    "estimated_duration_seconds": None,
+                    "statements": [
+                        {
+                            "statement_order": 0,
+                            "statement_text": hook_text,
+                            "statement_type": "HOOK",
+                            "citations": [],
+                        }
+                    ],
+                },
+            )
+        closing_statements = []
+        if closing_text:
+            closing_statements.append(
+                {
+                    "statement_order": 1,
+                    "statement_text": closing_text,
+                    "statement_type": "CLOSING",
+                    "citations": [],
+                }
+            )
+        if cta_text:
+            closing_statements.append(
+                {
+                    "statement_order": 2,
+                    "statement_text": cta_text,
+                    "statement_type": "CTA",
+                    "citations": [],
+                }
+            )
+        if closing_statements:
+            sections_data.append(
+                {
+                    "section_order": len(sections_data) + 1,
+                    "heading": "Closing",
+                    "narration_text": " ".join(
+                        statement["statement_text"]
+                        for statement in closing_statements
+                    ),
+                    "estimated_duration_seconds": None,
+                    "statements": closing_statements,
+                }
+            )
+
         return {
             "title": script_version.title,
             "estimated_duration_seconds": float(script_version.estimated_duration_seconds),
@@ -604,7 +664,108 @@ class VisualProductionV2Service:
         subtitle_fallback_policy: SubtitleFallbackPolicy | str | None = None,
         contract: CanonicalProductionContract | None = None,
     ) -> VerticalSliceRenderResult:
+        """Validate legacy Mission lineage and use the single canonical core."""
+        return await self._render_canonical_production_core(
+            session=session,
+            mission_execution_id=mission_execution_id,
+            content_request_id=content_request_id,
+            fps=fps,
+            voice_profile=voice_profile,
+            background_music=background_music,
+            sfx_inputs=sfx_inputs,
+            audio_mix_enabled=audio_mix_enabled,
+            subtitle_enabled=subtitle_enabled,
+            subtitle_style=subtitle_style,
+            style_profile=style_profile,
+            subtitle_mode=subtitle_mode,
+            subtitle_fallback_policy=subtitle_fallback_policy,
+            contract=contract,
+        )
+
+    async def render_canonical_production(
+        self,
+        session: AsyncSession,
+        production_request_id: UUID,
+        contract: CanonicalProductionContract,
+        *,
+        background_music: VerticalSliceBackgroundMusicInput | None = None,
+        sfx_inputs: list[VerticalSliceSFXInput] | None = None,
+        audio_mix_enabled: bool = False,
+        style_profile: ChannelStyleProfile | None = None,
+    ) -> VerticalSliceRenderResult:
+        """Render one exact ProductionRequest without requiring Mission lineage."""
+        if contract.lineage.production_request_id != production_request_id:
+            raise VerticalSliceError(
+                "Canonical contract production_request_id does not match request"
+            )
+
+        return await self._render_canonical_production_core(
+            session=session,
+            mission_execution_id=contract.lineage.mission_execution_id,
+            content_request_id=contract.lineage.content_request_id,
+            production_request_id=production_request_id,
+            fps=contract.policy.target_fps,
+            voice_profile=contract.policy.voice_profile.to_dict(),
+            background_music=background_music,
+            sfx_inputs=sfx_inputs,
+            audio_mix_enabled=audio_mix_enabled,
+            subtitle_enabled=contract.policy.subtitle_mode != SubtitleMode.OFF,
+            subtitle_style=contract.policy.subtitle_style,
+            style_profile=style_profile,
+            subtitle_mode=contract.policy.subtitle_mode,
+            subtitle_fallback_policy=contract.policy.subtitle_fallback_policy,
+            contract=contract,
+        )
+
+    @staticmethod
+    def _validate_canonical_target(contract: CanonicalProductionContract) -> None:
+        policy = contract.policy
+        if policy.target_width != 1920 or policy.target_height != 1080:
+            raise VerticalSliceError(
+                f"V2 unsupported resolution: {policy.target_width}x{policy.target_height}"
+            )
+        if policy.target_fps <= 0 or policy.target_fps > 60:
+            raise VerticalSliceError(
+                f"Invalid fps: {policy.target_fps}. Must be > 0 and <= 60."
+            )
+        if policy.fps_mode.upper() != "CFR":
+            raise VerticalSliceError(f"V2 unsupported fps mode: {policy.fps_mode}")
+        if policy.container_format.lower() != "mp4":
+            raise VerticalSliceError(
+                f"V2 unsupported container: {policy.container_format}"
+            )
+        if policy.video_codec.lower() not in ("h264", "libx264"):
+            raise VerticalSliceError(f"V2 unsupported codec: {policy.video_codec}")
+        if policy.audio_codec.lower() != "aac":
+            raise VerticalSliceError(
+                f"V2 unsupported audio codec: {policy.audio_codec}"
+            )
+
+    async def _render_canonical_production_core(
+        self,
+        session: AsyncSession,
+        mission_execution_id: UUID | None,
+        content_request_id: UUID,
+        *,
+        production_request_id: UUID | None = None,
+        fps: int = 24,
+        voice_profile: dict[str, Any] | None = None,
+        background_music: VerticalSliceBackgroundMusicInput | None = None,
+        sfx_inputs: list[VerticalSliceSFXInput] | None = None,
+        audio_mix_enabled: bool = False,
+        subtitle_enabled: bool = False,
+        subtitle_style: SubtitleRenderStyle | None = None,
+        style_profile: ChannelStyleProfile | None = None,
+        subtitle_mode: SubtitleMode | str | None = None,
+        subtitle_fallback_policy: SubtitleFallbackPolicy | str | None = None,
+        contract: CanonicalProductionContract | None = None,
+    ) -> VerticalSliceRenderResult:
         audio_mix_enabled = background_music is not None or bool(sfx_inputs)
+
+        if contract is not None:
+            self._validate_canonical_target(contract)
+            fps = contract.policy.target_fps
+            voice_profile = contract.policy.voice_profile.to_dict()
 
         if audio_mix_enabled and not self._narration_provider:
             raise VerticalSliceError("narration_provider MUST be configured when audio mix is enabled")
@@ -613,118 +774,201 @@ class VisualProductionV2Service:
         if fps <= 0 or fps > 60:
             raise VerticalSliceError(f"Invalid fps: {fps}. Must be > 0 and <= 60.")
 
-        # 1. True Mission Lineage Validation
-        exec_stmt = (
-            select(MissionExecution)
-            .where(MissionExecution.id == mission_execution_id)
-            .options(
-                selectinload(MissionExecution.mission),
-                selectinload(MissionExecution.channel_dna_revision),
+        mission_id: UUID | None = None
+        channel_id: UUID
+        pinned_dna_revision: ChannelDNARevision | None
+        script_version: ScriptVersion | None
+
+        if production_request_id is not None:
+            if contract is None:
+                raise VerticalSliceError(
+                    "CanonicalProductionContract is required for neutral rendering"
+                )
+            prod_stmt = (
+                select(ProductionRequest)
+                .where(ProductionRequest.id == production_request_id)
+                .options(
+                    selectinload(ProductionRequest.script_version)
+                    .selectinload(ScriptVersion.sections)
+                    .selectinload(ScriptSection.statements)
+                    .selectinload(ScriptStatement.citations),
+                    selectinload(ProductionRequest.content_request),
+                    selectinload(ProductionRequest.channel_dna_revision),
+                    selectinload(ProductionRequest.channel),
+                )
             )
-        )
-        exec_res = await session.execute(exec_stmt)
-        mission_exec = exec_res.scalar_one_or_none()
-        if not mission_exec:
-            raise VerticalSliceError(f"MissionExecution '{mission_execution_id}' not found")
+            prod_res = await session.execute(prod_stmt)
+            production_request = prod_res.scalar_one_or_none()
+            if production_request is None:
+                raise VerticalSliceError(
+                    f"ProductionRequest '{production_request_id}' not found"
+                )
 
-        mission = mission_exec.mission
-        if not mission:
-            raise VerticalSliceError(f"Mission for execution '{mission_execution_id}' not found")
+            exact_pins = {
+                "production_request_id": production_request.id,
+                "channel_id": production_request.channel_id,
+                "content_request_id": production_request.content_request_id,
+                "script_version_id": production_request.script_version_id,
+                "channel_dna_revision_id": production_request.channel_dna_revision_id,
+                "mission_execution_id": production_request.mission_execution_id,
+            }
+            for field_name, actual in exact_pins.items():
+                if getattr(contract.lineage, field_name) != actual:
+                    raise VerticalSliceError(
+                        f"ProductionRequest {field_name} does not match canonical contract"
+                    )
 
-        if not mission.channel_id:
-            raise VerticalSliceError(f"Mission '{mission.id}' has no channel_id")
-        pinned_dna_revision: ChannelDNARevision | None = mission_exec.channel_dna_revision
-        if pinned_dna_revision is None:
-            raise VerticalSliceError("MissionExecution is missing pinned ChannelDNARevision")
+            content_req = production_request.content_request
+            script_version = production_request.script_version
+            pinned_dna_revision = production_request.channel_dna_revision
+            channel_id = production_request.channel_id
+            mission_id = contract.lineage.mission_id
+            if content_req is None or content_req.id != content_request_id:
+                raise VerticalSliceError("ProductionRequest pinned content request is missing")
+            if script_version is None or script_version.id != contract.lineage.script_version_id:
+                raise VerticalSliceError("ProductionRequest pinned ScriptVersion is missing")
+            if (
+                pinned_dna_revision is None
+                or pinned_dna_revision.id != contract.lineage.channel_dna_revision_id
+            ):
+                raise VerticalSliceError(
+                    "ProductionRequest pinned ChannelDNARevision is missing"
+                )
+            channel = production_request.channel
+        else:
+            # Compatibility loader for direct Mission/canary callers. Physical
+            # rendering below is shared with the neutral ProductionRequest path.
+            exec_stmt = (
+                select(MissionExecution)
+                .where(MissionExecution.id == mission_execution_id)
+                .options(
+                    selectinload(MissionExecution.mission),
+                    selectinload(MissionExecution.channel_dna_revision),
+                )
+            )
+            exec_res = await session.execute(exec_stmt)
+            mission_exec = exec_res.scalar_one_or_none()
+            if not mission_exec:
+                raise VerticalSliceError(
+                    f"MissionExecution '{mission_execution_id}' not found"
+                )
+
+            mission = mission_exec.mission
+            if not mission:
+                raise VerticalSliceError(
+                    f"Mission for execution '{mission_execution_id}' not found"
+                )
+            if not mission.channel_id:
+                raise VerticalSliceError(f"Mission '{mission.id}' has no channel_id")
+            mission_id = mission.id
+            channel_id = mission.channel_id
+            pinned_dna_revision = mission_exec.channel_dna_revision
+            if pinned_dna_revision is None:
+                raise VerticalSliceError(
+                    "MissionExecution is missing pinned ChannelDNARevision"
+                )
+
+            req_stmt = (
+                select(ContentGenerationRequest)
+                .where(ContentGenerationRequest.id == content_request_id)
+                .options(
+                    selectinload(ContentGenerationRequest.scripts)
+                    .selectinload(ScriptVersion.sections)
+                    .selectinload(ScriptSection.statements)
+                    .selectinload(ScriptStatement.citations)
+                )
+            )
+            req_res = await session.execute(req_stmt)
+            content_req = req_res.scalar_one_or_none()
+            if not content_req:
+                raise VerticalSliceError(
+                    f"ContentGenerationRequest '{content_request_id}' not found"
+                )
+            if content_req.mission_execution_id != mission_execution_id:
+                raise VerticalSliceError(
+                    "ContentGenerationRequest.mission_execution_id "
+                    f"({content_req.mission_execution_id}) does not match supplied "
+                    f"mission_execution_id ({mission_execution_id})"
+                )
+            if content_req.channel_id != channel_id:
+                raise VerticalSliceError(
+                    f"ContentGenerationRequest.channel_id ({content_req.channel_id}) "
+                    f"does not match Mission.channel_id ({channel_id})"
+                )
+            if (
+                content_req.channel_dna_revision_id
+                != mission_exec.channel_dna_revision_id
+            ):
+                raise VerticalSliceError(
+                    "ContentGenerationRequest.channel_dna_revision_id "
+                    f"({content_req.channel_dna_revision_id}) does not match "
+                    "MissionExecution.channel_dna_revision_id "
+                    f"({mission_exec.channel_dna_revision_id})"
+                )
+
+            script_version = None
+            if content_req.scripts:
+                sorted_scripts = sorted(
+                    content_req.scripts, key=lambda script: script.version, reverse=True
+                )
+                script_version = sorted_scripts[0]
+            else:
+                try:
+                    await content_service.generate_content(
+                        session=session,
+                        channel_id=content_req.channel_id,
+                        request_id=content_req.id,
+                    )
+                except Exception as exc:
+                    raise VerticalSliceError(
+                        f"Content generation failed: {self._sanitize_error(exc)}"
+                    ) from exc
+                reload_stmt = (
+                    select(ScriptVersion)
+                    .where(ScriptVersion.content_request_id == content_req.id)
+                    .order_by(desc(ScriptVersion.version))
+                    .options(
+                        selectinload(ScriptVersion.sections)
+                        .selectinload(ScriptSection.statements)
+                        .selectinload(ScriptStatement.citations)
+                    )
+                )
+                reload_res = await session.execute(reload_stmt)
+                script_version = reload_res.scalars().first()
+            channel = None
+
+        if not script_version:
+            raise VerticalSliceError(
+                f"No ScriptVersion available for request '{content_request_id}'"
+            )
+
         resolved_brand = resolve_production_brand_spec(
             channel_dna_snapshot=pinned_dna_revision.snapshot,
             channel_dna_revision_id=pinned_dna_revision.id,
             production_format=BrandFormat.LONG_FORM,
         )
         try:
-            resolved_logo, resolved_intro, resolved_outro = self._resolve_visual_brand_assets(
-                mission.channel_id,
-                resolved_brand.logo_asset,
-                resolved_brand.intro_asset,
-                resolved_brand.outro_asset,
+            resolved_logo, resolved_intro, resolved_outro = (
+                self._resolve_visual_brand_assets(
+                    channel_id,
+                    resolved_brand.logo_asset,
+                    resolved_brand.intro_asset,
+                    resolved_brand.outro_asset,
+                )
             )
         except BrandAssetResolutionError as exc:
-            raise VerticalSliceError(f"Brand asset resolution failed: {self._sanitize_error(exc)}") from exc
-
-        req_stmt = (
-            select(ContentGenerationRequest)
-            .where(ContentGenerationRequest.id == content_request_id)
-            .options(
-                selectinload(ContentGenerationRequest.scripts)
-                .selectinload(ScriptVersion.sections)
-                .selectinload(ScriptSection.statements)
-                .selectinload(ScriptStatement.citations)
-            )
-        )
-        req_res = await session.execute(req_stmt)
-        content_req = req_res.scalar_one_or_none()
-        if not content_req:
-            raise VerticalSliceError(f"ContentGenerationRequest '{content_request_id}' not found")
-
-        if content_req.mission_execution_id != mission_execution_id:
             raise VerticalSliceError(
-                f"ContentGenerationRequest.mission_execution_id ({content_req.mission_execution_id}) "
-                f"does not match supplied mission_execution_id ({mission_execution_id})"
-            )
+                f"Brand asset resolution failed: {self._sanitize_error(exc)}"
+            ) from exc
 
-        if content_req.channel_id != mission.channel_id:
-            raise VerticalSliceError(
-                f"ContentGenerationRequest.channel_id ({content_req.channel_id}) "
-                f"does not match Mission.channel_id ({mission.channel_id})"
-            )
-
-        if content_req.channel_dna_revision_id != mission_exec.channel_dna_revision_id:
-            raise VerticalSliceError(
-                f"ContentGenerationRequest.channel_dna_revision_id ({content_req.channel_dna_revision_id}) "
-                f"does not match MissionExecution.channel_dna_revision_id ({mission_exec.channel_dna_revision_id})"
-            )
-
-        # 2. Resolve or Generate ScriptVersion
-        script_version: ScriptVersion | None = None
-        if content_req.scripts:
-            # Deterministically reuse latest version
-            sorted_scripts = sorted(content_req.scripts, key=lambda s: s.version, reverse=True)
-            script_version = sorted_scripts[0]
-        else:
-            # Invoke real content service
+        if style_profile is None and channel_id:
             try:
-                await content_service.generate_content(
-                    session=session,
-                    channel_id=content_req.channel_id,
-                    request_id=content_req.id,
-                )
-            except Exception as e:
-                raise VerticalSliceError(f"Content generation failed: {self._sanitize_error(e)}") from e
-
-            # Reload with eager associations
-            reload_stmt = (
-                select(ScriptVersion)
-                .where(ScriptVersion.content_request_id == content_req.id)
-                .order_by(desc(ScriptVersion.version))
-                .options(
-                    selectinload(ScriptVersion.sections)
-                    .selectinload(ScriptSection.statements)
-                    .selectinload(ScriptStatement.citations)
-                )
-            )
-            reload_res = await session.execute(reload_stmt)
-            script_version = reload_res.scalars().first()
-
-        if not script_version:
-            raise VerticalSliceError(f"No ScriptVersion available for request '{content_request_id}'")
-
-        if style_profile is None and mission.channel_id:
-            try:
-                ch_stmt = select(Channel).where(Channel.id == mission.channel_id)
-                ch_res = await session.execute(ch_stmt)
-                ch = ch_res.scalar_one_or_none()
-                if ch:
-                    style_profile = extract_channel_style_profile(ch.metadata_)
+                if channel is None:
+                    ch_stmt = select(Channel).where(Channel.id == channel_id)
+                    ch_res = await session.execute(ch_stmt)
+                    channel = ch_res.scalar_one_or_none()
+                if channel:
+                    style_profile = extract_channel_style_profile(channel.metadata_)
                 else:
                     style_profile = ChannelStyleProfile()
             except Exception:
@@ -769,14 +1013,53 @@ class VisualProductionV2Service:
         effective_subtitle_enabled = (subtitle_decision.effective_mode != SubtitleMode.OFF)
 
         # 3. Deterministic Run Fingerprint & Idempotency Check
-        fingerprint_input = (
-            f"omega-vertical-slice-v0:{mission_execution_id}:"
-            f"{content_request_id}:{script_version.id}:{fps}:"
-            f"visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:"
-            f"visual-asset-mode:{self._visual_asset_mode}:"
-            f"subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}:"
-            f"runtime-truth-v{RUNTIME_TRUTH_SCHEMA_VERSION}"
+        canonical_visual_mode = (
+            contract.policy.visual_asset_mode.value
+            if contract is not None
+            else self._visual_asset_mode
         )
+        if canonical_visual_mode != self._visual_asset_mode:
+            raise VerticalSliceError(
+                "Configured visual capability does not match canonical visual_asset_mode"
+            )
+        cache_owner_id = production_request_id or mission_execution_id
+        if cache_owner_id is None:
+            raise VerticalSliceError("Canonical render cache owner is missing")
+        canonical_render_fingerprint = "legacy"
+        if contract is not None:
+            canonical_render_data = contract.to_provenance_dict()
+            optional_lineage = canonical_render_data["lineage"]
+            for field_name in (
+                "mission_id",
+                "mission_execution_id",
+                "task_id",
+                "render_job_id",
+            ):
+                optional_lineage[field_name] = None
+            canonical_render_fingerprint = hashlib.sha256(
+                json.dumps(canonical_render_data, sort_keys=True).encode("utf-8")
+            ).hexdigest()
+        if production_request_id is None:
+            fingerprint_input = (
+                f"omega-vertical-slice-v0:{mission_execution_id}:"
+                f"{content_request_id}:{script_version.id}:{fps}:"
+                f"visual-director-{VISUAL_DIRECTOR_VERSION}:"
+                "visual-asset-selection-v2:"
+                f"visual-asset-mode:{canonical_visual_mode}:"
+                f"subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}:"
+                f"runtime-truth-v{RUNTIME_TRUTH_SCHEMA_VERSION}"
+            )
+        else:
+            fingerprint_input = (
+                f"omega-canonical-production-v1:{cache_owner_id}:"
+                f"{channel_id}:{content_request_id}:{script_version.id}:"
+                f"{pinned_dna_revision.id}:{canonical_render_fingerprint}:{fps}:"
+                f"visual-director-{VISUAL_DIRECTOR_VERSION}:"
+                "visual-asset-selection-v2:"
+                f"visual-asset-mode:{canonical_visual_mode}:"
+                f"subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}:"
+                f"runtime-truth-v{RUNTIME_TRUTH_SCHEMA_VERSION}"
+            )
         if style_profile:
             fingerprint_input += f":style-profile-v1:{style_profile.model_dump_json()}"
         if resolved_brand.identity is not None:
@@ -858,7 +1141,7 @@ class VisualProductionV2Service:
             run_fingerprint = hashlib.sha256(
                 cache_fingerprint_input.encode("utf-8")
             ).hexdigest()
-            run_dir = self._output_root / str(mission_execution_id) / run_fingerprint
+            run_dir = self._output_root / str(cache_owner_id) / run_fingerprint
             final_mp4_path = run_dir / "final.mp4"
             manifest_path = run_dir / "manifest.json"
 
@@ -888,6 +1171,26 @@ class VisualProductionV2Service:
                 if manifest_data.get("run_fingerprint") != run_fingerprint:
                     raise VerticalSliceError("Manifest run_fingerprint mismatch")
 
+                if production_request_id is not None:
+                    expected_lineage = {
+                        "production_request_id": str(production_request_id),
+                        "channel_id": str(channel_id),
+                        "channel_dna_revision_id": str(pinned_dna_revision.id),
+                        "mission_id": str(mission_id) if mission_id else None,
+                        "mission_execution_id": (
+                            str(mission_execution_id)
+                            if mission_execution_id
+                            else None
+                        ),
+                        "content_request_id": str(content_request_id),
+                        "script_version_id": str(script_version.id),
+                    }
+                    for field_name, expected in expected_lineage.items():
+                        if manifest_data.get(field_name) != expected:
+                            raise VerticalSliceError(
+                                f"Manifest {field_name} does not match canonical lineage"
+                            )
+
                 expected_sha = manifest_data.get("content_sha256")
                 actual_sha = self._compute_streaming_sha(final_mp4_path)
                 if actual_sha != expected_sha:
@@ -915,10 +1218,15 @@ class VisualProductionV2Service:
                             raise VerticalSliceError("Persisted scene SHA256 mismatch")
 
                 return VerticalSliceRenderResult(
-                    mission_id=mission.id,
+                    mission_id=mission_id,
                     mission_execution_id=mission_execution_id,
                     content_request_id=content_request_id,
                     script_version_id=script_version.id,
+                    production_request_id=production_request_id,
+                    channel_id=(channel_id if production_request_id else None),
+                    channel_dna_revision_id=(
+                        pinned_dna_revision.id if production_request_id else None
+                    ),
                     scene_count=manifest_data["scene_count"],
                     template_scene_count=manifest_data["template_scene_count"],
                     image_scene_count=manifest_data["image_scene_count"],
@@ -1079,7 +1387,7 @@ class VisualProductionV2Service:
                     )
                 try:
                     audio_asset = await self._narration_provider.synthesize_segment_audio(
-                        channel_id=mission.channel_id,
+                        channel_id=channel_id,
                         request_id=content_request_id,
                         segment={"text": narration_text},
                         voice_profile=voice_profile,
@@ -1093,7 +1401,7 @@ class VisualProductionV2Service:
                 if not rel_uri:
                     raise VerticalSliceError("Audio asset missing storage_uri")
                 audio_path = self._narration_storage.resolve_stored_uri(
-                    mission.channel_id, content_request_id, rel_uri
+                    channel_id, content_request_id, rel_uri
                 )
                 if not audio_path.exists() or audio_path.stat().st_size <= 0:
                     raise VerticalSliceError("Audio file missing or empty")
@@ -1280,7 +1588,7 @@ class VisualProductionV2Service:
 
                     direction = self._visual_director.resolve(effective_scene)
                     if (
-                        self._visual_asset_mode == "LOCAL_TEMPLATE_ONLY"
+                        canonical_visual_mode == "LOCAL_TEMPLATE_ONLY"
                         and direction.asset_requirements
                     ):
                         raise VerticalSliceError(
@@ -1449,7 +1757,7 @@ class VisualProductionV2Service:
                             visual_origin=(
                                 "PROVIDER" if resolved_asset is not None else "TEMPLATE"
                             ),
-                            visual_mode=self._visual_asset_mode,
+                            visual_mode=canonical_visual_mode,
                             asset_source_url=(
                                 _safe_external_reference(resolved_asset.source_url)
                                 if resolved_asset is not None
@@ -1800,13 +2108,20 @@ class VisualProductionV2Service:
                 "run_fingerprint": run_fingerprint,
                 "runtime_truth_schema_version": RUNTIME_TRUTH_SCHEMA_VERSION,
                 "subtitle_semantics_version": SUBTITLE_SEMANTICS_VERSION,
-                "visual_asset_mode": self._visual_asset_mode,
+                "visual_asset_mode": canonical_visual_mode,
                 "scene_artifacts_version": "v1",
                 "resolved_brand_spec": resolved_brand.model_dump(mode="json"),
                 "resolved_brand_identity": resolved_brand.identity,
                 "resolved_brand_asset_identity": resolved_brand_identity,
-                "mission_id": str(mission.id),
-                "mission_execution_id": str(mission_execution_id),
+                "production_request_id": (
+                    str(production_request_id) if production_request_id else None
+                ),
+                "channel_id": str(channel_id),
+                "channel_dna_revision_id": str(pinned_dna_revision.id),
+                "mission_id": str(mission_id) if mission_id else None,
+                "mission_execution_id": (
+                    str(mission_execution_id) if mission_execution_id else None
+                ),
                 "content_request_id": str(content_request_id),
                 "script_version_id": str(script_version.id),
                 "scene_count": len(ordered_scene_paths),
@@ -1873,10 +2188,15 @@ class VisualProductionV2Service:
                 shutil.rmtree(work_dir, ignore_errors=True)
 
         return VerticalSliceRenderResult(
-            mission_id=mission.id,
+            mission_id=mission_id,
             mission_execution_id=mission_execution_id,
             content_request_id=content_request_id,
             script_version_id=script_version.id,
+            production_request_id=production_request_id,
+            channel_id=(channel_id if production_request_id else None),
+            channel_dna_revision_id=(
+                pinned_dna_revision.id if production_request_id else None
+            ),
             scene_count=len(ordered_scene_paths),
             template_scene_count=template_scenes,
             image_scene_count=image_scenes,
