@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from omega.application.production_runtime_truth import RUNTIME_TRUTH_SCHEMA_VERSION
 from omega.application.storyboard_engine import (
     StoryboardScene,
     VisualStrategy,
@@ -143,6 +144,7 @@ def _setup_mock_db(mock_session, execution_id, request_id):
 
 def _off_subtitle_manifest_fields():
     return {
+        "runtime_truth_schema_version": RUNTIME_TRUTH_SCHEMA_VERSION,
         "subtitle_enabled": False,
         "karaoke_subtitles_enabled": False,
         "subtitle_mode": "sentence",
@@ -159,6 +161,8 @@ def _off_subtitle_manifest_fields():
             "timing_source": "NONE",
         },
         "runtime_subtitle_cues": [],
+        "runtime_subtitle_artifacts": [],
+        "subtitle_burn_applied": False,
     }
 
 

@@ -568,6 +568,17 @@ class MediaArtifactResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ProductionRuntimeTruthResponse(BaseModel):
+    """Artifact-scoped rendered runtime truth; never planned-row fallback."""
+
+    truth_kind: Literal["RENDERED"] = "RENDERED"
+    artifact_id: UUID
+    render_job_id: UUID
+    render_plan_id: UUID
+    render_version: int = Field(ge=1)
+    runtime_snapshot: dict[str, Any]
+
+
 class ProductionQAFinding(BaseModel):
     """Structured QA finding for Production QA."""
 

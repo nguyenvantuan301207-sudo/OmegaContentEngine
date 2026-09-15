@@ -16,9 +16,14 @@ from omega.application.ffmpeg_renderer import FFmpegExecutionError, FFmpegRender
 from omega.application.media_probe import MediaProbe
 from omega.application.media_storage import LocalMediaStorageProvider, compute_sha256
 from omega.application.production_contract import (
+    CanonicalProductionContract,
     resolve_canonical_production_contract,
 )
 from omega.application.production_qa import ProductionQAEngine
+from omega.application.production_runtime_truth import (
+    ProductionRuntimeTruthSnapshot,
+    build_production_runtime_truth_snapshot,
+)
 from omega.application.template_payload_resolver import TemplatePayloadError
 from omega.domain.channel_style import (
     extract_channel_style_profile,
@@ -40,12 +45,28 @@ from omega.infrastructure.models import (
     ProductionQAResult,
     ProductionRenderJob,
     ProductionRequest,
+    ProductionRuntimeTruth,
     ProductionScene,
     ScriptVersion,
 )
 from omega.logging import get_logger
 
 logger = get_logger(service="omega-render-service")
+
+
+class RuntimeRenderProvenance(dict):
+    """JSON provenance plus transient V2 inputs needed by Phase 3."""
+
+    def __init__(
+        self,
+        *args,
+        v2_result=None,
+        contract: CanonicalProductionContract | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.v2_result = v2_result
+        self.contract = contract
 
 
 def _classify_phase2_error(exc: Exception) -> RenderErrorCode:
@@ -307,6 +328,8 @@ class ProductionRenderService:
         runtime_subtitle_cues = ()
         runtime_scenes = ()
         runtime_render_provenance: dict | None = None
+        runtime_v2_result = None
+        runtime_contract: CanonicalProductionContract | None = None
 
         try:
             # Check if we should use V2
@@ -331,7 +354,11 @@ class ProductionRenderService:
                     container_format=plan.container if hasattr(plan, "container") else req.container_format,
                     video_codec=video_codec,
                     staging_output_path=staging_output_path,
+                    mission_id=mission_id,
+                    render_job_id=job_id,
                 )
+                runtime_v2_result = runtime_render_provenance.v2_result
+                runtime_contract = runtime_render_provenance.contract
             else:
                 # Legacy Route
                 scene_clips: list[Path] = []
@@ -433,6 +460,24 @@ class ProductionRenderService:
         # PHASE 3: SHORT ATOMIC DB FINALIZATION & PRODUCTION QA
         # ══════════════════════════════════════════════════════════════════
         try:
+            media_artifact_id = uuid.uuid4()
+            runtime_snapshot: ProductionRuntimeTruthSnapshot | None = None
+            if use_v2:
+                if runtime_v2_result is None or runtime_contract is None:
+                    raise ValueError("V2 runtime truth inputs are missing")
+                runtime_snapshot = build_production_runtime_truth_snapshot(
+                    contract=runtime_contract,
+                    render_plan_id=plan.id,
+                    render_job_id=job_id,
+                    media_artifact_id=media_artifact_id,
+                    artifact_version=version,
+                    artifact_storage_uri=rel_uri,
+                    artifact_size_bytes=file_size,
+                    artifact_sha256=content_hash,
+                    v2_result=runtime_v2_result,
+                    probe_summary=probe_summary,
+                )
+
             # 0. Apply V2 Runtime Narration Provenance Overlay
             assets_list = self._overlay_runtime_narration_provenance(
                 assets_list, runtime_quality, runtime_refs
@@ -475,20 +520,24 @@ class ProductionRenderService:
                         "asset_id": None,
                     })
 
-            # 1. Run local 17-rule Production QA
-            qa_status, qa_findings = self.qa_engine.evaluate(
-                request_data=req_data,
-                script_version_data=script_data,
-                content_request_data=content_req_data,
-                assets_data=assets_list,
-                requirements_data=reqs_list,
-                narration_segments=qa_narr_list,
-                subtitle_cues=qa_subs_list,
-                media_probe_summary=probe_summary,
-                artifact_file_path=final_artifact_path,
-                expected_hash=content_hash,
-                scenes_data=canonical_scenes_data,
-            )
+            # 1. Run local 17-rule Production QA. Legacy calls retain their exact
+            # input shape; only V2 carries the new snapshot context.
+            qa_context = {
+                "request_data": req_data,
+                "script_version_data": script_data,
+                "content_request_data": content_req_data,
+                "assets_data": assets_list,
+                "requirements_data": reqs_list,
+                "narration_segments": qa_narr_list,
+                "subtitle_cues": qa_subs_list,
+                "media_probe_summary": probe_summary,
+                "artifact_file_path": final_artifact_path,
+                "expected_hash": content_hash,
+                "scenes_data": canonical_scenes_data,
+            }
+            if runtime_snapshot is not None:
+                qa_context["runtime_truth_snapshot"] = runtime_snapshot
+            qa_status, qa_findings = self.qa_engine.evaluate(**qa_context)
 
             # 2. Atomic rollover of current pointer
             # Mark prior videos as is_current = False
@@ -504,7 +553,7 @@ class ProductionRenderService:
 
             # 3. Insert new MediaArtifact (vN)
             media_art = MediaArtifact(
-                id=uuid.uuid4(),
+                id=media_artifact_id,
                 production_request_id=request_id,
                 render_job_id=job_id,
                 artifact_type=MediaArtifactType.VIDEO.value,
@@ -520,6 +569,19 @@ class ProductionRenderService:
             )
             session.add(media_art)
             await session.flush()
+
+            if runtime_snapshot is not None:
+                session.add(
+                    ProductionRuntimeTruth(
+                        artifact_id=media_art.id,
+                        schema_version=runtime_snapshot.schema_version,
+                        manifest_run_fingerprint=(
+                            runtime_snapshot.fingerprints.manifest_run
+                        ),
+                        payload=runtime_snapshot.canonical_dict(),
+                    )
+                )
+                await session.flush()
 
             # 4. Insert ProductionQAResult
             qa_record = ProductionQAResult(
@@ -775,6 +837,8 @@ class ProductionRenderService:
         container_format: str,
         video_codec: str,
         staging_output_path: Path,
+        mission_id: uuid.UUID | None = None,
+        render_job_id: uuid.UUID | None = None,
     ) -> tuple[
         str | None,
         tuple[str, ...],
@@ -806,7 +870,16 @@ class ProductionRenderService:
             if ch:
                 channel_style = extract_channel_style_profile(ch.metadata_)
 
-        contract = resolve_canonical_production_contract(req, channel=ch)
+        contract_lineage = {}
+        if mission_id is not None:
+            contract_lineage["mission_id"] = mission_id
+        if render_job_id is not None:
+            contract_lineage["render_job_id"] = render_job_id
+        contract = resolve_canonical_production_contract(
+            req,
+            channel=ch,
+            **contract_lineage,
+        )
         subtitle_style = contract.policy.subtitle_style
         subtitle_mode = contract.policy.subtitle_mode
         subtitle_fallback_policy = contract.policy.subtitle_fallback_policy
@@ -868,25 +941,30 @@ class ProductionRenderService:
             scene.model_dump() if hasattr(scene, "model_dump") else dict(scene)
             for scene in runtime_scenes
         ]
-        render_provenance = {
-            "subtitle_style_applied": (
-                result.subtitle_style_applied.model_dump()
-                if getattr(result, "subtitle_style_applied", None)
-                else None
-            ),
-            "target_fps": result.fps,
-            "effective_fps_mode": getattr(result, "effective_fps_mode", None),
-            "text_truncated": any(
-                bool(scene.get("text_truncated", False)) for scene in runtime_scene_data
-            ),
-            "scenes": [
-                {
-                    "sequence_index": scene.get("sequence_index"),
-                    "text_truncated": bool(scene.get("text_truncated", False)),
-                }
-                for scene in runtime_scene_data
-            ],
-        }
+        render_provenance = RuntimeRenderProvenance(
+            {
+                "subtitle_style_applied": (
+                    result.subtitle_style_applied.model_dump()
+                    if getattr(result, "subtitle_style_applied", None)
+                    else None
+                ),
+                "target_fps": result.fps,
+                "effective_fps_mode": getattr(result, "effective_fps_mode", None),
+                "text_truncated": any(
+                    bool(scene.get("text_truncated", False))
+                    for scene in runtime_scene_data
+                ),
+                "scenes": [
+                    {
+                        "sequence_index": scene.get("sequence_index"),
+                        "text_truncated": bool(scene.get("text_truncated", False)),
+                    }
+                    for scene in runtime_scene_data
+                ],
+            },
+            v2_result=result,
+            contract=contract,
+        )
         if hasattr(result, "requested_subtitle_mode"):
             render_provenance["requested_subtitle_mode"] = result.requested_subtitle_mode
             render_provenance["effective_subtitle_mode"] = result.effective_subtitle_mode

@@ -6,9 +6,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -34,6 +35,7 @@ from omega.application.production_contract import (
     _normalize_subtitle_fallback_policy,
     _normalize_subtitle_mode,
 )
+from omega.application.production_runtime_truth import RUNTIME_TRUTH_SCHEMA_VERSION
 from omega.application.storyboard_engine import (
     StoryboardEngine,
     StoryboardScene,
@@ -73,6 +75,46 @@ from omega.infrastructure.visual_v2_video_renderer import VisualV2VideoRenderer
 
 _NON_ALPHANUM_REGEX = re.compile(r"[^\w\s-]")
 _WHITESPACE_REGEX = re.compile(r"\s+")
+_SENSITIVE_METADATA_MARKERS = (
+    "token",
+    "secret",
+    "signature",
+    "credential",
+    "apikey",
+    "api_key",
+)
+
+
+def _safe_external_reference(value: str | None) -> str | None:
+    """Strip query/fragment/credentials from provider references."""
+    if not value:
+        return None
+    parsed = urlsplit(str(value).strip())
+    if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
+        return None
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+
+
+def _safe_provider_metadata(value: Any) -> dict[str, Any]:
+    """Retain only JSON-native, non-sensitive provider metadata."""
+    if not isinstance(value, dict):
+        return {}
+    safe: dict[str, Any] = {}
+    for key, item in value.items():
+        key_text = str(key)
+        if any(marker in key_text.lower() for marker in _SENSITIVE_METADATA_MARKERS):
+            continue
+        if item is None or isinstance(item, (str, bool, int, float)):
+            safe[key_text] = item
+        elif isinstance(item, dict):
+            safe[key_text] = _safe_provider_metadata(item)
+        elif isinstance(item, (list, tuple)):
+            safe[key_text] = [
+                child
+                for child in item
+                if child is None or isinstance(child, (str, bool, int, float))
+            ]
+    return safe
 
 
 class VerticalSliceError(Exception):
@@ -102,6 +144,8 @@ def _validate_cached_subtitle_semantics(
     fallback_policy: SubtitleFallbackPolicy,
 ) -> bool:
     """Validate cached subtitle provenance against current render semantics."""
+    if manifest.get("runtime_truth_schema_version") != RUNTIME_TRUTH_SCHEMA_VERSION:
+        return False
     if not _has_current_subtitle_semantics_version(manifest):
         return False
 
@@ -190,7 +234,11 @@ def _validate_cached_subtitle_semantics(
         and manifest.get("subtitle_mode") == expected_subtitle_mode
         and (
             requested_mode != SubtitleMode.OFF
-            or manifest.get("runtime_subtitle_cues") == []
+            or (
+                manifest.get("runtime_subtitle_cues") == []
+                and manifest.get("runtime_subtitle_artifacts") == []
+                and manifest.get("subtitle_burn_applied") is False
+            )
         )
     )
 
@@ -261,6 +309,18 @@ class VerticalSliceRuntimeNarrationSegment(BaseModel):
     start_ms: int
     end_ms: int
     duration_ms: int
+    text: str = ""
+    audio_asset_id: str | None = None
+    storage_reference: str | None = None
+    audio_content_sha256: str | None = None
+    provider: str | None = None
+    model: str | None = None
+    voice: str | None = None
+    voice_profile: dict[str, Any] = Field(default_factory=dict)
+    quality: str | None = None
+    license_status: str | None = None
+    source_reference: str | None = None
+    attribution: str | None = None
 
 
 class VerticalSliceRuntimeSubtitleCue(BaseModel):
@@ -273,10 +333,21 @@ class VerticalSliceRuntimeSubtitleCue(BaseModel):
     text: str
 
 
+class VerticalSliceRuntimeSubtitleArtifact(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    scene_index: int
+    artifact_kind: str = "ASS"
+    content_sha256: str
+
+
 class VerticalSliceSceneResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     sequence_index: int
+    source_section_id: str | None = None
+    source_statement_references: tuple[int, ...] = ()
+    narration_text: str | None = None
     original_strategy: str
     effective_strategy: str
     template_id: str
@@ -285,6 +356,9 @@ class VerticalSliceSceneResult(BaseModel):
     asset_id: str | None
     asset_query: str | None = None
     duration_seconds: float
+    start_ms: int | None = None
+    end_ms: int | None = None
+    duration_ms: int | None = None
     content_sha256: str
     audio_content_sha256: str | None = None
     audio_duration_seconds: float | None = None
@@ -292,6 +366,20 @@ class VerticalSliceSceneResult(BaseModel):
     subtitle_text_truncated: bool | None = None
     text_fitting: tuple[dict[str, Any], ...] = ()
     text_truncated: bool = False
+    visual_origin: str = "TEMPLATE"
+    visual_mode: str = "LOCAL_TEMPLATE_ONLY"
+    asset_source_url: str | None = None
+    asset_source_page_url: str | None = None
+    asset_license_name: str | None = None
+    asset_license_url: str | None = None
+    asset_attribution: str | None = None
+    asset_storage_reference: str | None = None
+    visual_content_sha256: str | None = None
+    visual_mime_type: str | None = None
+    visual_width: int | None = None
+    visual_height: int | None = None
+    visual_duration_ms: int | None = None
+    asset_provider_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -341,7 +429,10 @@ class VerticalSliceRenderResult(BaseModel):
     runtime_timeline_duration_ms: int | None = None
     runtime_narration_segments: tuple[VerticalSliceRuntimeNarrationSegment, ...] = ()
     runtime_subtitle_cues: tuple[VerticalSliceRuntimeSubtitleCue, ...] = ()
+    runtime_subtitle_artifacts: tuple[VerticalSliceRuntimeSubtitleArtifact, ...] = ()
     runtime_scenes: tuple[VerticalSliceSceneResult, ...] = ()
+    runtime_branding: dict[str, Any] = Field(default_factory=dict)
+    runtime_audio_mix: dict[str, Any] = Field(default_factory=dict)
     subtitle_style_applied: SubtitleRenderStyle | None = None
     style_profile_applied: ChannelStyleProfile | None = None
     effective_fps_mode: str = "CFR"
@@ -354,6 +445,7 @@ class VerticalSliceRenderResult(BaseModel):
     subtitle_fallback_reason: str | None = None
     subtitle_timing_source: str = "DERIVED_SEGMENT_TIMING"
     subtitle_mode_decision: SubtitleModeDecision | None = None
+    subtitle_burn_applied: bool = False
 
 
 _STOPWORDS = frozenset({
@@ -649,7 +741,8 @@ class VisualProductionV2Service:
             f"{content_request_id}:{script_version.id}:{fps}:"
             f"visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:"
             f"visual-asset-mode:{self._visual_asset_mode}:"
-            f"subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}"
+            f"subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}:"
+            f"runtime-truth-v{RUNTIME_TRUTH_SCHEMA_VERSION}"
         )
         if style_profile:
             fingerprint_input += f":style-profile-v1:{style_profile.model_dump_json()}"
@@ -677,6 +770,7 @@ class VisualProductionV2Service:
                 fingerprint_input += ":style=" + resolved_subtitle_style.model_dump_json()
                 fingerprint_input += f":submode={subtitle_decision.effective_mode.value}"
         normalized_sfx = []
+        bgm_sha: str | None = None
         if audio_mix_enabled:
             audio_mix_fp = {}
             if background_music:
@@ -815,9 +909,15 @@ class VisualProductionV2Service:
                     runtime_subtitle_cues=tuple(
                         VerticalSliceRuntimeSubtitleCue(**c) for c in manifest_data.get("runtime_subtitle_cues", [])
                     ),
+                    runtime_subtitle_artifacts=tuple(
+                        VerticalSliceRuntimeSubtitleArtifact(**item)
+                        for item in manifest_data.get("runtime_subtitle_artifacts", [])
+                    ),
                     runtime_scenes=tuple(
                         VerticalSliceSceneResult(**s) for s in manifest_data.get("scenes", [])
                     ),
+                    runtime_branding=manifest_data.get("runtime_branding", {}),
+                    runtime_audio_mix=manifest_data.get("runtime_audio_mix", {}),
                     subtitle_style_applied=(
                         SubtitleRenderStyle(**manifest_data["subtitle_style_applied"])
                         if manifest_data.get("subtitle_style_applied")
@@ -872,6 +972,9 @@ class VisualProductionV2Service:
                         if manifest_data.get("subtitle_mode_decision")
                         else None
                     ),
+                    subtitle_burn_applied=bool(
+                        manifest_data.get("subtitle_burn_applied", False)
+                    ),
                 )
             except Exception as e:
                 raise VerticalSliceError(f"Incomplete or corrupt prior run: {e}") from e
@@ -913,6 +1016,7 @@ class VisualProductionV2Service:
             runtime_cue_order = 1
             runtime_narration_segments = []
             runtime_subtitle_cues = []
+            runtime_subtitle_artifacts = []
 
 
             indices = set()
@@ -979,6 +1083,25 @@ class VisualProductionV2Service:
                         start_ms=scene_start_ms,
                         end_ms=scene_end_ms,
                         duration_ms=duration_ms,
+                        text=narration_text,
+                        audio_asset_id=(
+                            str(audio_asset.get("id"))
+                            if audio_asset.get("id") is not None
+                            else None
+                        ),
+                        storage_reference=str(rel_uri),
+                        audio_content_sha256=str(audio_asset["content_hash"]),
+                        provider=self._narration_provider.__class__.__name__,
+                        model=getattr(self._narration_provider, "model", None),
+                        voice=(
+                            audio_asset.get("voice")
+                            or getattr(self._narration_provider, "default_voice", None)
+                        ),
+                        voice_profile=dict(voice_profile or {}),
+                        quality=audio_asset.get("narration_quality"),
+                        license_status=audio_asset.get("license_status"),
+                        source_reference=audio_asset.get("source_ref"),
+                        attribution=audio_asset.get("attribution"),
                     )
                 )
                 runtime_cursor_ms = scene_end_ms
@@ -1099,6 +1222,14 @@ class VisualProductionV2Service:
                                     style=effective_style,
                                 )
                                 ass_content = ass_document.content
+                                runtime_subtitle_artifacts.append(
+                                    VerticalSliceRuntimeSubtitleArtifact(
+                                        scene_index=scene.sequence_index,
+                                        content_sha256=hashlib.sha256(
+                                            ass_content.encode("utf-8")
+                                        ).hexdigest(),
+                                    )
+                                )
                                 scene_subtitle_text_truncated = any(
                                     item.text_truncated for item in ass_document.layout
                                 )
@@ -1130,6 +1261,7 @@ class VisualProductionV2Service:
                     asset_provider_str: str | None = None
                     asset_id_str: str | None = None
                     asset_query_str: str | None = None
+                    resolved_asset = None
 
                     if direction.asset_requirements:
                         if self._orchestrator is None:
@@ -1201,6 +1333,11 @@ class VisualProductionV2Service:
                         raise VerticalSliceError(f"Scene video render failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
 
                     final_scene_sha = render_res.video_sha256
+                    visual_runtime_sha = (
+                        resolved_asset.content_sha256
+                        if resolved_asset is not None
+                        else render_res.video_sha256
+                    )
 
                     if self._narration_provider:
                         mux_video_input = scene_visual_out_path
@@ -1235,9 +1372,25 @@ class VisualProductionV2Service:
                     ordered_scene_paths.append(scene_out_path)
                     total_duration += actual_scene_duration_seconds
 
+                    if self._narration_provider:
+                        actual_start_ms = prepared_narration[scene.sequence_index]["start_ms"]
+                        actual_end_ms = prepared_narration[scene.sequence_index]["end_ms"]
+                    else:
+                        actual_start_ms = sum(
+                            existing.duration_ms or 0 for existing in scene_results
+                        )
+                        actual_duration_ms = int(round(actual_scene_duration_seconds * 1000))
+                        actual_end_ms = actual_start_ms + actual_duration_ms
+                    actual_duration_ms = actual_end_ms - actual_start_ms
+
                     scene_results.append(
                         VerticalSliceSceneResult(
                             sequence_index=scene.sequence_index,
+                            source_section_id=scene.section_id,
+                            source_statement_references=tuple(
+                                scene.source_statement_references
+                            ),
+                            narration_text=scene.narration_excerpt,
                             original_strategy=original_strategy.value,
                             effective_strategy=effective_strategy.value,
                             template_id=document.template_id.value,
@@ -1246,6 +1399,9 @@ class VisualProductionV2Service:
                             asset_id=asset_id_str,
                             asset_query=asset_query_str,
                             duration_seconds=actual_scene_duration_seconds,
+                            start_ms=actual_start_ms,
+                            end_ms=actual_end_ms,
+                            duration_ms=actual_duration_ms,
                             content_sha256=final_scene_sha,
                             audio_content_sha256=audio_sha,
                             audio_duration_seconds=audio_duration_sec,
@@ -1256,6 +1412,64 @@ class VisualProductionV2Service:
                             ),
                             text_truncated=any(
                                 decision.text_truncated for decision in document.text_fitting
+                            ),
+                            visual_origin=(
+                                "PROVIDER" if resolved_asset is not None else "TEMPLATE"
+                            ),
+                            visual_mode=self._visual_asset_mode,
+                            asset_source_url=(
+                                _safe_external_reference(resolved_asset.source_url)
+                                if resolved_asset is not None
+                                else None
+                            ),
+                            asset_source_page_url=(
+                                _safe_external_reference(resolved_asset.source_page_url)
+                                if resolved_asset is not None
+                                else None
+                            ),
+                            asset_license_name=(
+                                resolved_asset.license_name
+                                if resolved_asset is not None
+                                else None
+                            ),
+                            asset_license_url=(
+                                _safe_external_reference(resolved_asset.license_url)
+                                if resolved_asset is not None
+                                else None
+                            ),
+                            asset_attribution=(
+                                resolved_asset.attribution_text
+                                if resolved_asset is not None
+                                else None
+                            ),
+                            visual_content_sha256=(
+                                visual_runtime_sha
+                            ),
+                            visual_mime_type=(
+                                resolved_asset.mime_type
+                                if resolved_asset is not None
+                                else "video/mp4"
+                            ),
+                            visual_width=(
+                                resolved_asset.width
+                                if resolved_asset is not None
+                                else render_res.width
+                            ),
+                            visual_height=(
+                                resolved_asset.height
+                                if resolved_asset is not None
+                                else render_res.height
+                            ),
+                            visual_duration_ms=(
+                                int(round(resolved_asset.duration_seconds * 1000))
+                                if resolved_asset is not None
+                                and resolved_asset.duration_seconds is not None
+                                else actual_duration_ms
+                            ),
+                            asset_provider_metadata=(
+                                _safe_provider_metadata(resolved_asset.metadata)
+                                if resolved_asset is not None
+                                else {}
                             ),
                         )
                     )
@@ -1284,8 +1498,32 @@ class VisualProductionV2Service:
                 runtime_timeline_duration_ms = None
                 runtime_narration_segments = []
                 runtime_subtitle_cues = []
+                runtime_subtitle_artifacts = []
 
             # 8. Deterministic brand composition and final concatenation
+            runtime_branding = {
+                "policy_source": str(resolved_brand.source_channel_dna_revision_id),
+                "assets": [
+                    {
+                        "role": role,
+                        "applied": applied,
+                        "reference": asset.reference,
+                        "content_sha256": asset.content_hash,
+                        "mime_type": asset.mime_type,
+                    }
+                    for role, asset, applied in (
+                        (
+                            "CHANNEL_BUG",
+                            resolved_logo,
+                            resolved_logo is not None
+                            and resolved_brand.channel_bug is not None,
+                        ),
+                        ("INTRO", resolved_intro, resolved_intro is not None),
+                        ("OUTRO", resolved_outro, resolved_outro is not None),
+                    )
+                    if asset is not None
+                ],
+            }
             branded_content_paths = ordered_scene_paths
             if resolved_logo is not None and resolved_brand.channel_bug is not None:
                 logo_policy = resolved_brand.channel_bug
@@ -1335,6 +1573,13 @@ class VisualProductionV2Service:
                 "sfx_event_count": 0,
                 "sfx_attribution_required_count": 0,
                 "audio_mix_target_duration_ms": 0,
+            }
+            runtime_audio_mix = {
+                "enabled": False,
+                "narration_applied": bool(self._narration_provider),
+                "target_duration_ms": narration_total_duration_ms,
+                "background_music": None,
+                "sfx_events": [],
             }
 
             if audio_mix_enabled:
@@ -1438,6 +1683,37 @@ class VisualProductionV2Service:
                     "sfx_attribution_required_count": sum(1 for e in mix_plan.sfx_events if e.attribution_required),
                     "audio_mix_target_duration_ms": audio_mix_target_duration_ms,
                 }
+                runtime_audio_mix = {
+                    "enabled": True,
+                    "narration_applied": bool(self._narration_provider),
+                    "target_duration_ms": audio_mix_target_duration_ms,
+                    "background_music": (
+                        {
+                            "content_sha256": bgm_sha,
+                            "duration_ms": background_music.duration_ms,
+                            "license_status": str(background_music.license_status),
+                            "gain_db": mix_plan.background_music.gain_db,
+                            "loop_required": mix_plan.background_music.loop_required,
+                            "fade_in_ms": mix_plan.background_music.fade_in_ms,
+                            "fade_out_ms": mix_plan.background_music.fade_out_ms,
+                            "attribution_required": mix_plan.background_music.attribution_required,
+                        }
+                        if mix_plan.background_music is not None
+                        else None
+                    ),
+                    "sfx_events": [
+                        {
+                            "event_id": event.event_id,
+                            "content_sha256": normalized_sfx[index][1],
+                            "start_ms": event.start_ms,
+                            "duration_ms": event.duration_ms,
+                            "license_status": str(normalized_sfx[index][0].license_status),
+                            "gain_db": event.gain_db,
+                            "attribution_required": event.attribution_required,
+                        }
+                        for index, event in enumerate(mix_plan.sfx_events)
+                    ],
+                }
 
             if resolved_intro is not None or resolved_outro is not None:
                 final_clip_paths = self._brand_clip_paths(
@@ -1489,6 +1765,7 @@ class VisualProductionV2Service:
 
             manifest_content = {
                 "run_fingerprint": run_fingerprint,
+                "runtime_truth_schema_version": RUNTIME_TRUTH_SCHEMA_VERSION,
                 "subtitle_semantics_version": SUBTITLE_SEMANTICS_VERSION,
                 "visual_asset_mode": self._visual_asset_mode,
                 "scene_artifacts_version": "v1",
@@ -1544,6 +1821,14 @@ class VisualProductionV2Service:
                 "runtime_timeline_duration_ms": runtime_timeline_duration_ms,
                 "runtime_narration_segments": [s.model_dump() for s in runtime_narration_segments],
                 "runtime_subtitle_cues": [c.model_dump() for c in runtime_subtitle_cues],
+                "runtime_subtitle_artifacts": [
+                    item.model_dump() for item in runtime_subtitle_artifacts
+                ],
+                "subtitle_burn_applied": bool(
+                    effective_subtitle_enabled and runtime_subtitle_artifacts
+                ),
+                "runtime_branding": runtime_branding,
+                "runtime_audio_mix": runtime_audio_mix,
                 "scenes": [s.model_dump() for s in scene_results],
             }
 
@@ -1576,7 +1861,10 @@ class VisualProductionV2Service:
             runtime_timeline_duration_ms=runtime_timeline_duration_ms,
             runtime_narration_segments=tuple(runtime_narration_segments),
             runtime_subtitle_cues=tuple(runtime_subtitle_cues),
+            runtime_subtitle_artifacts=tuple(runtime_subtitle_artifacts),
             runtime_scenes=tuple(scene_results),
+            runtime_branding=runtime_branding,
+            runtime_audio_mix=runtime_audio_mix,
             subtitle_style_applied=(
                 resolved_subtitle_style.model_copy(update={"karaoke": subtitle_decision.effective_mode == SubtitleMode.KARAOKE})
                 if effective_subtitle_enabled
@@ -1600,6 +1888,9 @@ class VisualProductionV2Service:
             subtitle_fallback_reason=subtitle_decision.fallback_reason,
             subtitle_timing_source=subtitle_decision.timing_source.value,
             subtitle_mode_decision=subtitle_decision,
+            subtitle_burn_applied=bool(
+                effective_subtitle_enabled and runtime_subtitle_artifacts
+            ),
         )
 
 
@@ -1722,8 +2013,37 @@ class VisualProductionV2Service:
                 runtime_subtitle_cues=tuple(
                     VerticalSliceRuntimeSubtitleCue(**c) for c in rev_manifest.get("runtime_subtitle_cues", [])
                 ),
+                runtime_subtitle_artifacts=tuple(
+                    VerticalSliceRuntimeSubtitleArtifact(**item)
+                    for item in rev_manifest.get("runtime_subtitle_artifacts", [])
+                ),
                 runtime_scenes=tuple(
                     VerticalSliceSceneResult(**s) for s in rev_manifest.get("scenes", [])
+                ),
+                runtime_branding=rev_manifest.get("runtime_branding", {}),
+                runtime_audio_mix=rev_manifest.get("runtime_audio_mix", {}),
+                subtitle_style_applied=(
+                    SubtitleRenderStyle(**rev_manifest["subtitle_style_applied"])
+                    if rev_manifest.get("subtitle_style_applied")
+                    else None
+                ),
+                requested_subtitle_mode=rev_manifest.get(
+                    "requested_subtitle_mode", "OFF"
+                ),
+                effective_subtitle_mode=rev_manifest.get(
+                    "effective_subtitle_mode", "OFF"
+                ),
+                subtitle_fallback_applied=bool(
+                    rev_manifest.get("subtitle_fallback_applied", False)
+                ),
+                subtitle_fallback_reason=rev_manifest.get(
+                    "subtitle_fallback_reason"
+                ),
+                subtitle_timing_source=rev_manifest.get(
+                    "subtitle_timing_source", "NONE"
+                ),
+                subtitle_burn_applied=bool(
+                    rev_manifest.get("subtitle_burn_applied", False)
                 ),
             )
 
@@ -1949,8 +2269,37 @@ class VisualProductionV2Service:
                 runtime_subtitle_cues=tuple(
                     VerticalSliceRuntimeSubtitleCue(**c) for c in rev_manifest.get("runtime_subtitle_cues", [])
                 ),
+                runtime_subtitle_artifacts=tuple(
+                    VerticalSliceRuntimeSubtitleArtifact(**item)
+                    for item in rev_manifest.get("runtime_subtitle_artifacts", [])
+                ),
                 runtime_scenes=tuple(
                     VerticalSliceSceneResult(**s) for s in rev_manifest.get("scenes", [])
+                ),
+                runtime_branding=rev_manifest.get("runtime_branding", {}),
+                runtime_audio_mix=rev_manifest.get("runtime_audio_mix", {}),
+                subtitle_style_applied=(
+                    SubtitleRenderStyle(**rev_manifest["subtitle_style_applied"])
+                    if rev_manifest.get("subtitle_style_applied")
+                    else None
+                ),
+                requested_subtitle_mode=rev_manifest.get(
+                    "requested_subtitle_mode", "OFF"
+                ),
+                effective_subtitle_mode=rev_manifest.get(
+                    "effective_subtitle_mode", "OFF"
+                ),
+                subtitle_fallback_applied=bool(
+                    rev_manifest.get("subtitle_fallback_applied", False)
+                ),
+                subtitle_fallback_reason=rev_manifest.get(
+                    "subtitle_fallback_reason"
+                ),
+                subtitle_timing_source=rev_manifest.get(
+                    "subtitle_timing_source", "NONE"
+                ),
+                subtitle_burn_applied=bool(
+                    rev_manifest.get("subtitle_burn_applied", False)
                 ),
             )
 

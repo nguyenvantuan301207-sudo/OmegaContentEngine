@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from omega.application.brand_asset_resolver import BrandMediaKind, ResolvedBrandAsset
+from omega.application.production_runtime_truth import RUNTIME_TRUTH_SCHEMA_VERSION
 from omega.application.storyboard_engine import (
     StoryboardPlan,
     StoryboardScene,
@@ -484,7 +485,7 @@ async def test_visual_director_v2_fingerprint(tmp_path: Path, lineage_data):
 
     res = await svc.render_mission_execution(session, lineage_data["mission_execution"].id, lineage_data["content_request"].id, fps=12)
     expected_fp = (
-        f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2:visual-asset-mode:PEXELS:subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}"
+        f"omega-vertical-slice-v0:{lineage_data['mission_execution'].id}:{lineage_data['content_request'].id}:{lineage_data['script'].id}:12:visual-director-v2:visual-asset-selection-v2:visual-asset-mode:PEXELS:subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}:runtime-truth-v{RUNTIME_TRUTH_SCHEMA_VERSION}"
         f":style-profile-v1:{ChannelStyleProfile().model_dump_json()}"
     )
     expected_hash = hashlib.sha256(expected_fp.encode("utf-8")).hexdigest()
@@ -586,8 +587,8 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
             output_path=output_path,
             scene_index=document.scene_index,
             template_id=document.template_id,
-            width=1920,
-            height=1080,
+            width=1280,
+            height=720,
             fps=fps,
             duration_seconds=duration_seconds,
             frame_count=int(duration_seconds * fps),
@@ -690,6 +691,17 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
     assert res.runtime_scenes
     assert res2.runtime_scenes
     assert [scene.model_dump() for scene in res.runtime_scenes] == [scene.model_dump() for scene in res2.runtime_scenes]
+    assert [scene.start_ms for scene in res.runtime_scenes] == [0, 5000, 10000]
+    assert [scene.end_ms for scene in res.runtime_scenes] == [5000, 10000, 15000]
+    assert res.runtime_scenes[0].visual_origin == "TEMPLATE"
+    assert res.runtime_scenes[0].visual_width == 1280
+    assert res.runtime_scenes[0].visual_height == 720
+    assert res.runtime_scenes[1].visual_origin == "PROVIDER"
+    assert res.runtime_scenes[1].asset_provider == "pexels"
+    assert res.runtime_scenes[1].asset_source_page_url == "https://pexels.com/photo/1"
+    assert res.runtime_scenes[1].asset_license_name == "Pexels"
+    assert res.runtime_scenes[1].asset_storage_reference is None
+    assert res2.runtime_scenes[1].visual_content_sha256 == res.runtime_scenes[1].visual_content_sha256
 
 
 @pytest.mark.asyncio
@@ -1036,6 +1048,17 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
     assert manifest_data["karaoke_subtitles_enabled"] is False
     assert manifest_data["scenes"][0]["audio_content_sha256"] == "mock-audio-hash"
     assert manifest_data["scenes"][0]["audio_duration_seconds"] == 3.5
+    runtime_narration = res.runtime_narration_segments[0]
+    assert runtime_narration.text == "Narration test"
+    assert runtime_narration.start_ms == 0
+    assert runtime_narration.end_ms == 3500
+    assert runtime_narration.storage_reference == "channels/test/123.wav"
+    assert runtime_narration.provider == "MockProvider"
+    assert runtime_narration.model == "mock-model"
+    assert runtime_narration.voice == "mock-voice"
+    assert runtime_narration.voice_profile == voice_profile
+    assert res.runtime_scenes[0].start_ms == 0
+    assert res.runtime_scenes[0].end_ms == 3500
 
     # A: Narrated scene content_sha256 is the muxed scene artifact, not the visual-only render SHA
     pass
@@ -1069,7 +1092,7 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
     script_version_id = req.scripts[0].id
     from omega.application.visual_production_v2_service import VISUAL_DIRECTOR_VERSION
     expected_silent_fp = (
-        f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:visual-asset-mode:PEXELS:subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}"
+            f"omega-vertical-slice-v0:{m_exec.id}:{req.id}:{script_version_id}:{fps}:visual-director-{VISUAL_DIRECTOR_VERSION}:visual-asset-selection-v2:visual-asset-mode:PEXELS:subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}:runtime-truth-v{RUNTIME_TRUTH_SCHEMA_VERSION}"
         f":style-profile-v1:{ChannelStyleProfile().model_dump_json()}"
     )
     expected_silent_hash = hashlib.sha256(expected_silent_fp.encode("utf-8")).hexdigest()
@@ -1328,6 +1351,16 @@ async def test_audio_mix_success(tmp_path: Path, lineage_data):
     assert manifest_data["background_music_enabled"] is True
     assert manifest_data["sfx_event_count"] == 2
     assert manifest_data["audio_mix_target_duration_ms"] == 3500
+    assert res.runtime_audio_mix["enabled"] is True
+    assert res.runtime_audio_mix["background_music"]["content_sha256"] == hashlib.sha256(
+        bgm_path.read_bytes()
+    ).hexdigest()
+    assert len(res.runtime_audio_mix["sfx_events"]) == 2
+    assert [asset["role"] for asset in res.runtime_branding["assets"]] == [
+        "INTRO",
+        "OUTRO",
+    ]
+    assert all(asset["applied"] for asset in res.runtime_branding["assets"])
 
 
 @pytest.mark.asyncio
@@ -1388,7 +1421,7 @@ async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
 
     async def fake_render(*args, **kwargs):
         call_order.append("render_clip")
-        return mock_video_renderer.render_clip.return_value
+        return await fake_render_1208(*args, **kwargs)
     mock_video_renderer.render_clip.side_effect = fake_render
 
     captured_ass = {}
@@ -1474,6 +1507,11 @@ async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
     assert res_enabled.karaoke_subtitles_enabled is True
     assert res_enabled.subtitle_mode == "karaoke"
     assert manifest_data["scenes"][0]["subtitle_cue_count"] > 0
+    assert res_enabled.subtitle_burn_applied is True
+    assert len(res_enabled.runtime_subtitle_artifacts) == 1
+    assert res_enabled.runtime_subtitle_artifacts[0].content_sha256 == hashlib.sha256(
+        ass_content.encode("utf-8")
+    ).hexdigest()
 
     # Check disabled manifest
     manifest_disabled = json.loads((res_disabled.output_path.parent / "manifest.json").read_text("utf-8"))
@@ -1481,6 +1519,8 @@ async def test_karaoke_subtitles_v2_success(tmp_path: Path, lineage_data):
     assert manifest_disabled["karaoke_subtitles_enabled"] is False
     assert manifest_disabled["subtitle_mode"] == "sentence"
     assert manifest_disabled["scenes"][0].get("subtitle_cue_count") is None
+    assert res_disabled.subtitle_burn_applied is False
+    assert res_disabled.runtime_subtitle_artifacts == ()
 
     # I: Failure in subtitle burn
     import uuid

@@ -30,6 +30,7 @@ from omega.domain.production import (
     ProductionRequestResponse,
     ProductionRequestStatus,
     ProductionRerenderPayload,
+    ProductionRuntimeTruthResponse,
     ProductionSceneResponse,
     RenderPlanResponse,
     SubtitleCueResponse,
@@ -43,6 +44,7 @@ from omega.infrastructure.models import (
     ProductionQAResult,
     ProductionRenderJob,
     ProductionRequest,
+    ProductionRuntimeTruth,
     ProductionScene,
     RenderPlan,
     SubtitleCue,
@@ -427,6 +429,44 @@ async def get_artifacts(
     )
     res = await session.execute(stmt)
     return list(res.scalars().all())
+
+
+@router.get(
+    "/{request_id}/artifacts/{artifact_id}/runtime-truth",
+    response_model=ProductionRuntimeTruthResponse,
+    summary="Get immutable rendered runtime truth for one artifact",
+)
+async def get_artifact_runtime_truth(
+    channel_id: UUID,
+    request_id: UUID,
+    artifact_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_async_session)],
+) -> ProductionRuntimeTruthResponse:
+    stmt = (
+        select(ProductionRuntimeTruth, MediaArtifact, ProductionRenderJob)
+        .join(MediaArtifact, ProductionRuntimeTruth.artifact_id == MediaArtifact.id)
+        .join(ProductionRequest, MediaArtifact.production_request_id == ProductionRequest.id)
+        .join(ProductionRenderJob, MediaArtifact.render_job_id == ProductionRenderJob.id)
+        .where(
+            ProductionRuntimeTruth.artifact_id == artifact_id,
+            MediaArtifact.production_request_id == request_id,
+            ProductionRequest.channel_id == channel_id,
+        )
+    )
+    row = (await session.execute(stmt)).one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Rendered runtime truth is not available for this channel/request/artifact.",
+        )
+    truth, artifact, render_job = row
+    return ProductionRuntimeTruthResponse(
+        artifact_id=artifact.id,
+        render_job_id=render_job.id,
+        render_plan_id=render_job.render_plan_id,
+        render_version=artifact.version,
+        runtime_snapshot=truth.payload,
+    )
 
 
 # ── 15. Safe Media Delivery Endpoint (HTTP Range & Streaming Supported) ──

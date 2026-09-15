@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from omega.application.media_storage import compute_sha256
+from omega.application.production_runtime_truth import ProductionRuntimeTruthSnapshot
 from omega.domain.production import (
     LicenseStatus,
     ProductionQAFinding,
@@ -31,8 +32,12 @@ class ProductionQAEngine:
         artifact_file_path: Path | str | None,
         expected_hash: str | None,
         scenes_data: list[dict[str, Any]] | None = None,
+        runtime_truth_snapshot: ProductionRuntimeTruthSnapshot | None = None,
     ) -> tuple[ProductionQAStatus, list[ProductionQAFinding]]:
         """Run all 17 rules and return (status, findings)."""
+        # D1a carries the exact persisted snapshot through QA without changing
+        # any existing rule's input authority; P18-E owns rule-source migration.
+        _ = runtime_truth_snapshot
         findings: list[ProductionQAFinding] = []
 
         # ── 1. SCRIPT_PIN_MISMATCH (BLOCKING) ──
