@@ -357,9 +357,11 @@ export function ArtifactPanel({
 export function ProductionQAPanel({
   qa,
   renderProvenance,
+  showLegacyRenderProvenance = true,
 }: {
   qa: ProductionQAResult | null;
   renderProvenance?: RenderArtifactProvenance | null;
+  showLegacyRenderProvenance?: boolean;
 }) {
   return (
     <PageSection
@@ -404,7 +406,7 @@ export function ProductionQAPanel({
           description="QA becomes available after a rendered artifact is evaluated."
         />
       )}
-      {renderProvenance ? (
+      {showLegacyRenderProvenance && renderProvenance ? (
         <PageSection
           title="Rendered artifact provenance"
           description="Read-only values returned by the renderer for the current production artifact."
@@ -426,11 +428,11 @@ export function ProductionQAPanel({
           ]} />
           <TechnicalDetails data={renderProvenance} />
         </PageSection>
-      ) : (
+      ) : showLegacyRenderProvenance ? (
         <Alert tone="info" title="Artifact render provenance unavailable">
           Existing artifacts rendered before P15-B may not expose subtitle style or text-fitting provenance.
         </Alert>
-      )}
+      ) : null}
       {qa ? (
         <TechnicalDetails
           data={{
@@ -447,9 +449,11 @@ export function ProductionQAPanel({
 export function StoryboardPanel({
   scenes,
   onSelectScene,
+  authority = "PLANNED",
 }: {
   scenes: ProductionScene[];
   onSelectScene?: (scene: ProductionScene) => void;
+  authority?: "PLANNED" | "RENDERED";
 }) {
   if (scenes.length === 0) {
     return (
@@ -463,8 +467,8 @@ export function StoryboardPanel({
   return (
     <div className="workflow-detail">
       <PageSection
-        title="Visual Storyboard"
-        description={`${scenes.length} scene${scenes.length === 1 ? "" : "s"} planned for production.`}
+        title={authority === "RENDERED" ? "Rendered scene sequence" : "Visual Storyboard"}
+        description={`${scenes.length} scene${scenes.length === 1 ? "" : "s"} ${authority === "RENDERED" ? "recorded in the selected artifact runtime snapshot" : "planned for production"}.`}
       >
         <div className="storyboard">
           {scenes.map((scene) => (

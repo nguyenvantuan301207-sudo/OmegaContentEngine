@@ -1842,6 +1842,157 @@ export interface MediaArtifact {
   created_at: string;
 }
 
+export interface RuntimeTruthLineage {
+  channel_id: string;
+  production_request_id: string;
+  content_request_id: string;
+  script_version_id: string;
+  channel_dna_revision_id: string;
+  render_plan_id: string;
+  render_job_id: string;
+  media_artifact_id: string;
+  artifact_version: number;
+  mission_id?: string | null;
+  mission_execution_id?: string | null;
+  task_id?: string | null;
+}
+
+export interface RuntimeSceneTruth {
+  sequence_index: number;
+  source_section_id?: string | null;
+  source_statement_references: number[];
+  narration_text?: string | null;
+  original_strategy: string;
+  effective_strategy: string;
+  template_id: string;
+  start_ms: number;
+  end_ms: number;
+  duration_ms: number;
+  scene_content_sha256: string;
+  visual_origin: "EXPLICIT" | "TEMPLATE" | "PROVIDER";
+  visual_index: number;
+}
+
+export interface RuntimeNarrationTruth {
+  sequence_index: number;
+  scene_index: number;
+  text: string;
+  start_ms: number;
+  end_ms: number;
+  duration_ms: number;
+  audio_asset_id?: string | null;
+  storage_reference?: string | null;
+  audio_content_sha256: string;
+  provider?: string | null;
+  model?: string | null;
+  voice?: string | null;
+  voice_profile: Record<string, unknown>;
+  quality?: string | null;
+  license_status?: string | null;
+  source_reference?: string | null;
+  attribution?: string | null;
+}
+
+export interface RuntimeSubtitleCueTruth {
+  scene_index: number;
+  cue_order: number;
+  start_ms: number;
+  end_ms: number;
+  text: string;
+}
+
+export interface RuntimeSubtitleArtifactTruth {
+  scene_index: number;
+  artifact_kind: "ASS";
+  content_sha256: string;
+}
+
+export interface RuntimeSubtitleTruth {
+  requested_mode: "OFF" | "STANDARD" | "KARAOKE";
+  effective_mode: "OFF" | "STANDARD" | "KARAOKE";
+  fallback_applied: boolean;
+  fallback_reason?: string | null;
+  timing_source: string;
+  semantics_version: number;
+  burn_applied: boolean;
+  style_applied?: Record<string, unknown> | null;
+  cues: RuntimeSubtitleCueTruth[];
+  artifacts: RuntimeSubtitleArtifactTruth[];
+}
+
+export interface RuntimeVisualTruth {
+  scene_index: number;
+  origin: "EXPLICIT" | "TEMPLATE" | "PROVIDER";
+  visual_mode: string;
+  kind?: string | null;
+  template_id?: string | null;
+  provider?: string | null;
+  provider_asset_id?: string | null;
+  source_url?: string | null;
+  source_page_url?: string | null;
+  license_name?: string | null;
+  license_url?: string | null;
+  attribution?: string | null;
+  query?: string | null;
+  storage_reference?: string | null;
+  content_sha256?: string | null;
+  mime_type?: string | null;
+  width?: number | null;
+  height?: number | null;
+  duration_ms?: number | null;
+  provider_metadata: Record<string, unknown>;
+}
+
+export interface RuntimeBrandAssetTruth {
+  role: "CHANNEL_BUG" | "INTRO" | "OUTRO";
+  applied: boolean;
+  reference?: string | null;
+  content_sha256?: string | null;
+  mime_type?: string | null;
+}
+
+export interface RuntimeRenderTargetTruth {
+  duration_ms: number;
+  width: number;
+  height: number;
+  fps?: number | null;
+  fps_mode?: string | null;
+  video_codec: string;
+  audio_codec?: string | null;
+  has_audio: boolean;
+  container: string;
+  file_size_bytes: number;
+  content_sha256: string;
+}
+
+export interface ProductionRuntimeTruthSnapshot {
+  schema_version: 1;
+  lineage: RuntimeTruthLineage;
+  scenes: RuntimeSceneTruth[];
+  narration: RuntimeNarrationTruth[];
+  subtitles: RuntimeSubtitleTruth;
+  visuals: RuntimeVisualTruth[];
+  branding: { policy_source: string; assets: RuntimeBrandAssetTruth[] };
+  audio_mix: Record<string, unknown>;
+  render_target: RuntimeRenderTargetTruth;
+  probe: Record<string, unknown>;
+  artifact: Record<string, unknown>;
+  fingerprints: {
+    canonical_contract: string;
+    manifest_run: string;
+    subtitle_semantics_version: number;
+  };
+}
+
+export interface ProductionRuntimeTruthResponse {
+  truth_kind: "RENDERED";
+  artifact_id: string;
+  render_job_id: string;
+  render_plan_id: string;
+  render_version: number;
+  runtime_snapshot: ProductionRuntimeTruthSnapshot;
+}
+
 export interface ProductionQAFinding {
   rule_code: string;
   severity: "INFO" | "WARNING" | "ERROR" | "BLOCKING";
@@ -1969,6 +2120,14 @@ export async function listRenderJobs(channelId: string, requestId: string): Prom
 
 export async function listMediaArtifacts(channelId: string, requestId: string): Promise<MediaArtifact[]> {
   return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/artifacts`);
+}
+
+export async function getArtifactRuntimeTruth(
+  channelId: string,
+  requestId: string,
+  artifactId: string,
+): Promise<ProductionRuntimeTruthResponse> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/artifacts/${artifactId}/runtime-truth`);
 }
 
 export function getMediaArtifactStreamUrl(channelId: string, requestId: string, artifactId: string): string {
