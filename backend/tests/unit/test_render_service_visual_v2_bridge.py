@@ -203,6 +203,7 @@ async def test_v2_helper_success(render_service, tmp_path, mock_v2_service):
     sha = create_fake_mp4(v2_out)
 
     class FakeResult:
+        production_request_id = req.id
         mission_execution_id = req.mission_execution_id
         content_request_id = req.content_request_id
         width = 1920
@@ -211,24 +212,20 @@ async def test_v2_helper_success(render_service, tmp_path, mock_v2_service):
         output_path = str(v2_out)
         content_sha256 = sha
 
-    mock_v2_service.render_mission_execution.return_value = FakeResult()
+    mock_v2_service.render_canonical_production.return_value = FakeResult()
 
     session = create_v2_session()
     await render_service._render_v2_staging(
         session, req, 30, 1920, 1080, "mp4", "h264", staging_out
     )
 
-    mock_v2_service.render_mission_execution.assert_awaited_once()
-    call = mock_v2_service.render_mission_execution.call_args
-    assert call.args == (session, req.mission_execution_id, req.content_request_id)
-    assert call.kwargs["fps"] == 30
-    assert call.kwargs["voice_profile"] == req.voice_profile
-    assert call.kwargs["subtitle_enabled"] is True
-    assert call.kwargs["subtitle_style"] == SubtitleRenderStyle()
+    mock_v2_service.render_canonical_production.assert_awaited_once()
+    call = mock_v2_service.render_canonical_production.call_args
+    assert call.args == (session, req.id)
     assert call.kwargs["style_profile"] is None
-    assert call.kwargs["subtitle_mode"].value == "STANDARD"
-    assert call.kwargs["subtitle_fallback_policy"].value == "STANDARD_FALLBACK"
     assert call.kwargs["contract"].lineage.production_request_id == req.id
+    assert call.kwargs["contract"].policy.voice_profile == req.voice_profile
+    assert call.kwargs["contract"].policy.subtitle_style == SubtitleRenderStyle()
 
     assert staging_out.exists()
     assert v2_out.exists()
@@ -249,6 +246,7 @@ async def test_v2_helper_sha_mismatch(render_service, tmp_path, mock_v2_service)
     create_fake_mp4(v2_out)
 
     class FakeResult:
+        production_request_id = req.id
         mission_execution_id = req.mission_execution_id
         content_request_id = req.content_request_id
         width = 1920
@@ -257,7 +255,7 @@ async def test_v2_helper_sha_mismatch(render_service, tmp_path, mock_v2_service)
         output_path = str(v2_out)
         content_sha256 = "bad_sha"
 
-    mock_v2_service.render_mission_execution.return_value = FakeResult()
+    mock_v2_service.render_canonical_production.return_value = FakeResult()
 
     with pytest.raises(ValueError, match="V2 output SHA mismatch"):
         await render_service._render_v2_staging(
@@ -274,10 +272,11 @@ async def test_v2_helper_lineage_mismatch(render_service, tmp_path, mock_v2_serv
     staging_out = tmp_path / "staging.mp4"
 
     class FakeResult:
+        production_request_id = req.id
         mission_execution_id = uuid.uuid4()
         content_request_id = req.content_request_id
 
-    mock_v2_service.render_mission_execution.return_value = FakeResult()
+    mock_v2_service.render_canonical_production.return_value = FakeResult()
 
     with pytest.raises(ValueError, match="V2 result mission_execution_id mismatch"):
         await render_service._render_v2_staging(
@@ -294,6 +293,7 @@ async def test_v2_helper_missing_output(render_service, tmp_path, mock_v2_servic
     staging_out = tmp_path / "staging.mp4"
 
     class FakeResult:
+        production_request_id = req.id
         mission_execution_id = req.mission_execution_id
         content_request_id = req.content_request_id
         width = 1920
@@ -301,7 +301,7 @@ async def test_v2_helper_missing_output(render_service, tmp_path, mock_v2_servic
         fps = 30
         output_path = str(tmp_path / "nonexistent.mp4")
 
-    mock_v2_service.render_mission_execution.return_value = FakeResult()
+    mock_v2_service.render_canonical_production.return_value = FakeResult()
 
     with pytest.raises(ValueError, match="V2 output artifact missing"):
         await render_service._render_v2_staging(
@@ -334,7 +334,7 @@ async def test_v2_helper_exception_propagates(render_service, tmp_path, mock_v2_
         mission_execution_id=uuid.uuid4(),
         content_request_id=uuid.uuid4(),
     )
-    mock_v2_service.render_mission_execution.side_effect = RuntimeError("V2 Failed")
+    mock_v2_service.render_canonical_production.side_effect = RuntimeError("V2 Failed")
 
     with pytest.raises(RuntimeError, match="V2 Failed"):
         await render_service._render_v2_staging(
@@ -353,6 +353,7 @@ async def test_v2_helper_dimension_fps_mismatch(render_service, tmp_path, mock_v
     create_fake_mp4(v2_out)
 
     class FakeResult:
+        production_request_id = req.id
         mission_execution_id = req.mission_execution_id
         content_request_id = req.content_request_id
         width = 1280
@@ -361,7 +362,7 @@ async def test_v2_helper_dimension_fps_mismatch(render_service, tmp_path, mock_v
         output_path = str(v2_out)
         content_sha256 = "123"
 
-    mock_v2_service.render_mission_execution.return_value = FakeResult()
+    mock_v2_service.render_canonical_production.return_value = FakeResult()
 
     with pytest.raises(ValueError, match="V2 result dimension mismatch"):
         await render_service._render_v2_staging(
@@ -387,6 +388,7 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
     sha = create_fake_mp4(v2_out)
 
     class FakeResult:
+        production_request_id = req.id
         mission_execution_id = req.mission_execution_id
         content_request_id = req.content_request_id
         width = 1920
@@ -446,7 +448,7 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
         subtitle_semantics_version = 2
         subtitle_mode_decision = None
 
-    mock_v2_service.render_mission_execution.return_value = FakeResult()
+    mock_v2_service.render_canonical_production.return_value = FakeResult()
     session = create_v2_session()
 
     result = await render_service._render_v2_staging(
@@ -511,8 +513,8 @@ async def test_v2_helper_returns_runtime_provenance(render_service, tmp_path, mo
         },
     )
 
-    call = mock_v2_service.render_mission_execution.call_args.kwargs
-    assert call["subtitle_style"] == selected_style
+    call = mock_v2_service.render_canonical_production.call_args.kwargs
+    assert call["contract"].policy.subtitle_style == selected_style
 
 
 @pytest.mark.asyncio
@@ -526,6 +528,7 @@ async def test_v2_helper_backward_compatibility(render_service, tmp_path, mock_v
     sha = create_fake_mp4(v2_out)
 
     class FakeResult:
+        production_request_id = req.id
         mission_execution_id = req.mission_execution_id
         content_request_id = req.content_request_id
         width = 1920
@@ -534,7 +537,7 @@ async def test_v2_helper_backward_compatibility(render_service, tmp_path, mock_v
         output_path = str(v2_out)
         content_sha256 = sha
 
-    mock_v2_service.render_mission_execution.return_value = FakeResult()
+    mock_v2_service.render_canonical_production.return_value = FakeResult()
     session = create_v2_session()
 
     result = await render_service._render_v2_staging(

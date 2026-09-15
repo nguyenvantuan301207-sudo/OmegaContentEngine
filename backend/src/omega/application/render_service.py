@@ -871,9 +871,8 @@ class ProductionRenderService:
     ]:
         import shutil
 
-        # Lineage check
-        if not req.mission_execution_id or not req.content_request_id:
-            raise ValueError("Mission execution lineage missing for V2 render")
+        if not req.content_request_id:
+            raise ValueError("Content request lineage missing for V2 render")
 
         # Target contract check
         if target_width != 1920 or target_height != 1080:
@@ -899,28 +898,27 @@ class ProductionRenderService:
         contract = resolve_canonical_production_contract(
             req,
             channel=ch,
+            overrides={
+                "target_width": target_width,
+                "target_height": target_height,
+                "fps": fps,
+                "video_codec": video_codec,
+                "audio_codec": req.audio_codec,
+                "container_format": container_format,
+            },
             **contract_lineage,
         )
-        subtitle_style = contract.policy.subtitle_style
-        subtitle_mode = contract.policy.subtitle_mode
-        subtitle_fallback_policy = contract.policy.subtitle_fallback_policy
-
         # V2 execution
-        result = await self.visual_production_service.render_mission_execution(
+        result = await self.visual_production_service.render_canonical_production(
             session,
-            req.mission_execution_id,
-            req.content_request_id,
-            fps=fps,
-            voice_profile=req.voice_profile,
-            subtitle_enabled=(subtitle_mode.value != "OFF"),
-            subtitle_style=subtitle_style,
-            style_profile=channel_style,
-            subtitle_mode=subtitle_mode,
-            subtitle_fallback_policy=subtitle_fallback_policy,
+            req.id,
             contract=contract,
+            style_profile=channel_style,
         )
 
         # Validate V2 Result Lineage
+        if result.production_request_id != req.id:
+            raise ValueError("V2 result production_request_id mismatch")
         if result.mission_execution_id != req.mission_execution_id:
             raise ValueError("V2 result mission_execution_id mismatch")
         if result.content_request_id != req.content_request_id:

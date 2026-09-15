@@ -514,9 +514,12 @@ class LocalTTSNarrationProvider:
         )
 
 
-def get_narration_provider(storage: LocalMediaStorageProvider) -> NarrationProvider:
+def get_narration_provider(
+    storage: LocalMediaStorageProvider,
+    provider_type: str | None = None,
+) -> NarrationProvider:
     """Factory creating configured speech narration provider. Explicit, no silent fallback."""
-    provider_type = os.getenv("TTS_PROVIDER", "local").lower()
+    provider_type = (provider_type or os.getenv("TTS_PROVIDER", "local")).lower()
     if provider_type == "gemini":
         if not os.getenv("GEMINI_API_KEY"):
             raise NarrationProviderError("GEMINI_API_KEY missing for gemini TTS provider")

@@ -4,6 +4,7 @@ from typing import Any
 from omega.application.brand_asset_resolver import BrandAssetResolver
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.narration_provider import get_narration_provider
+from omega.application.production_contract import CanonicalProductionContract
 from omega.application.render_service import ProductionRenderService
 from omega.application.visual_asset_engine import VisualAssetEngine
 from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
@@ -30,9 +31,51 @@ class ProductionVisualV2Adapter:
         *args: Any,
         **kwargs: Any
     ) -> Any:
+        contract = kwargs.get("contract")
+        visual_asset_mode = (
+            contract.policy.visual_asset_mode.value
+            if isinstance(contract, CanonicalProductionContract)
+            else self.visual_asset_mode
+        )
+        narration_provider = (
+            contract.policy.narration_provider.value
+            if isinstance(contract, CanonicalProductionContract)
+            else None
+        )
+        return await self._render_with_capabilities(
+            "render_mission_execution",
+            *args,
+            visual_asset_mode=visual_asset_mode,
+            narration_provider=narration_provider,
+            **kwargs,
+        )
+
+    async def render_canonical_production(
+        self,
+        *args: Any,
+        contract: CanonicalProductionContract,
+        **kwargs: Any,
+    ) -> Any:
+        return await self._render_with_capabilities(
+            "render_canonical_production",
+            *args,
+            contract=contract,
+            visual_asset_mode=contract.policy.visual_asset_mode.value,
+            narration_provider=contract.policy.narration_provider.value,
+            **kwargs,
+        )
+
+    async def _render_with_capabilities(
+        self,
+        entrypoint: str,
+        *args: Any,
+        visual_asset_mode: str,
+        narration_provider: str | None,
+        **kwargs: Any,
+    ) -> Any:
         pexels_provider = None
         orchestrator = None
-        if self.visual_asset_mode == "PEXELS":
+        if visual_asset_mode == "PEXELS":
             api_key = os.environ.get("PEXELS_API_KEY", "").strip()
             if not api_key:
                 raise ValueError("PEXELS_API_KEY missing for Visual V2 production")
@@ -49,18 +92,21 @@ class ProductionVisualV2Adapter:
                 providers=[pexels_provider],
             )
 
-        narration_provider = get_narration_provider(self.storage)
+        resolved_narration_provider = get_narration_provider(
+            self.storage, narration_provider
+        )
         v2_service = VisualProductionV2Service(
             asset_orchestrator=orchestrator,
             output_root=self.storage.base_root / "visual_v2",
-            narration_provider=narration_provider,
+            narration_provider=resolved_narration_provider,
             narration_storage=self.storage,
             brand_asset_resolver=BrandAssetResolver(self.storage),
-            visual_asset_mode=self.visual_asset_mode,
+            visual_asset_mode=visual_asset_mode,
         )
 
         try:
-            return await v2_service.render_mission_execution(*args, **kwargs)
+            render = getattr(v2_service, entrypoint)
+            return await render(*args, **kwargs)
         finally:
             if pexels_provider is not None:
                 await pexels_provider.close()
