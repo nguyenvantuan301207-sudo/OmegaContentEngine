@@ -52,7 +52,6 @@ export default function SettingsPage() {
     setSelectedChannelId,
     channelsLoading,
     showInternalChannels,
-    setShowInternalChannels,
     selectedChannelClassification,
     isSelectedChannelInternal,
   } = useOperatorContext();
@@ -73,10 +72,9 @@ export default function SettingsPage() {
   }, []);
 
   const updatePref = <K extends keyof LocalPreferences>(key: K, value: LocalPreferences[K]) => {
-    setPrefs((current) => { const updated = { ...current, [key]: value }; persistPreferences(updated); return updated; });
-    if (key === "showInternalChannels") {
-      setShowInternalChannels(Boolean(value));
-    }
+    const updated = { ...prefs, [key]: value };
+    setPrefs(updated);
+    persistPreferences(updated);
     setNotice("Preference applied and saved in this browser");
     window.setTimeout(() => setNotice(null), 2400);
   };

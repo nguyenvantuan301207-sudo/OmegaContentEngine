@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
@@ -170,6 +171,17 @@ test("shared preference read and persist roundtrips", () => {
   } finally {
     globalThis.localStorage = originalLocalStorage;
   }
+});
+
+test("settings persists preferences outside React state updaters", () => {
+  const source = readFileSync(
+    new URL("../src/app/settings/page.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(source, /setPrefs\s*\(\s*\(/);
+  assert.match(source, /setPrefs\(updated\);\s*persistPreferences\(updated\);/);
+  assert.doesNotMatch(source, /setShowInternalChannels\s*\(/);
 });
 
 test("production visibility correctly segments internal vs product records", () => {
