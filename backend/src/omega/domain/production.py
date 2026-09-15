@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # ── Enums ──
 
@@ -375,6 +375,19 @@ class ProductionRequestCreate(BaseModel):
         if v.lower() not in ("mp4", "mov"):
             raise ValueError("Only 'mp4' (and 'mov') container formats are supported.")
         return v.lower()
+
+    @model_validator(mode="after")
+    def validate_canonical_v2_target(self) -> ProductionRequestCreate:
+        """Reject targets that the sole canonical physical renderer cannot honor."""
+        if (self.target_width, self.target_height) != (1920, 1080):
+            raise ValueError(
+                "Canonical V2 supports only 1920x1080 production targets."
+            )
+        if self.container_format != "mp4":
+            raise ValueError("Canonical V2 supports only the mp4 container.")
+        if self.video_codec.lower() not in ("h264", "libx264"):
+            raise ValueError("Canonical V2 supports only h264/libx264 video codecs.")
+        return self
 
 
 class ProductionRenderPayload(BaseModel):

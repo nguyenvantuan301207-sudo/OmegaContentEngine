@@ -99,10 +99,10 @@ async def test_resolve_mission_id_content_request_fallback(render_service):
     assert session.execute.await_count == 2
 
 
-def test_selection_interactive_no_v2():
+def test_selection_interactive_with_v2():
     req = create_v2_request(mode="INTERACTIVE")
     svc = ProductionRenderService(visual_production_service=AsyncMock())
-    assert svc._should_use_v2(req) is False
+    assert svc._should_use_v2(req) is True
 
 
 def test_selection_mission_no_v2():

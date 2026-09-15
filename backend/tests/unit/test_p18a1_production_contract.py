@@ -560,12 +560,12 @@ def test_contract_deterministic_fingerprint():
 
 # ── 7. Regression Test: Render Routing Unchanged ──
 
-def test_production_render_routing_remains_unchanged():
-    """Verify that P18-A1 does NOT modify ProductionRenderService._should_use_v2 routing."""
+def test_production_render_routing_is_mode_neutral():
+    """Every production mode selects canonical V2 when the capability exists."""
     service = ProductionRenderService(visual_production_service=object())
 
     interactive_req = ProductionRequest(mode="INTERACTIVE")
-    assert service._should_use_v2(interactive_req) is False
+    assert service._should_use_v2(interactive_req) is True
 
     mission_req = ProductionRequest(mode="MISSION_EXECUTION")
     assert service._should_use_v2(mission_req) is True

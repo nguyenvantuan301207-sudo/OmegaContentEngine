@@ -251,12 +251,6 @@ class ProductionRenderService:
         height = plan.height
         fps = plan.fps
         video_codec = plan.video_codec
-        audio_codec = plan.audio_codec
-
-        # Collect scene asset and audio pairings
-        assets_by_req_id = {a.asset_requirement_id: a for a in req.assets if a.asset_requirement_id}
-        narration_by_scene_id = {n.scene_id: n for n in req.narration_segments}
-        scenes_data = sorted(req.scenes, key=lambda s: s.scene_order)
 
         # Snapshot evaluation context for Phase 3 QA
         req_data = {
@@ -332,109 +326,36 @@ class ProductionRenderService:
         runtime_contract: CanonicalProductionContract | None = None
 
         try:
-            # Check if we should use V2
+            # Canonical production has one physical renderer for every request
+            # mode. Missing V2 capability fails closed; it never selects legacy.
             use_v2 = self._should_use_v2(req)
+            if not use_v2:
+                raise RuntimeError("Canonical V2 production service is unavailable")
 
-            if use_v2:
-                # V2 Route
-                (
-                    runtime_quality,
-                    runtime_refs,
-                    runtime_timeline_duration_ms,
-                    runtime_narration_segments,
-                    runtime_subtitle_cues,
-                    runtime_scenes,
-                    runtime_render_provenance,
-                ) = await self._render_v2_staging(
-                    session=session,
-                    req=req,
-                    fps=fps,
-                    target_width=width,
-                    target_height=height,
-                    container_format=plan.container if hasattr(plan, "container") else req.container_format,
-                    video_codec=video_codec,
-                    staging_output_path=staging_output_path,
-                    mission_id=mission_id,
-                    render_job_id=job_id,
-                )
-                runtime_v2_result = runtime_render_provenance.v2_result
-                runtime_contract = runtime_render_provenance.contract
-            else:
-                # Legacy Route
-                scene_clips: list[Path] = []
-                for scene in scenes_data:
-                    # Find image asset
-                    req_id = scene.asset_requirements[0].id if scene.asset_requirements else None
-                    img_asset = assets_by_req_id.get(req_id)
-                    img_path = (
-                        self.storage.resolve_stored_uri(channel_id, request_id, img_asset.storage_uri)
-                        if img_asset
-                        else None
-                    )
-
-                    # Find audio asset
-                    narr_seg = narration_by_scene_id.get(scene.id)
-                    audio_asset = (
-                        next((a for a in req.assets if a.id == narr_seg.audio_asset_id), None)
-                        if narr_seg
-                        else None
-                    )
-                    audio_path = (
-                        self.storage.resolve_stored_uri(channel_id, request_id, audio_asset.storage_uri)
-                        if audio_asset
-                        else None
-                    )
-
-                    clip_path = staging_dir / f"scene_{scene.scene_order}.mp4"
-                    dur_sec = (
-                        scene.estimated_duration_ms / 1000.0 if scene.estimated_duration_ms > 0 else 3.0
-                    )
-                    motion_effect = "SLOW_ZOOM_IN" if str(scene.scene_type) in ("TITLE", "TITLE_MOTION", "DIAGRAM", "INFOGRAPHIC", "STATISTIC", "CTA") else "NONE"
-
-                    if img_path and audio_path and img_path.exists() and audio_path.exists():
-                        await self.renderer.render_scene_clip(
-                            image_path=img_path,
-                            audio_path=audio_path,
-                            output_path=clip_path,
-                            width=width,
-                            height=height,
-                            fps=fps,
-                            video_codec=video_codec,
-                            audio_codec=audio_codec,
-                            duration_sec=dur_sec,
-                            motion_effect=motion_effect,
-                        )
-                    else:
-                        # Synthetic placeholder fallback clip
-                        await self._render_synthetic_clip(clip_path, width, height, fps, dur_sec)
-
-                    scene_clips.append(clip_path)
-
-                # Find subtitle asset if generated
-                sub_asset = next(
-                    (
-                        a
-                        for a in req.assets
-                        if a.asset_type in ("SUBTITLE", AssetType.SUBTITLE.value)
-                        or (a.mime_type and "subrip" in a.mime_type)
-                    ),
-                    None,
-                )
-                srt_path = (
-                    self.storage.resolve_stored_uri(channel_id, request_id, sub_asset.storage_uri)
-                    if sub_asset and sub_asset.storage_uri
-                    else None
-                )
-
-                # 2. Concatenate scene clips into final staging video
-                if len(scene_clips) == 1 and (not srt_path or not srt_path.exists()):
-                    if staging_output_path.exists():
-                        staging_output_path.unlink()
-                    scene_clips[0].rename(staging_output_path)
-                else:
-                    await self.renderer.concatenate_clips(
-                        scene_clips, staging_output_path, srt_path=srt_path
-                    )
+            (
+                runtime_quality,
+                runtime_refs,
+                runtime_timeline_duration_ms,
+                runtime_narration_segments,
+                runtime_subtitle_cues,
+                runtime_scenes,
+                runtime_render_provenance,
+            ) = await self._render_v2_staging(
+                session=session,
+                req=req,
+                fps=fps,
+                target_width=width,
+                target_height=height,
+                container_format=(
+                    plan.container if hasattr(plan, "container") else req.container_format
+                ),
+                video_codec=video_codec,
+                staging_output_path=staging_output_path,
+                mission_id=mission_id,
+                render_job_id=job_id,
+            )
+            runtime_v2_result = runtime_render_provenance.v2_result
+            runtime_contract = runtime_render_provenance.contract
 
             # 3. Media probe validation via ffprobe
             probe_summary = await self.probe.probe_file(staging_output_path)
@@ -462,21 +383,20 @@ class ProductionRenderService:
         try:
             media_artifact_id = uuid.uuid4()
             runtime_snapshot: ProductionRuntimeTruthSnapshot | None = None
-            if use_v2:
-                if runtime_v2_result is None or runtime_contract is None:
-                    raise ValueError("V2 runtime truth inputs are missing")
-                runtime_snapshot = build_production_runtime_truth_snapshot(
-                    contract=runtime_contract,
-                    render_plan_id=plan.id,
-                    render_job_id=job_id,
-                    media_artifact_id=media_artifact_id,
-                    artifact_version=version,
-                    artifact_storage_uri=rel_uri,
-                    artifact_size_bytes=file_size,
-                    artifact_sha256=content_hash,
-                    v2_result=runtime_v2_result,
-                    probe_summary=probe_summary,
-                )
+            if runtime_v2_result is None or runtime_contract is None:
+                raise ValueError("V2 runtime truth inputs are missing")
+            runtime_snapshot = build_production_runtime_truth_snapshot(
+                contract=runtime_contract,
+                render_plan_id=plan.id,
+                render_job_id=job_id,
+                media_artifact_id=media_artifact_id,
+                artifact_version=version,
+                artifact_storage_uri=rel_uri,
+                artifact_size_bytes=file_size,
+                artifact_sha256=content_hash,
+                v2_result=runtime_v2_result,
+                probe_summary=probe_summary,
+            )
 
             # 0. Apply V2 Runtime Narration Provenance Overlay
             assets_list = self._overlay_runtime_narration_provenance(
@@ -491,37 +411,23 @@ class ProductionRenderService:
                 runtime_subtitle_cues,
             )
 
-            if use_v2:
-                if runtime_scenes:
-                    canonical_scenes_data = []
-                    for s in runtime_scenes:
-                        sd = s.model_dump() if hasattr(s, "model_dump") else dict(s)
-                        canonical_scenes_data.append({
-                            "sequence_index": sd.get("sequence_index"),
-                            "original_strategy": sd.get("original_strategy"),
-                            "effective_strategy": sd.get("effective_strategy"),
-                            "duration_seconds": sd.get("duration_seconds"),
-                            "asset_kind": sd.get("asset_kind"),
-                            "asset_provider": sd.get("asset_provider"),
-                            "asset_id": sd.get("asset_id"),
-                        })
-                else:
-                    canonical_scenes_data = None
-            else:
+            if runtime_scenes:
                 canonical_scenes_data = []
-                for s in scenes_data:
+                for s in runtime_scenes:
+                    sd = s.model_dump() if hasattr(s, "model_dump") else dict(s)
                     canonical_scenes_data.append({
-                        "sequence_index": s.scene_order,
-                        "original_strategy": s.scene_type,
-                        "effective_strategy": s.scene_type,
-                        "duration_seconds": (s.estimated_duration_ms / 1000.0) if s.estimated_duration_ms else 0.0,
-                        "asset_kind": None,
-                        "asset_provider": None,
-                        "asset_id": None,
+                        "sequence_index": sd.get("sequence_index"),
+                        "original_strategy": sd.get("original_strategy"),
+                        "effective_strategy": sd.get("effective_strategy"),
+                        "duration_seconds": sd.get("duration_seconds"),
+                        "asset_kind": sd.get("asset_kind"),
+                        "asset_provider": sd.get("asset_provider"),
+                        "asset_id": sd.get("asset_id"),
                     })
+            else:
+                canonical_scenes_data = None
 
-            # 1. Run local 17-rule Production QA. Legacy calls retain their exact
-            # input shape; only V2 carries the new snapshot context.
+            # 1. Run local 17-rule Production QA with canonical runtime truth.
             qa_context = {
                 "request_data": req_data,
                 "script_version_data": script_data,
@@ -535,8 +441,7 @@ class ProductionRenderService:
                 "expected_hash": content_hash,
                 "scenes_data": canonical_scenes_data,
             }
-            if runtime_snapshot is not None:
-                qa_context["runtime_truth_snapshot"] = runtime_snapshot
+            qa_context["runtime_truth_snapshot"] = runtime_snapshot
             qa_status, qa_findings = self.qa_engine.evaluate(**qa_context)
 
             # 2. Insert the candidate as non-current. Current authority moves
@@ -609,7 +514,7 @@ class ProductionRenderService:
                     runtime_timeline_duration_ms=runtime_timeline_duration_ms,
                     runtime_narration_segments=guardian_runtime_narration_segments,
                     runtime_subtitle_cues=guardian_runtime_subtitle_cues,
-                    runtime_scenes=runtime_scenes if use_v2 else (),
+                    runtime_scenes=runtime_scenes,
                 )
 
             # 5. Atomically promote only an accepted candidate. A blocked
@@ -693,10 +598,9 @@ class ProductionRenderService:
         await session.flush()
 
     def _should_use_v2(self, req: ProductionRequest) -> bool:
-        mode = getattr(req, "mode", None)
-        # Handle both string and Enum representations
-        is_mission = mode == "MISSION_EXECUTION" or (hasattr(mode, "value") and mode.value == "MISSION_EXECUTION")
-        return is_mission and self.visual_production_service is not None
+        """Report canonical V2 capability without introducing mode policy."""
+        del req
+        return self.visual_production_service is not None
 
     def _overlay_runtime_narration_provenance(
         self,

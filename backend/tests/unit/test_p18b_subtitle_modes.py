@@ -91,7 +91,7 @@ def _make_dummy_request(
 # 1. Routing Safety Proof (P18-B invariant)
 # ══════════════════════════════════════════════════════════════════
 
-def test_routing_unchanged_mission_execution():
+def test_routing_mission_execution_uses_v2():
     service = ProductionRenderService(
         visual_production_service=MagicMock(),
     )
@@ -99,15 +99,15 @@ def test_routing_unchanged_mission_execution():
     assert service._should_use_v2(req) is True
 
 
-def test_routing_unchanged_interactive_remains_legacy():
+def test_routing_interactive_uses_v2():
     service = ProductionRenderService(
         visual_production_service=MagicMock(),
     )
     req = _make_dummy_request(mode="INTERACTIVE", with_execution=False)
-    assert service._should_use_v2(req) is False
+    assert service._should_use_v2(req) is True
 
 
-def test_routing_unchanged_missing_visual_service():
+def test_routing_missing_visual_service_fails_capability_check():
     service = ProductionRenderService(
         visual_production_service=None,
     )

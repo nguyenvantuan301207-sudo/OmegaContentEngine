@@ -43,9 +43,9 @@ def test_factory_shared_storage():
 def test_factory_selection_logic():
     service = build_production_render_service()
 
-    # 3. Preserves P6-B selection
+    # Canonical V2 capability is mode-neutral.
     req_interactive = ProductionRequest(mode="INTERACTIVE")
-    assert service._should_use_v2(req_interactive) is False
+    assert service._should_use_v2(req_interactive) is True
 
     req_mission = ProductionRequest(mode="MISSION_EXECUTION")
     assert service._should_use_v2(req_mission) is True
