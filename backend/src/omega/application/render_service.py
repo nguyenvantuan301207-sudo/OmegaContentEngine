@@ -539,26 +539,15 @@ class ProductionRenderService:
                 qa_context["runtime_truth_snapshot"] = runtime_snapshot
             qa_status, qa_findings = self.qa_engine.evaluate(**qa_context)
 
-            # 2. Atomic rollover of current pointer
-            # Mark prior videos as is_current = False
-            await session.execute(
-                update(MediaArtifact)
-                .where(
-                    MediaArtifact.production_request_id == request_id,
-                    MediaArtifact.artifact_type == MediaArtifactType.VIDEO.value,
-                )
-                .values(is_current=False)
-            )
-            await session.flush()
-
-            # 3. Insert new MediaArtifact (vN)
+            # 2. Insert the candidate as non-current. Current authority moves
+            # only after both local QA and POST_RENDER Guardian accept it.
             media_art = MediaArtifact(
                 id=media_artifact_id,
                 production_request_id=request_id,
                 render_job_id=job_id,
                 artifact_type=MediaArtifactType.VIDEO.value,
                 version=version,
-                is_current=True,
+                is_current=False,
                 storage_uri=rel_uri,
                 content_hash=content_hash,
                 file_size_bytes=file_size,
@@ -623,7 +612,17 @@ class ProductionRenderService:
                     runtime_scenes=runtime_scenes if use_v2 else (),
                 )
 
-            # 5. Update ProductionRequest status and outcome
+            # 5. Atomically promote only an accepted candidate. A blocked
+            # candidate and its evidence remain queryable without displacing
+            # the previously accepted current artifact.
+            await self._apply_artifact_current_selection(
+                session,
+                request_id=request_id,
+                candidate=media_art,
+                qa_status=qa_status,
+            )
+
+            # 6. Update ProductionRequest status and outcome
             outcome = (
                 ProductionOutcome.BLOCKED.value
                 if qa_status == ProductionQAStatus.BLOCKED
@@ -646,7 +645,7 @@ class ProductionRenderService:
                 )
             )
 
-            # 6. Update RenderJob to SUCCEEDED and atomically persist its evaluator wake-up.
+            # 7. Update RenderJob to SUCCEEDED and atomically persist its evaluator wake-up.
             await session.execute(
                 update(ProductionRenderJob)
                 .where(ProductionRenderJob.id == job_id)
@@ -655,7 +654,6 @@ class ProductionRenderService:
             await self._enqueue_terminal_evaluation(session, prod_req, job_id)
 
             await session.commit()
-            await session.refresh(media_art)
             return media_art, qa_status
 
         except Exception as exc:
@@ -670,6 +668,29 @@ class ProductionRenderService:
         finally:
             # Clean staging directory
             self.storage.cleanup_directory(staging_dir)
+
+    async def _apply_artifact_current_selection(
+        self,
+        session: AsyncSession,
+        *,
+        request_id: uuid.UUID,
+        candidate: MediaArtifact,
+        qa_status: ProductionQAStatus,
+    ) -> None:
+        """Promote an accepted candidate without disturbing current on block."""
+        if qa_status == ProductionQAStatus.BLOCKED:
+            return
+        await session.execute(
+            update(MediaArtifact)
+            .where(
+                MediaArtifact.production_request_id == request_id,
+                MediaArtifact.artifact_type == MediaArtifactType.VIDEO.value,
+                MediaArtifact.id != candidate.id,
+            )
+            .values(is_current=False)
+        )
+        candidate.is_current = True
+        await session.flush()
 
     def _should_use_v2(self, req: ProductionRequest) -> bool:
         mode = getattr(req, "mode", None)

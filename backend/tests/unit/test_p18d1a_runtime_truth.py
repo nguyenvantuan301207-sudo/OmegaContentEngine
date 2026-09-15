@@ -2,7 +2,7 @@ import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -33,6 +33,7 @@ from omega.application.visual_production_v2_service import (
     SUBTITLE_SEMANTICS_VERSION,
     _validate_cached_subtitle_semantics,
 )
+from omega.domain.guardian import GuardianAction
 from omega.domain.production import (
     NarrationProviderType,
     ProductionMode,
@@ -42,7 +43,11 @@ from omega.domain.production import (
     SubtitleMode,
     VisualAssetMode,
 )
-from omega.infrastructure.models import MediaArtifact, ProductionRuntimeTruth
+from omega.infrastructure.models import (
+    MediaArtifact,
+    ProductionQAResult,
+    ProductionRuntimeTruth,
+)
 
 
 def _contract(*, subtitle_mode: SubtitleMode = SubtitleMode.STANDARD, mission=True):
@@ -432,8 +437,20 @@ async def test_runtime_truth_api_never_falls_back_to_planned_rows():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fail_before_commit", "local_qa_status", "guardian_blocks"),
+    [
+        (False, ProductionQAStatus.PASSED, False),
+        (True, ProductionQAStatus.PASSED, False),
+        (False, ProductionQAStatus.BLOCKED, False),
+        (False, ProductionQAStatus.PASSED, True),
+    ],
+)
 async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot(
     tmp_path,
+    fail_before_commit,
+    local_qa_status,
+    guardian_blocks,
 ):
     channel_id = uuid4()
     request_id = uuid4()
@@ -536,7 +553,7 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
         commit=AsyncMock(),
         rollback=AsyncMock(),
         flush=AsyncMock(),
-        refresh=AsyncMock(),
+        refresh=AsyncMock(side_effect=RuntimeError("post-commit read failed")),
         add=MagicMock(),
     )
     _ = tmp_path
@@ -547,7 +564,9 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
     )
     # Keep Guardian fully out of scope; the supplied canonical contract still
     # carries real mission lineage into the snapshot.
-    service._resolve_mission_id = AsyncMock(return_value=None)
+    service._resolve_mission_id = AsyncMock(
+        return_value=mission_id if guardian_blocks else None
+    )
     service._render_v2_staging = AsyncMock(side_effect=cache_hit_staging)
     service.probe.probe_file = AsyncMock(
         return_value={
@@ -561,33 +580,154 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
         }
     )
     service.qa_engine.evaluate = MagicMock(
-        return_value=(ProductionQAStatus.PASSED, [])
+        return_value=(local_qa_status, [])
     )
     service._evaluate_post_render_guardian = AsyncMock(
-        return_value=ProductionQAStatus.PASSED
+        return_value=(
+            ProductionQAStatus.BLOCKED
+            if guardian_blocks
+            else ProductionQAStatus.PASSED
+        )
     )
     service._enqueue_terminal_evaluation = AsyncMock()
+    service._record_job_failure = AsyncMock()
+    if fail_before_commit:
+        service._apply_artifact_current_selection = AsyncMock(
+            side_effect=RuntimeError("pre-commit finalization failed")
+        )
 
-    artifact, status = await service.execute_render_job(
-        session, channel_id, request_id, job_id
+    pre_render_guardian = MagicMock()
+    pre_render_guardian.execute_check = AsyncMock(
+        return_value=SimpleNamespace(
+            decision=SimpleNamespace(action=GuardianAction.ALLOW, reason="accepted")
+        )
     )
+
+    if fail_before_commit:
+        with (
+            patch(
+                "omega.application.guardian.engine.GuardianEngine",
+                return_value=pre_render_guardian,
+            ),
+            pytest.raises(RuntimeError, match="pre-commit finalization failed"),
+        ):
+            await service.execute_render_job(session, channel_id, request_id, job_id)
+        artifact_files = list(
+            service.storage.get_artifacts_dir(channel_id, request_id).glob("*.mp4")
+        )
+        assert artifact_files == []
+        assert session.commit.await_count == 1
+        service._record_job_failure.assert_awaited_once()
+        service.storage.cleanup_directory(test_storage_root)
+        return
+
+    with patch(
+        "omega.application.guardian.engine.GuardianEngine",
+        return_value=pre_render_guardian,
+    ):
+        artifact, status = await service.execute_render_job(
+            session, channel_id, request_id, job_id
+        )
 
     truth_rows = [
         call.args[0]
         for call in session.add.call_args_list
         if isinstance(call.args[0], ProductionRuntimeTruth)
     ]
-    assert status == ProductionQAStatus.PASSED
+    qa_rows = [
+        call.args[0]
+        for call in session.add.call_args_list
+        if isinstance(call.args[0], ProductionQAResult)
+    ]
+    expected_status = (
+        ProductionQAStatus.BLOCKED if guardian_blocks else local_qa_status
+    )
+    assert status == expected_status
     assert artifact is not None
     assert len(truth_rows) == 1
+    assert len(qa_rows) == 1
     qa_snapshot = service.qa_engine.evaluate.call_args.kwargs[
         "runtime_truth_snapshot"
     ]
     assert truth_rows[0].artifact_id == artifact.id
     assert truth_rows[0].payload == qa_snapshot.canonical_dict()
     assert truth_rows[0].manifest_run_fingerprint == runtime_result.run_fingerprint
+    assert artifact.is_current is (expected_status != ProductionQAStatus.BLOCKED)
+    assert service.storage.resolve_stored_uri(
+        channel_id, request_id, artifact.storage_uri
+    ).is_file()
     assert session.commit.await_count == 2
+    session.refresh.assert_not_awaited()
+    service._record_job_failure.assert_not_awaited()
+    if guardian_blocks:
+        service._evaluate_post_render_guardian.assert_awaited_once()
     service.storage.cleanup_directory(test_storage_root)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("block_source", ["LOCAL_QA", "GUARDIAN"])
+async def test_blocked_candidate_preserves_previous_current(block_source):
+    service = ProductionRenderService()
+    previous = SimpleNamespace(is_current=True)
+    candidate = SimpleNamespace(id=uuid4(), is_current=False)
+    session = SimpleNamespace(execute=AsyncMock(), flush=AsyncMock())
+
+    await service._apply_artifact_current_selection(
+        session,
+        request_id=uuid4(),
+        candidate=candidate,
+        qa_status=ProductionQAStatus.BLOCKED,
+    )
+
+    assert block_source in {"LOCAL_QA", "GUARDIAN"}
+    assert previous.is_current is True
+    assert candidate.is_current is False
+    session.execute.assert_not_awaited()
+    session.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_first_blocked_candidate_has_no_current_artifact():
+    service = ProductionRenderService()
+    candidate = SimpleNamespace(id=uuid4(), is_current=False)
+    session = SimpleNamespace(execute=AsyncMock(), flush=AsyncMock())
+
+    await service._apply_artifact_current_selection(
+        session,
+        request_id=uuid4(),
+        candidate=candidate,
+        qa_status=ProductionQAStatus.BLOCKED,
+    )
+
+    assert candidate.is_current is False
+    session.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_accepted_candidate_atomically_rolls_current_pointer():
+    service = ProductionRenderService()
+    previous = SimpleNamespace(is_current=True)
+    candidate = SimpleNamespace(id=uuid4(), is_current=False)
+
+    async def apply_previous_demotion(_statement):
+        previous.is_current = False
+
+    session = SimpleNamespace(
+        execute=AsyncMock(side_effect=apply_previous_demotion),
+        flush=AsyncMock(),
+    )
+
+    await service._apply_artifact_current_selection(
+        session,
+        request_id=uuid4(),
+        candidate=candidate,
+        qa_status=ProductionQAStatus.PASSED,
+    )
+
+    assert previous.is_current is False
+    assert candidate.is_current is True
+    session.execute.assert_awaited_once()
+    session.flush.assert_awaited_once()
 
 
 @pytest.mark.asyncio

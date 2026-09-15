@@ -29,6 +29,7 @@ from omega.application.visual_production_v2_service import (
     VerticalSliceError,
     VerticalSliceSFXInput,
     VisualProductionV2Service,
+    _safe_provider_metadata,
 )
 from omega.domain.channel_style import ChannelStyleProfile
 from omega.infrastructure.models import (
@@ -121,7 +122,19 @@ def make_mock_orchestrator(tmp_path: Path):
                 license_url="https://pexels.com/license",
                 attribution_text=None,
                 query="query",
-                metadata={},
+                metadata={
+                    "download": (
+                        "https://cdn.example/video.mp4?token=SECRET&expires=123"
+                        "#fragment"
+                    ),
+                    "nested": {
+                        "items": [
+                            "ordinary text? preserved",
+                            "https://user:password@cdn.example/nested.mp4?sig=x#frag",
+                        ],
+                        "api_key": "remove-me",
+                    },
+                },
             )
         else:
             return ResolvedVisualAsset(
@@ -145,6 +158,38 @@ def make_mock_orchestrator(tmp_path: Path):
 
     mock_provider.fetch = AsyncMock(side_effect=fake_fetch)
     return VisualAssetOrchestrator(engine=engine, providers=[mock_provider])
+
+
+def test_safe_provider_metadata_recursively_redacts_without_mutating_input():
+    metadata = {
+        "download": (
+            "https://cdn.example/video.mp4?token=SECRET&expires=123#fragment"
+        ),
+        "nested": {
+            "links": [
+                "https://cdn.example/public.mp4#section",
+                "https://user:password@cdn.example/private.mp4?signature=x",
+            ],
+            "oauth_token": "remove-me",
+        },
+        "authorization": "Bearer remove-me",
+        "caption": "ordinary text? remains unchanged",
+    }
+    original = json.loads(json.dumps(metadata))
+
+    safe = _safe_provider_metadata(metadata)
+
+    assert safe == {
+        "download": "https://cdn.example/video.mp4",
+        "nested": {
+            "links": [
+                "https://cdn.example/public.mp4",
+                "https://cdn.example/private.mp4",
+            ],
+        },
+        "caption": "ordinary text? remains unchanged",
+    }
+    assert metadata == original
 
 
 def make_orm_script_version(script_id=None, version=1):
@@ -678,9 +723,22 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
         manifest = json.load(f)
     assert manifest["content_sha256"] == res.content_sha256
     assert manifest["visual_asset_mode"] == "PEXELS"
+    provider_metadata = manifest["scenes"][1]["asset_provider_metadata"]
+    assert provider_metadata == {
+        "download": "https://cdn.example/video.mp4",
+        "nested": {
+            "items": [
+                "ordinary text? preserved",
+                "https://cdn.example/nested.mp4",
+            ]
+        },
+    }
 
     assert "api_key" not in json.dumps(manifest).lower()
     assert "authorization" not in json.dumps(manifest).lower()
+    assert "SECRET" not in json.dumps(manifest)
+    assert "expires=123" not in json.dumps(manifest)
+    assert "#fragment" not in json.dumps(manifest)
 
     # Idempotent re-run: returns existing result without calling browser or FFmpeg again
     mock_ffmpeg_renderer.concatenate_clips.reset_mock()

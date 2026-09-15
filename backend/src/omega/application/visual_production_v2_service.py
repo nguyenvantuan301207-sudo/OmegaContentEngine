@@ -82,7 +82,13 @@ _SENSITIVE_METADATA_MARKERS = (
     "credential",
     "apikey",
     "api_key",
+    "authorization",
+    "oauth",
+    "password",
+    "resumable",
 )
+_AUTHORIZATION_VALUE = re.compile(r"^\s*(?:bearer|basic)\s+\S+", re.IGNORECASE)
+_DROP_METADATA_VALUE = object()
 
 
 def _safe_external_reference(value: str | None) -> str | None:
@@ -90,31 +96,58 @@ def _safe_external_reference(value: str | None) -> str | None:
     if not value:
         return None
     parsed = urlsplit(str(value).strip())
-    if parsed.scheme not in ("http", "https") or parsed.username or parsed.password:
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.hostname:
         return None
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
+    hostname = parsed.hostname
+    safe_host = f"[{hostname}]" if ":" in hostname else hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    if port is not None:
+        safe_host = f"{safe_host}:{port}"
+    return urlunsplit((parsed.scheme.lower(), safe_host, parsed.path, "", ""))
+
+
+def _safe_provider_metadata_value(value: Any) -> Any:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        parsed = urlsplit(value.strip())
+        if parsed.scheme.lower() in ("http", "https"):
+            return _safe_external_reference(value)
+        if parsed.username or parsed.password or _AUTHORIZATION_VALUE.match(value):
+            return None
+        return value
+    if isinstance(value, dict):
+        safe: dict[str, Any] = {}
+        for key, item in value.items():
+            key_text = str(key)
+            if any(
+                marker in key_text.lower()
+                for marker in _SENSITIVE_METADATA_MARKERS
+            ):
+                continue
+            safe_item = _safe_provider_metadata_value(item)
+            if safe_item is not _DROP_METADATA_VALUE:
+                safe[key_text] = safe_item
+        return safe
+    if isinstance(value, (list, tuple)):
+        safe_items = []
+        for item in value:
+            safe_item = _safe_provider_metadata_value(item)
+            if safe_item is not _DROP_METADATA_VALUE:
+                safe_items.append(safe_item)
+        return safe_items
+    return _DROP_METADATA_VALUE
 
 
 def _safe_provider_metadata(value: Any) -> dict[str, Any]:
-    """Retain only JSON-native, non-sensitive provider metadata."""
+    """Recursively copy JSON-native provider metadata without secrets."""
     if not isinstance(value, dict):
         return {}
-    safe: dict[str, Any] = {}
-    for key, item in value.items():
-        key_text = str(key)
-        if any(marker in key_text.lower() for marker in _SENSITIVE_METADATA_MARKERS):
-            continue
-        if item is None or isinstance(item, (str, bool, int, float)):
-            safe[key_text] = item
-        elif isinstance(item, dict):
-            safe[key_text] = _safe_provider_metadata(item)
-        elif isinstance(item, (list, tuple)):
-            safe[key_text] = [
-                child
-                for child in item
-                if child is None or isinstance(child, (str, bool, int, float))
-            ]
-    return safe
+    safe = _safe_provider_metadata_value(value)
+    return safe if isinstance(safe, dict) else {}
 
 
 class VerticalSliceError(Exception):
