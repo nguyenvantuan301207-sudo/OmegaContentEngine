@@ -2130,6 +2130,14 @@ export async function getArtifactRuntimeTruth(
   return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/artifacts/${artifactId}/runtime-truth`);
 }
 
+export async function getArtifactProductionQA(
+  channelId: string,
+  requestId: string,
+  artifactId: string,
+): Promise<ProductionQAResult> {
+  return apiFetch(`/api/v1/channels/${channelId}/production/${requestId}/artifacts/${artifactId}/qa`);
+}
+
 export function getMediaArtifactStreamUrl(channelId: string, requestId: string, artifactId: string): string {
   const baseUrl = process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
   return `${baseUrl}/api/v1/channels/${channelId}/production/${requestId}/artifacts/${artifactId}/media`;

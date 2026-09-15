@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  ApiError, getArtifactRuntimeTruth, getChannels, getMediaArtifactStreamUrl, getProductionQAResult, getProductionRenderCapabilities, getRenderPlan, listMediaArtifacts,
+  ApiError, getArtifactProductionQA, getArtifactRuntimeTruth, getChannels, getMediaArtifactStreamUrl, getProductionRenderCapabilities, getRenderPlan, listMediaArtifacts,
   listNarrationSegments, listProductionAssets, listProductionRequests, listProductionScenes,
   listRenderJobs, listSubtitleCues, prepareProduction, renderProduction, updateProductionRenderSettings,
   type MediaArtifact, type NarrationSegment, type ProductionAsset, type ProductionQAResult,
@@ -12,7 +12,8 @@ import {
 } from "@/lib/api";
 import {
   ArtifactTruthRequestGuard, buildProductionReadView, canPublishArtifact, initialArtifactTruthState,
-  plannedAssetSummary, qaForArtifact, type ArtifactRuntimeTruthState, type ProductionReadView,
+  getReadAuthorityCounts, plannedAssetSummary, qaForArtifact, resolveAutomaticArtifactSelection,
+  type ArtifactRuntimeTruthState, type ProductionReadView,
 } from "@/lib/production-read-authority";
 import { useOperatorContext } from "@/lib/operator-context";
 import { classifyChannel, isChannelVisible } from "@/lib/channel-classification";
@@ -26,6 +27,12 @@ type TerminalDomain = "Mission" | "Research" | "Content" | "Production" | "Rende
 type TerminalFilter = "All" | TerminalDomain | "Errors";
 interface TerminalEvent { key: string; timestamp: string; domain: TerminalDomain; severity: "INFO" | "WARNING" | "ERROR"; status: string; message: string; entityRef?: string; }
 interface RecentProduction { channelId: string; channelName: string; request: ProductionRequest; hasVideo: boolean; artifactCount: number; }
+type ArtifactSelectionMode = "AUTO" | "EXPLICIT_ARTIFACT" | "EXPLICIT_PLANNED";
+type ArtifactQAState =
+  | { status: "PLANNED"; qa: null; artifactId: null; message: null }
+  | { status: "LOADING"; qa: null; artifactId: string; message: null }
+  | { status: "AVAILABLE"; qa: ProductionQAResult; artifactId: string; message: null }
+  | { status: "UNAVAILABLE" | "ERROR"; qa: null; artifactId: string; message: string };
 
 const TERMINAL_POLL_MS = 8000;
 const terminalFilters: TerminalFilter[] = ["All", "Mission", "Research", "Content", "Production", "Render", "Assets", "QA", "Publisher", "Errors"];
@@ -72,7 +79,8 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
   const [plan, setPlan] = useState<RenderPlan | null>(null);
   const [jobs, setJobs] = useState<ProductionRenderJob[]>([]);
   const [artifacts, setArtifacts] = useState<MediaArtifact[]>([]);
-  const [qa, setQa] = useState<ProductionQAResult | null>(null);
+  const [qaState, setQaState] = useState<ArtifactQAState>({ status: "PLANNED", qa: null, artifactId: null, message: null });
+  const [artifactSelectionIssue, setArtifactSelectionIssue] = useState<string | null>(null);
   const [renderCapabilities, setRenderCapabilities] = useState<ProductionRenderCapabilities | null>(null);
   const [selectedSceneId, setSelectedSceneId] = useState<string | null>(null);
   const [selectedArtifactId, setSelectedArtifactId] = useState<string | null>(null);
@@ -92,22 +100,27 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
   const terminalEndRef = useRef<HTMLDivElement | null>(null);
   const recentDiscoveryStarted = useRef(false);
   const truthRequestGuard = useRef(new ArtifactTruthRequestGuard());
+  const artifactSelectionMode = useRef<ArtifactSelectionMode>("AUTO");
 
   const selectedRequest = requests.find((request) => request.id === selectedRequestId) ?? requests[0] ?? null;
   const latestJob = newest(jobs)[0] ?? null;
-  const selectedArtifact = artifacts.find((artifact) => artifact.id === selectedArtifactId) ?? artifacts.find((artifact) => artifact.is_current) ?? newest(artifacts)[0] ?? null;
+  const selectedArtifact = artifacts.find((artifact) => artifact.id === selectedArtifactId) ?? null;
   const readView = useMemo(() => buildProductionReadView(runtimeTruthState, { scenes, narration, subtitles }, selectedArtifact), [runtimeTruthState, scenes, narration, subtitles, selectedArtifact]);
+  const readCounts = useMemo(() => getReadAuthorityCounts(readView), [readView]);
   const selectedScene = readView.scenes.find((scene) => scene.id === selectedSceneId) ?? null;
+  const qa = qaState.status === "AVAILABLE" ? qaState.qa : null;
   const selectedQa = qaForArtifact(qa, selectedArtifact);
   const selectedJob = selectedArtifact?.render_job_id ? jobs.find((job) => job.id === selectedArtifact.render_job_id) ?? null : null;
   const publishEligible = canPublishArtifact(selectedArtifact, selectedQa);
 
-  const clearDetails = useCallback(() => { truthRequestGuard.current.invalidate(); setScenes([]); setAssets([]); setNarration([]); setSubtitles([]); setPlan(null); setJobs([]); setArtifacts([]); setQa(null); setSelectedArtifactId(null); setRuntimeTruthState(initialArtifactTruthState(null)); setSelectedSceneId(null); }, []);
+  const clearDetails = useCallback(() => { truthRequestGuard.current.invalidate(); artifactSelectionMode.current = "AUTO"; setScenes([]); setAssets([]); setNarration([]); setSubtitles([]); setPlan(null); setJobs([]); setArtifacts([]); setQaState({ status: "PLANNED", qa: null, artifactId: null, message: null }); setArtifactSelectionIssue(null); setSelectedArtifactId(null); setRuntimeTruthState(initialArtifactTruthState(null)); setSelectedSceneId(null); }, []);
   const loadDetails = useCallback(async (targetChannelId: string, request: ProductionRequest, silent = false) => {
     if (!silent) setDetailsLoading(true);
-    const results = await Promise.allSettled([listProductionScenes(targetChannelId, request.id), listProductionAssets(targetChannelId, request.id), listNarrationSegments(targetChannelId, request.id), listSubtitleCues(targetChannelId, request.id), getRenderPlan(targetChannelId, request.id), listRenderJobs(targetChannelId, request.id), listMediaArtifacts(targetChannelId, request.id), getProductionQAResult(targetChannelId, request.id)]);
+    const results = await Promise.allSettled([listProductionScenes(targetChannelId, request.id), listProductionAssets(targetChannelId, request.id), listNarrationSegments(targetChannelId, request.id), listSubtitleCues(targetChannelId, request.id), getRenderPlan(targetChannelId, request.id), listRenderJobs(targetChannelId, request.id), listMediaArtifacts(targetChannelId, request.id)]);
     setScenes(results[0].status === "fulfilled" ? results[0].value : []); setAssets(results[1].status === "fulfilled" ? results[1].value : []); setNarration(results[2].status === "fulfilled" ? results[2].value : []); setSubtitles(results[3].status === "fulfilled" ? results[3].value : []); setPlan(results[4].status === "fulfilled" ? results[4].value : null); setJobs(results[5].status === "fulfilled" ? results[5].value : []);
-    const foundArtifacts = results[6].status === "fulfilled" ? results[6].value : []; setArtifacts(foundArtifacts); setSelectedArtifactId((current) => foundArtifacts.some((artifact) => artifact.id === current) ? current : foundArtifacts.find((artifact) => artifact.is_current)?.id ?? newest(foundArtifacts)[0]?.id ?? null); setQa(results[7].status === "fulfilled" ? results[7].value : null);
+    const foundArtifacts = results[6].status === "fulfilled" ? results[6].value : [];
+    const automaticSelection = resolveAutomaticArtifactSelection(foundArtifacts);
+    setArtifacts(foundArtifacts); setArtifactSelectionIssue(automaticSelection.error); setSelectedArtifactId((current) => artifactSelectionMode.current === "EXPLICIT_PLANNED" ? null : artifactSelectionMode.current === "EXPLICIT_ARTIFACT" ? foundArtifacts.some((artifact) => artifact.id === current) ? current : null : automaticSelection.artifactId);
     if (!silent) setDetailsLoading(false);
   }, []);
 
@@ -149,10 +162,12 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
     if (!requestId || !artifactId) {
       truthRequestGuard.current.invalidate();
       setRuntimeTruthState(initialArtifactTruthState(null));
+      setQaState({ status: "PLANNED", qa: null, artifactId: null, message: null });
       return;
     }
     const ticket = truthRequestGuard.current.begin(artifactId);
     setRuntimeTruthState({ status: "LOADING", truth: null, artifactId, message: null });
+    setQaState({ status: "LOADING", qa: null, artifactId, message: null });
     void getArtifactRuntimeTruth(channelId, requestId, artifactId).then((truth) => {
       if (!truthRequestGuard.current.isCurrent(ticket, selectedArtifactId ?? artifactId)) return;
       if (truth.truth_kind !== "RENDERED" || truth.artifact_id !== artifactId) {
@@ -167,6 +182,18 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
       setRuntimeTruthState({ status: unavailable ? "UNAVAILABLE" : "ERROR", truth: null, artifactId, message: unavailable ? "This artifact has no persisted runtime truth." : caught instanceof Error ? caught.message : "Runtime truth could not be loaded." });
       setSelectedSceneId(null);
     });
+    void getArtifactProductionQA(channelId, requestId, artifactId).then((artifactQa) => {
+      if (!truthRequestGuard.current.isCurrent(ticket, selectedArtifactId ?? artifactId)) return;
+      if (artifactQa.artifact_id !== artifactId) {
+        setQaState({ status: "ERROR", qa: null, artifactId, message: "QA response did not match the selected artifact." });
+        return;
+      }
+      setQaState({ status: "AVAILABLE", qa: artifactQa, artifactId, message: null });
+    }).catch((caught) => {
+      if (!truthRequestGuard.current.isCurrent(ticket, selectedArtifactId ?? artifactId)) return;
+      const unavailable = caught instanceof ApiError && caught.status === 404;
+      setQaState({ status: unavailable ? "UNAVAILABLE" : "ERROR", qa: null, artifactId, message: unavailable ? "QA is not available for this artifact." : caught instanceof Error ? caught.message : "Artifact QA could not be loaded." });
+    });
   }, [channelId, selectedArtifact?.id, selectedArtifactId, selectedRequest?.id]);
 
   const terminalEvents = useMemo(() => buildTerminalEvents(selectedRequest, scenes, assets, narration, subtitles, plan, jobs, artifacts, qa), [selectedRequest, scenes, assets, narration, subtitles, plan, jobs, artifacts, qa]);
@@ -174,7 +201,7 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
   useEffect(() => { if (view === "terminal" && terminalAutoScroll) terminalEndRef.current?.scrollIntoView({ block: "nearest" }); }, [view, visibleEvents, terminalAutoScroll]);
 
   const chooseRequest = async (request: ProductionRequest) => { setSelectedRequestId(request.id); clearDetails(); setTerminalClearedAt(null); await loadDetails(channelId, request); };
-  const chooseArtifact = (artifactId: string) => { truthRequestGuard.current.invalidate(); setSelectedArtifactId(artifactId); setRuntimeTruthState({ status: "LOADING", truth: null, artifactId, message: null }); setSelectedSceneId(null); };
+  const chooseArtifact = (artifactId: string | null) => { truthRequestGuard.current.invalidate(); artifactSelectionMode.current = artifactId ? "EXPLICIT_ARTIFACT" : "EXPLICIT_PLANNED"; setSelectedArtifactId(artifactId); setRuntimeTruthState(artifactId ? { status: "LOADING", truth: null, artifactId, message: null } : initialArtifactTruthState(null)); setQaState(artifactId ? { status: "LOADING", qa: null, artifactId, message: null } : { status: "PLANNED", qa: null, artifactId: null, message: null }); setSelectedSceneId(null); };
   const openRecent = async (value: string) => { const item = recent.find((candidate) => `${candidate.channelId}:${candidate.request.id}` === value); if (!item) return; setSelectedRequestId(item.request.id); await setSelectedChannelId(item.channelId); if (forcedChannelId) return; await loadChannel(item.channelId, item.request.id); };
   const perform = async (action: () => Promise<unknown>) => { if (!selectedRequest) return; setBusy(true); setError(null); try { await action(); await loadChannel(channelId, selectedRequest.id); } catch (caught) { setError(caught instanceof Error ? caught.message : "Production action failed."); } finally { setBusy(false); } };
   const applySubtitleStyle = async (style: SubtitleRenderStyle) => {
@@ -235,11 +262,12 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
     <div className="recent-production-bar"><div><span className="eyebrow">AVAILABLE PRODUCTION</span><strong>{visibleRecent.length > 0 ? (requests.length ? "Switch persisted work" : `No production in ${activeChannel?.name || "this channel"}`) : "No visible production in current product channels"}</strong></div>{visibleRecent.length > 0 ? <select className="select" defaultValue="" onChange={(event) => void openRecent(event.target.value)}><option value="">Choose a persisted production…</option>{visibleRecent.map((item) => { const ch = channels.find((c) => c.id === item.channelId) || toChannelStub(item.channelId, item.channelName); const prov = classifyChannel(ch); const badge = prov.isInternal ? ` [${prov.badgeLabel}]` : ""; return <option key={`${item.channelId}:${item.request.id}`} value={`${item.channelId}:${item.request.id}`}>{item.channelName}{badge} · {safeStatus(item.request.outcome || item.request.status)} · {item.hasVideo ? "Video ready" : `${item.artifactCount} artifacts`} · {displayDate(item.request.created_at)}</option>; })}</select> : <button type="button" className="btn btn-secondary btn-sm" onClick={() => setShowInternalChannels(true)}>Show internal/test production</button>}</div>
     {error && <ErrorState title="Production data unavailable" description={error} action={<button type="button" className="btn" onClick={() => void loadChannel(channelId, selectedRequest?.id)}>Retry</button>} />}
     {latestJob?.state === "FAILED" && <Alert tone="danger" title="Latest render failed">{latestJob.sanitized_error || "The persisted render job reports a failure."}</Alert>}
+    {artifactSelectionIssue && <Alert tone="danger" title="Automatic artifact selection unavailable">{artifactSelectionIssue}</Alert>}
     <TruthAuthorityStatus state={runtimeTruthState} artifact={selectedArtifact} qa={selectedQa} />
 
     <section className={`mission-studio ${detailsLoading ? "is-loading" : ""}`} aria-busy={loading || detailsLoading}>
       <div className="pipeline" aria-label="Production pipeline">{pipeline.map(([label, state]) => <div className={`stage ${state.toLowerCase()}`} key={label}><span>{state === "DONE" ? "✓" : state === "CURRENT" ? "●" : state === "FAILED" ? "×" : state === "BLOCKED" ? "!" : "○"}</span><b>{label}</b><small>{state}</small></div>)}</div>
-      <nav className="workspace-tabs" aria-label="Production workspace tabs">{([ ["overview", "Overview"], ["script", "Script Studio"], ["storyboard", `Storyboard ${scenes.length ? `(${scenes.length})` : ""}`], ["subtitle", `Subtitle ${subtitles.length ? `(${subtitles.length})` : ""}`], ["timeline", "Timeline"], ["terminal", "Terminal"], ["qa", "QA / Guardian"] ] as Array<[ProductionView, string]>).map(([id, label]) => <button type="button" className={`wtab ${view === id ? "active" : ""}`} onClick={() => setView(id)} key={id}>{label}{id === "terminal" && terminalLive && <span className="live-dot" />}</button>)}</nav>
+      <nav className="workspace-tabs" aria-label="Production workspace tabs">{([ ["overview", "Overview"], ["script", "Script Studio"], ["storyboard", `Storyboard ${readCounts.storyboard ? `(${readCounts.storyboard})` : ""}`], ["subtitle", `Subtitle ${readCounts.subtitles ? `(${readCounts.subtitles})` : ""}`], ["timeline", "Timeline"], ["terminal", "Terminal"], ["qa", "QA / Guardian"] ] as Array<[ProductionView, string]>).map(([id, label]) => <button type="button" className={`wtab ${view === id ? "active" : ""}`} onClick={() => setView(id)} key={id}>{label}{id === "terminal" && terminalLive && <span className="live-dot" />}</button>)}</nav>
       <div className="mission-studio-body"><main className="mission-canvas">
         {view === "overview" && <Overview request={selectedRequest} artifact={selectedArtifact} artifacts={artifacts} selectedArtifactId={selectedArtifact?.id ?? null} setSelectedArtifactId={chooseArtifact} channelId={channelId} channelName={activeChannel?.name || "this channel"} availableProduction={recent} openProduction={(item) => void openRecent(`${item.channelId}:${item.request.id}`)} readView={readView} plan={plan} runtimeTruth={runtimeTruthState.status === "RENDERED" ? runtimeTruthState.truth : null} selectedSceneId={selectedSceneId} setSelectedSceneId={setSelectedSceneId} loading={loading} onRender={() => selectedRequest && void perform(() => renderProduction(channelId, selectedRequest.id, `render-${Date.now()}`))} />}
         {view === "script" && <div className="studio-tab-pane"><PanelHeading eyebrow={`SCRIPT STUDIO · ${readView.authority}`} title="Read-only production script" detail={`${readView.scenes.length} scene blocks`} />{readView.scenes.length ? <div className="script-blocks">{readView.scenes.map((scene) => <button type="button" key={scene.id} className="script-block" onClick={() => { setSelectedSceneId(scene.id); setView("overview"); }}><span>Scene {scene.scene_order} · {scene.scene_type}</span><p>{scene.narration_text}</p>{scene.visual_intent && <small>{scene.visual_intent}</small>}</button>)}</div> : <PanelEmpty title="No authoritative script blocks available" description={runtimeTruthState.status === "PLANNED" ? "This production has no planned scene narration yet." : "Rendered rows are unavailable; planned rows are not substituted."} />}</div>}
@@ -247,7 +275,7 @@ function ProductionWorkspace({ forcedChannelId }: { forcedChannelId?: string }) 
         {view === "subtitle" && <div className="studio-tab-pane"><PanelHeading eyebrow={`SUBTITLE · ${readView.authority}`} title={readView.authority === "RENDERED" ? "Rendered subtitles" : "Planned subtitle preparation"} detail={runtimeTruthState.status === "RENDERED" ? runtimeTruthState.truth.runtime_snapshot.subtitles.effective_mode : `${readView.subtitles.length} planned cues`} />{runtimeTruthState.status === "RENDERED" ? <RenderedSubtitlePanel truth={runtimeTruthState.truth} subtitles={readView.subtitles} /> : runtimeTruthState.status === "PLANNED" ? <SubtitlePanel subtitles={readView.subtitles} request={selectedRequest} capabilities={renderCapabilities} channelId={channelId} busy={busy} onApply={applySubtitleStyle} /> : <PanelEmpty title="Rendered subtitles unavailable" description="Planned subtitle cues are not shown as rendered truth for this artifact." />}</div>}
         {view === "timeline" && <div className="studio-tab-pane"><PanelHeading eyebrow={`TIMELINE · ${readView.authority}`} title="Track detail" detail={readView.authority === "RENDERED" ? "Artifact-scoped runtime timing" : readView.authority === "PLANNED" ? "Request-level planned timing" : "Rendered timing unavailable"} />{readView.scenes.length || readView.narration.length || readView.subtitles.length ? <TimelinePanel scenes={readView.scenes} narration={readView.narration} subtitles={readView.subtitles} /> : <PanelEmpty title="Timeline has no authoritative clips" description={runtimeTruthState.status === "PLANNED" ? "Planned tracks will appear when scene, narration, or subtitle timing exists." : "Runtime truth is unavailable; planned timing has not been substituted."} />}</div>}
         {view === "terminal" && <TerminalPanel events={visibleEvents} totalEvents={terminalEvents.length} live={terminalLive} setLive={setTerminalLive} autoScroll={terminalAutoScroll} setAutoScroll={setTerminalAutoScroll} search={terminalSearch} setSearch={setTerminalSearch} filter={terminalFilter} setFilter={setTerminalFilter} onCopy={async () => { try { await navigator.clipboard.writeText(visibleEvents.map((event) => `${displayTime(event.timestamp)} ${event.domain.toUpperCase()} ${event.status} ${event.message}`).join("\n")); setTerminalNotice(`${visibleEvents.length} visible entries copied`); } catch { setTerminalNotice("Clipboard permission was unavailable"); } }} onClear={() => { setTerminalClearedAt(Date.now()); setTerminalNotice("View cleared locally; persisted records were not changed"); }} notice={terminalNotice} endRef={terminalEndRef} />}
-        {view === "qa" && <div className="studio-tab-pane"><PanelHeading eyebrow="QA / GUARDIAN · ARTIFACT SCOPED" title="Production assurance" detail={selectedQa?.status ? safeStatus(selectedQa.status) : "No matching result"} />{selectedArtifact && qa && !selectedQa && <Alert tone="warning" title="QA does not match selected artifact">The latest request QA belongs to another artifact and is not displayed here.</Alert>}<ProductionQAPanel qa={selectedQa} renderProvenance={null} showLegacyRenderProvenance={false} />{runtimeTruthState.status === "RENDERED" && <RuntimeTruthSummary truth={runtimeTruthState.truth} />}</div>}
+        {view === "qa" && <div className="studio-tab-pane"><PanelHeading eyebrow="QA / GUARDIAN · ARTIFACT SCOPED" title="Production assurance" detail={selectedQa?.status ? safeStatus(selectedQa.status) : qaState.status === "LOADING" ? "Loading exact artifact QA" : qaState.status === "PLANNED" ? "No artifact selected" : "Unavailable for selected artifact"} />{qaState.status === "UNAVAILABLE" && <Alert tone="info" title="Artifact QA unavailable">{qaState.message}</Alert>}{qaState.status === "ERROR" && <Alert tone="danger" title="Artifact QA failed to load">{qaState.message}</Alert>}<ProductionQAPanel qa={selectedQa} renderProvenance={null} showLegacyRenderProvenance={false} />{runtimeTruthState.status === "RENDERED" && <RuntimeTruthSummary truth={runtimeTruthState.truth} />}</div>}
       </main><Inspector request={selectedRequest} scene={selectedScene} artifact={selectedArtifact} plan={plan} latestJob={selectedJob} qa={selectedQa} assets={assets} readView={readView} runtimeTruth={runtimeTruthState.status === "RENDERED" ? runtimeTruthState.truth : null} busy={busy} publishEligible={publishEligible} onClearScene={() => setSelectedSceneId(null)} onPrepare={() => selectedRequest && void perform(() => prepareProduction(channelId, selectedRequest.id))} onRender={() => selectedRequest && void perform(() => renderProduction(channelId, selectedRequest.id, `render-${Date.now()}`))} onPublish={() => setPublishOpen(true)} />
       </div>
     </section>
@@ -280,13 +308,13 @@ function RenderedSubtitlePanel({ truth, subtitles }: { truth: ProductionRuntimeT
   return <div className="workflow-detail"><section className="card pad"><PanelHeading eyebrow={`RENDERED · ${subtitleTruth.effective_mode}`} title="Artifact subtitle cues" detail={`${subtitles.length} runtime cues · ${subtitleTruth.timing_source}`} />{subtitleTruth.effective_mode === "KARAOKE" && <Alert tone="info" title="KARAOKE effective mode">These are actual runtime cue timings. No provider word-timing claim is made.</Alert>}<div className="card subtitle-cue-table-wrap"><table className="v2-table"><thead><tr><th>Order</th><th>Timestamp</th><th>Subtitle text</th></tr></thead><tbody>{subtitles.map((cue) => <tr key={cue.id}><td>#{cue.cue_order}</td><td className="text-mono small">{(cue.start_ms / 1000).toFixed(2)}s – {(cue.end_ms / 1000).toFixed(2)}s</td><td>{cue.text}</td></tr>)}</tbody></table></div></section></div>;
 }
 
-function Overview({ request, artifact, artifacts, selectedArtifactId, setSelectedArtifactId, channelId, channelName, availableProduction, openProduction, readView, plan, runtimeTruth, selectedSceneId, setSelectedSceneId, loading, onRender }: { request: ProductionRequest | null; artifact: MediaArtifact | null; artifacts: MediaArtifact[]; selectedArtifactId: string | null; setSelectedArtifactId: (artifactId: string) => void; channelId: string; channelName: string; availableProduction: RecentProduction[]; openProduction: (item: RecentProduction) => void; readView: ProductionReadView; plan: RenderPlan | null; runtimeTruth: ProductionRuntimeTruthResponse | null; selectedSceneId: string | null; setSelectedSceneId: (id: string | null) => void; loading: boolean; onRender: () => void; }) {
+function Overview({ request, artifact, artifacts, selectedArtifactId, setSelectedArtifactId, channelId, channelName, availableProduction, openProduction, readView, plan, runtimeTruth, selectedSceneId, setSelectedSceneId, loading, onRender }: { request: ProductionRequest | null; artifact: MediaArtifact | null; artifacts: MediaArtifact[]; selectedArtifactId: string | null; setSelectedArtifactId: (artifactId: string | null) => void; channelId: string; channelName: string; availableProduction: RecentProduction[]; openProduction: (item: RecentProduction) => void; readView: ProductionReadView; plan: RenderPlan | null; runtimeTruth: ProductionRuntimeTruthResponse | null; selectedSceneId: string | null; setSelectedSceneId: (id: string | null) => void; loading: boolean; onRender: () => void; }) {
   const durationMs = readView.authority === "RENDERED" ? readView.durationMs : readView.authority === "PLANNED" ? plan?.total_duration_ms ?? readView.durationMs : 0;
   const target = runtimeTruth?.runtime_snapshot.render_target;
   const targetDetail = target ? `${target.width}×${target.height} · ${target.fps ?? "?"} fps · RENDERED` : request ? `${request.target_width}×${request.target_height} · ${request.fps} fps · PLANNED` : "Awaiting production";
   return <div className="overview-workspace">{!request && <section className="production-empty-notice"><div><span className="eyebrow">NO PRODUCTION IN THIS CHANNEL</span><h2>No production for {channelName}</h2><p>The Studio remains available. Open a persisted production from another channel below.</p></div><div className="available-production-list">{availableProduction.slice(0, 4).map((item) => <button type="button" key={`${item.channelId}:${item.request.id}`} onClick={() => openProduction(item)}><span><b>{item.channelName}</b><small>{safeStatus(item.request.outcome || item.request.status)} · {displayDate(item.request.created_at)}</small></span><span className={item.hasVideo ? "has-video" : ""}>{item.hasVideo ? "Video ready" : `${item.artifactCount} artifacts`} →</span></button>)}</div></section>}<section className="preview-panel"><PanelHeading eyebrow={`VIDEO PREVIEW · ${readView.authority}`} title={artifact ? `Artifact v${artifact.version}${artifact.is_current ? " · CURRENT" : " · NON-CURRENT"}` : "Program monitor"} detail={targetDetail} />
     <div className="preview-stage">{artifact && request ? <video controls preload="metadata" src={getMediaArtifactStreamUrl(channelId, request.id, artifact.id)}>Your browser cannot play this persisted video artifact.</video> : <div className="preview-empty"><button type="button" className="preview-play" disabled={!request || loading} onClick={onRender}>▶</button><strong>{request ? "No rendered video artifact" : "No production selected"}</strong><span>{request ? "Prepare or render this persisted request to create a preview." : "The Studio remains ready. Select a real production above."}</span>{!request && <Link href={channelId ? `/channels/${channelId}/content` : "/channels"} className="btn btn-sm">Open content workspace</Link>}</div>}</div>
-    <div className="preview-transport"><button type="button" disabled={!artifact}>▶</button><span>00:00</span><div className="transport-line"><span /></div><span>{durationMs ? `${(durationMs / 1000).toFixed(1)}s` : "--:--"}</span>{artifacts.length > 0 && <select aria-label="Selected artifact" value={selectedArtifactId ?? ""} onChange={(event) => setSelectedArtifactId(event.target.value)}>{newest(artifacts).map((item) => <option key={item.id} value={item.id}>v{item.version}{item.is_current ? " · CURRENT" : " · NON-CURRENT / forensic"}</option>)}</select>}</div>
+    <div className="preview-transport"><button type="button" disabled={!artifact}>▶</button><span>00:00</span><div className="transport-line"><span /></div><span>{durationMs ? `${(durationMs / 1000).toFixed(1)}s` : "--:--"}</span>{artifacts.length > 0 && <select aria-label="Selected artifact" value={selectedArtifactId ?? ""} onChange={(event) => setSelectedArtifactId(event.target.value || null)}><option value="">Planned request view</option>{newest(artifacts).map((item) => <option key={item.id} value={item.id}>v{item.version}{item.is_current ? " · CURRENT" : " · NON-CURRENT / forensic"}</option>)}</select>}</div>
   </section><SceneTimeline scenes={readView.scenes} narration={readView.narration} subtitles={readView.subtitles} durationMs={durationMs} selectedSceneId={selectedSceneId} setSelectedSceneId={setSelectedSceneId} />{runtimeTruth && <RuntimeTruthSummary truth={runtimeTruth} />}{plan && <Alert tone="info" title="Planned render profile">RenderPlan v{plan.version}: {plan.width}×{plan.height} · {plan.fps} fps · estimated {(plan.total_duration_ms / 1000).toFixed(1)} sec. Rendered output facts above outrank these planned values.</Alert>}</div>;
 }
 

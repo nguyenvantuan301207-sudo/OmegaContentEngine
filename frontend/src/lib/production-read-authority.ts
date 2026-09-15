@@ -26,6 +26,11 @@ export interface ProductionReadView {
   durationMs: number;
 }
 
+export interface AutomaticArtifactSelection {
+  artifactId: string | null;
+  error: string | null;
+}
+
 export interface ArtifactTruthTicket {
   artifactId: string;
   generation: number;
@@ -53,6 +58,20 @@ export function initialArtifactTruthState(artifact: MediaArtifact | null): Artif
   return artifact
     ? { status: "LOADING", truth: null, artifactId: artifact.id, message: null }
     : { status: "PLANNED", truth: null, artifactId: null, message: null };
+}
+
+export function resolveAutomaticArtifactSelection(artifacts: MediaArtifact[]): AutomaticArtifactSelection {
+  const current = artifacts.filter((artifact) => artifact.is_current);
+  if (current.length === 1) return { artifactId: current[0].id, error: null };
+  if (current.length === 0) return { artifactId: null, error: null };
+  return {
+    artifactId: null,
+    error: "Multiple artifacts are marked current. Automatic artifact selection is unavailable.",
+  };
+}
+
+export function getReadAuthorityCounts(view: ProductionReadView): { storyboard: number; subtitles: number } {
+  return { storyboard: view.scenes.length, subtitles: view.subtitles.length };
 }
 
 export function buildProductionReadView(

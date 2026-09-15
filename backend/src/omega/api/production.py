@@ -469,6 +469,38 @@ async def get_artifact_runtime_truth(
     )
 
 
+@router.get(
+    "/{request_id}/artifacts/{artifact_id}/qa",
+    response_model=ProductionQAResultResponse,
+    summary="Get Production QA for one exact media artifact",
+)
+async def get_artifact_qa_result(
+    channel_id: UUID,
+    request_id: UUID,
+    artifact_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_async_session)],
+) -> ProductionQAResult:
+    stmt = (
+        select(ProductionQAResult)
+        .join(MediaArtifact, ProductionQAResult.artifact_id == MediaArtifact.id)
+        .join(ProductionRequest, MediaArtifact.production_request_id == ProductionRequest.id)
+        .where(
+            ProductionQAResult.artifact_id == artifact_id,
+            ProductionQAResult.production_request_id == request_id,
+            MediaArtifact.production_request_id == request_id,
+            ProductionRequest.id == request_id,
+            ProductionRequest.channel_id == channel_id,
+        )
+    )
+    qa = (await session.execute(stmt)).scalar_one_or_none()
+    if qa is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Production QA is not available for this channel/request/artifact.",
+        )
+    return qa
+
+
 # ── 15. Safe Media Delivery Endpoint (HTTP Range & Streaming Supported) ──
 @router.get(
     "/{request_id}/artifacts/{artifact_id}/media",

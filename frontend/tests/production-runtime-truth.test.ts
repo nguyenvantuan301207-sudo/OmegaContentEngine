@@ -13,8 +13,10 @@ import {
   ArtifactTruthRequestGuard,
   buildProductionReadView,
   canPublishArtifact,
+  getReadAuthorityCounts,
   initialArtifactTruthState,
   qaForArtifact,
+  resolveAutomaticArtifactSelection,
 } from "../src/lib/production-read-authority.ts";
 
 const artifact = (id: string, version: number, isCurrent = true): MediaArtifact => ({
@@ -155,11 +157,42 @@ test("planned-only requests retain explicit request-level planned data", () => {
   assert.equal(view.durationMs, 8000);
 });
 
+test("blocked-only artifacts do not create an automatic rendered selection", () => {
+  const blocked = [artifact("artifact-v1", 1, false), artifact("artifact-v2", 2, false)];
+  const selection = resolveAutomaticArtifactSelection(blocked);
+  assert.deepEqual(selection, { artifactId: null, error: null });
+  const view = buildProductionReadView(initialArtifactTruthState(null), planned, null);
+  assert.equal(view.authority, "PLANNED");
+  assert.equal(view.scenes.length, 1);
+  assert.equal(view.subtitles.length, 1);
+});
+
+test("one explicit current artifact is preferred over a newer blocked artifact", () => {
+  const current = artifact("artifact-v1", 1, true);
+  const blocked = artifact("artifact-v2", 2, false);
+  assert.deepEqual(resolveAutomaticArtifactSelection([blocked, current]), { artifactId: current.id, error: null });
+});
+
+test("multiple current artifacts fail closed instead of using a version heuristic", () => {
+  const result = resolveAutomaticArtifactSelection([artifact("artifact-v1", 1), artifact("artifact-v2", 2)]);
+  assert.equal(result.artifactId, null);
+  assert.match(result.error ?? "", /Multiple artifacts are marked current/);
+});
+
 test("typed client targets runtime truth for the exact artifact id", () => {
   const source = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
   assert.match(source, /function getArtifactRuntimeTruth/);
   assert.match(source, /production\/\$\{requestId\}\/artifacts\/\$\{artifactId\}\/runtime-truth/);
   assert.match(source, /Promise<ProductionRuntimeTruthResponse>/);
+});
+
+test("typed QA client targets the exact artifact and request-latest QA is not used by the page", () => {
+  const apiSource = readFileSync(new URL("../src/lib/api.ts", import.meta.url), "utf8");
+  const pageSource = readFileSync(new URL("../src/app/production/page.tsx", import.meta.url), "utf8");
+  assert.match(apiSource, /function getArtifactProductionQA/);
+  assert.match(apiSource, /production\/\$\{requestId\}\/artifacts\/\$\{artifactId\}\/qa/);
+  assert.match(apiSource, /Promise<ProductionQAResult>/);
+  assert.doesNotMatch(pageSource, /getProductionQAResult/);
 });
 
 test("switching v1 to v2 prevents a late v1 response from becoming current", () => {
@@ -168,6 +201,15 @@ test("switching v1 to v2 prevents a late v1 response from becoming current", () 
   const v2 = guard.begin("artifact-v2");
   assert.equal(guard.isCurrent(v1, "artifact-v2", "artifact-v1"), false);
   assert.equal(guard.isCurrent(v2, "artifact-v2", "artifact-v2"), true);
+});
+
+test("the shared selection token rejects stale runtime truth and stale QA together", () => {
+  const guard = new ArtifactTruthRequestGuard();
+  const pendingV1 = guard.begin("artifact-v1");
+  guard.invalidate();
+  const pendingV2 = guard.begin("artifact-v2");
+  assert.equal(guard.isCurrent(pendingV1, "artifact-v2", "artifact-v1"), false);
+  assert.equal(guard.isCurrent(pendingV2, "artifact-v2", "artifact-v2"), true);
 });
 
 test("rendered scene duration, narration, and visual provenance come from runtime truth", () => {
@@ -216,6 +258,44 @@ test("QA is shown only when it matches the selected artifact", () => {
   const qa: ProductionQAResult = { id: "qa-1", production_request_id: "request-1", artifact_id: "artifact-v1", status: "PASSED", findings: [], executed_at: "2026-09-15T00:00:00Z" };
   assert.equal(qaForArtifact(qa, artifact("artifact-v1", 1))?.id, "qa-1");
   assert.equal(qaForArtifact(qa, artifact("artifact-v2", 2)), null);
+});
+
+test("historical and current QA remain exact across explicit artifact selection", () => {
+  const historical = artifact("artifact-v1", 1, false);
+  const current = artifact("artifact-v2", 2, true);
+  const qaV1: ProductionQAResult = { id: "qa-1", production_request_id: "request-1", artifact_id: historical.id, status: "PASSED", findings: [], executed_at: "2026-09-14T00:00:00Z" };
+  const qaV2: ProductionQAResult = { id: "qa-2", production_request_id: "request-1", artifact_id: current.id, status: "PASSED", findings: [], executed_at: "2026-09-15T00:00:00Z" };
+  assert.equal(qaForArtifact(qaV1, historical)?.artifact_id, historical.id);
+  assert.equal(qaForArtifact(qaV2, current)?.artifact_id, current.id);
+  assert.equal(qaForArtifact(qaV2, historical), null);
+});
+
+test("missing selected-artifact QA never falls back to current or previous QA", () => {
+  const selected = artifact("artifact-v1", 1, false);
+  const otherQa: ProductionQAResult = { id: "qa-2", production_request_id: "request-1", artifact_id: "artifact-v2", status: "PASSED", findings: [], executed_at: "2026-09-15T00:00:00Z" };
+  assert.equal(qaForArtifact(null, selected), null);
+  assert.equal(qaForArtifact(otherQa, selected), null);
+});
+
+test("storyboard and subtitle counts follow planned and rendered authority", () => {
+  const plannedEight = {
+    scenes: Array.from({ length: 8 }, (_, index) => ({ ...plannedScene, id: `planned-scene-${index}`, scene_order: index + 1 })),
+    narration: [],
+    subtitles: Array.from({ length: 8 }, (_, index) => ({ ...plannedCue, id: `planned-cue-${index}`, cue_order: index + 1 })),
+  };
+  assert.deepEqual(getReadAuthorityCounts(buildProductionReadView(initialArtifactTruthState(null), plannedEight, null)), { storyboard: 8, subtitles: 8 });
+
+  const selected = artifact("artifact-rendered", 4);
+  const renderedTruth = truth(selected.id, 4, "STANDARD");
+  renderedTruth.runtime_snapshot.scenes = Array.from({ length: 5 }, (_, index) => ({ ...renderedTruth.runtime_snapshot.scenes[0], sequence_index: index + 1, start_ms: index * 4200, end_ms: (index + 1) * 4200, visual_index: index }));
+  renderedTruth.runtime_snapshot.visuals = Array.from({ length: 5 }, (_, index) => ({ ...renderedTruth.runtime_snapshot.visuals[0], scene_index: index + 1 }));
+  renderedTruth.runtime_snapshot.subtitles.cues = Array.from({ length: 3 }, (_, index) => ({ scene_index: index + 1, cue_order: index + 1, start_ms: index * 1000, end_ms: (index + 1) * 1000, text: `runtime cue ${index + 1}` }));
+  const rendered = buildProductionReadView({ status: "RENDERED", truth: renderedTruth, artifactId: selected.id, message: null }, plannedEight, selected);
+  assert.deepEqual(getReadAuthorityCounts(rendered), { storyboard: 5, subtitles: 3 });
+
+  const offTruth = truth(selected.id, 4, "OFF");
+  const off = buildProductionReadView({ status: "RENDERED", truth: offTruth, artifactId: selected.id, message: null }, plannedEight, selected);
+  assert.equal(getReadAuthorityCounts(off).subtitles, 0);
 });
 
 test("blocked or non-current forensic artifacts are never treated as current or publishable", () => {
