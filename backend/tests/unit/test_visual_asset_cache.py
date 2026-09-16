@@ -53,6 +53,27 @@ def test_cache_round_trip(tmp_path: Path):
     assert asset3.content_sha256 == expected_hash
 
 
+def test_attribution_required_round_trip_preserves_status_and_text(tmp_path: Path):
+    cache = VisualAssetCache(tmp_path)
+
+    fresh = cache.store(
+        content=b"attribution-required",
+        kind=VisualAssetKind.IMAGE,
+        provider="test_provider",
+        mime_type="image/png",
+        query="attribution query",
+        license_status=LicenseStatus.ATTRIBUTION_REQUIRED,
+        attribution_text="Photo by Example",
+    )
+    cached = cache.get(fresh.content_sha256)
+
+    assert cached is not None
+    assert fresh.license_status == LicenseStatus.ATTRIBUTION_REQUIRED
+    assert fresh.attribution_text == "Photo by Example"
+    assert cached.license_status == fresh.license_status
+    assert cached.attribution_text == fresh.attribution_text
+
+
 def test_legacy_cache_missing_status_is_unknown_without_rewrite(tmp_path: Path):
     cache = VisualAssetCache(tmp_path)
     content = b"legacy"

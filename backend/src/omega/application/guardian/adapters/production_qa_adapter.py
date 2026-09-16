@@ -39,6 +39,11 @@ PROD_RULE_SEVERITY_RISK_MAP: dict[str, tuple[GuardianSeverity, GuardianRiskType,
         GuardianRiskType.COPYRIGHT_LICENSE,
         0.95,
     ),
+    ProductionQARuleCode.MISSING_REQUIRED_VISUAL_ATTRIBUTION.value: (
+        GuardianSeverity.HIGH,
+        GuardianRiskType.COPYRIGHT_LICENSE,
+        0.95,
+    ),
     ProductionQARuleCode.MISSING_NARRATION.value: (
         GuardianSeverity.HIGH,
         GuardianRiskType.MEDIA_CORRUPTION,

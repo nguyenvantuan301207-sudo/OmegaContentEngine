@@ -227,6 +227,32 @@ class ProductionQAEngine:
                     )
                 )
 
+        # ── 5a. MISSING_REQUIRED_VISUAL_ATTRIBUTION (BLOCKING) ──
+        if runtime_truth_snapshot is not None:
+            for visual in runtime_truth_snapshot.visuals:
+                if (
+                    str(_runtime_value(visual, "license_status", "")).upper()
+                    == LicenseStatus.ATTRIBUTION_REQUIRED.value
+                    and not str(_runtime_value(visual, "attribution", "") or "").strip()
+                ):
+                    visual_identifier = (
+                        _runtime_value(visual, "provider_asset_id")
+                        or _runtime_value(visual, "template_id")
+                        or f"scene {_runtime_value(visual, 'scene_index', 'unknown')}"
+                    )
+                    findings.append(
+                        ProductionQAFinding(
+                            rule_code=(
+                                ProductionQARuleCode.MISSING_REQUIRED_VISUAL_ATTRIBUTION
+                            ),
+                            severity=ProductionQASeverity.BLOCKING,
+                            message=(
+                                f"Rendered visual {visual_identifier} requires attribution "
+                                "but runtime attribution is missing or blank."
+                            ),
+                        )
+                    )
+
         # ── 6. MISSING_NARRATION (BLOCKING) ──
         if not narration_segments:
             findings.append(

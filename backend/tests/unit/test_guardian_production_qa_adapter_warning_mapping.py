@@ -51,6 +51,7 @@ def test_contract_completeness():
         "MISSING_REQUIRED_ASSET",
         "BLOCKED_ASSET_RIGHTS",
         "UNKNOWN_REQUIRED_ASSET_RIGHTS",
+        "MISSING_REQUIRED_VISUAL_ATTRIBUTION",
         "MISSING_NARRATION",
         "TIMELINE_GAP",
         "TIMELINE_OVERLAP",
@@ -108,7 +109,16 @@ def test_warning_semantics(rule_enum, expected_risk):
 @pytest.mark.parametrize(
     "rule_enum, expected_severity, expected_risk",
     [
-        (ProductionQARuleCode.SILENT_AUDIO_STREAM, GuardianSeverity.CRITICAL, GuardianRiskType.MEDIA_CORRUPTION),
+        (
+            ProductionQARuleCode.MISSING_REQUIRED_VISUAL_ATTRIBUTION,
+            GuardianSeverity.HIGH,
+            GuardianRiskType.COPYRIGHT_LICENSE,
+        ),
+        (
+            ProductionQARuleCode.SILENT_AUDIO_STREAM,
+            GuardianSeverity.CRITICAL,
+            GuardianRiskType.MEDIA_CORRUPTION,
+        ),
         (ProductionQARuleCode.PLACEHOLDER_ONLY_VISUALS, GuardianSeverity.HIGH, GuardianRiskType.CONTENT_QUALITY),
         (ProductionQARuleCode.NO_CONTENTFUL_VISUAL_ASSET, GuardianSeverity.HIGH, GuardianRiskType.CONTENT_QUALITY),
         (ProductionQARuleCode.MISSING_SUBTITLE_RENDER, GuardianSeverity.HIGH, GuardianRiskType.MEDIA_CORRUPTION),
