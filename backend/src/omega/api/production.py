@@ -12,6 +12,10 @@ from pydantic import BaseModel, ConfigDict, model_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from omega.application.attribution_sidecar_export import (
+    AttributionSidecarExportError,
+    export_attribution_sidecar,
+)
 from omega.application.media_storage import LocalMediaStorageProvider, StorageSecurityError
 from omega.application.production_runtime_truth import read_attribution_foundation
 from omega.application.production_service import (
@@ -77,6 +81,22 @@ class ProductionRenderSettingsUpdate(BaseModel):
         if self.subtitle_style is None and self.subtitle_mode is None:
             raise ValueError("At least one render setting must be supplied")
         return self
+
+
+class AttributionSidecarExportResponse(BaseModel):
+    """Receipt for one complete deterministic media-plus-sidecar export."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    package_uri: str
+    media_filename: str
+    sidecar_filename: str
+    sidecar_sha256: str
+    package_checksum: str
+    obligation_ids: tuple[str, ...]
+    evidence: AttributionDeliveryEvidence
+    package_created: bool
+    evidence_created: bool
 
 
 def _get_production_service() -> ProductionService:
@@ -592,6 +612,108 @@ async def get_artifact_attribution_delivery_evidence(
             list(evidence), required_obligation_ids
         ),
         evidence=evidence,
+    )
+
+
+@router.post(
+    "/{request_id}/artifacts/{artifact_id}/attribution-sidecar-export",
+    response_model=AttributionSidecarExportResponse,
+    summary="Export one deterministic media-plus-attribution-sidecar package",
+)
+async def export_artifact_attribution_sidecar(
+    channel_id: UUID,
+    request_id: UUID,
+    artifact_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_async_session)],
+    storage: Annotated[LocalMediaStorageProvider, Depends(_get_storage_provider)],
+) -> AttributionSidecarExportResponse:
+    stmt = (
+        select(MediaArtifact, ProductionRuntimeTruth)
+        .join(ProductionRequest, MediaArtifact.production_request_id == ProductionRequest.id)
+        .outerjoin(
+            ProductionRuntimeTruth,
+            ProductionRuntimeTruth.artifact_id == MediaArtifact.id,
+        )
+        .where(
+            MediaArtifact.id == artifact_id,
+            MediaArtifact.production_request_id == request_id,
+            ProductionRequest.channel_id == channel_id,
+        )
+    )
+    row = (await session.execute(stmt)).one_or_none()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Media artifact not found on this channel/request.",
+        )
+    artifact, runtime_truth = row
+    if runtime_truth is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Legacy artifact has no authoritative attribution obligations.",
+        )
+    try:
+        obligations, _ = read_attribution_foundation(runtime_truth.payload)
+        if not obligations:
+            raise AttributionSidecarExportError(
+                "Artifact has no attribution obligations to export"
+            )
+        if any(
+            obligation.artifact_id != artifact.id
+            or obligation.artifact_sha256 != artifact.content_hash
+            for obligation in obligations
+        ):
+            raise AttributionSidecarExportError(
+                "Runtime attribution obligations do not match the media artifact"
+            )
+        source_media_path = storage.resolve_artifact_path(
+            channel_id,
+            request_id,
+            artifact.storage_uri,
+        )
+        export_root = storage.get_attribution_exports_dir(channel_id, request_id)
+        result = await export_attribution_sidecar(
+            session=session,
+            artifact_id=artifact.id,
+            artifact_sha256=artifact.content_hash,
+            source_media_path=source_media_path,
+            export_root=export_root,
+            obligations=obligations,
+        )
+        package_uri = storage.to_relative_uri(
+            channel_id,
+            request_id,
+            result.package_directory,
+        )
+    except StorageSecurityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Security violation: {exc}",
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Attribution sidecar export blocked: {exc}",
+        ) from exc
+    except OSError as exc:
+        logger.error(
+            "Attribution sidecar export failed",
+            artifact_id=str(artifact_id),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Attribution sidecar package could not be written.",
+        ) from exc
+    return AttributionSidecarExportResponse(
+        package_uri=package_uri,
+        media_filename=result.manifest.media_filename,
+        sidecar_filename=result.manifest.sidecar_filename,
+        sidecar_sha256=result.manifest.sidecar_sha256,
+        package_checksum=result.manifest.package_checksum,
+        obligation_ids=result.manifest.obligation_ids,
+        evidence=result.evidence,
+        package_created=result.package_created,
+        evidence_created=result.evidence_created,
     )
 
 

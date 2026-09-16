@@ -71,6 +71,16 @@ class LocalMediaStorageProvider:
         path.mkdir(parents=True, exist_ok=True)
         return path
 
+    def get_attribution_exports_dir(self, channel_id: UUID, request_id: UUID) -> Path:
+        """Resolve the request-scoped deterministic attribution export directory."""
+        path = (
+            self.get_production_dir(channel_id, request_id)
+            / "exports"
+            / "attribution"
+        ).resolve()
+        self._assert_safe_path(path)
+        return path
+
     def get_assets_dir(self, channel_id: UUID, request_id: UUID) -> Path:
         """Resolve assets directory for a production request."""
         path = (self.get_production_dir(channel_id, request_id) / "assets").resolve()
