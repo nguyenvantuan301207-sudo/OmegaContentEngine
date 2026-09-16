@@ -492,19 +492,19 @@ async def test_runtime_truth_api_never_falls_back_to_planned_rows():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("fail_before_commit", "local_qa_status", "guardian_blocks"),
+    ("fail_before_commit", "local_qa_status", "guardian_qa_status"),
     [
-        (False, ProductionQAStatus.PASSED, False),
-        (True, ProductionQAStatus.PASSED, False),
-        (False, ProductionQAStatus.BLOCKED, False),
-        (False, ProductionQAStatus.PASSED, True),
+        (False, ProductionQAStatus.PASSED, ProductionQAStatus.PASSED),
+        (True, ProductionQAStatus.PASSED, ProductionQAStatus.PASSED),
+        (False, ProductionQAStatus.BLOCKED, ProductionQAStatus.PASSED),
+        (False, ProductionQAStatus.PASSED, ProductionQAStatus.BLOCKED),
     ],
 )
 async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot(
     tmp_path,
     fail_before_commit,
     local_qa_status,
-    guardian_blocks,
+    guardian_qa_status,
 ):
     channel_id = uuid4()
     request_id = uuid4()
@@ -616,11 +616,7 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
         storage=LocalMediaStorageProvider(base_root=test_storage_root),
         visual_production_service=AsyncMock(),
     )
-    # Keep Guardian fully out of scope; the supplied canonical contract still
-    # carries real mission lineage into the snapshot.
-    service._resolve_mission_id = AsyncMock(
-        return_value=mission_id if guardian_blocks else None
-    )
+    service._resolve_mission_id = AsyncMock(return_value=mission_id)
     service._render_v2_staging = AsyncMock(side_effect=cache_hit_staging)
     service.probe.probe_file = AsyncMock(
         return_value={
@@ -637,11 +633,7 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
         return_value=(local_qa_status, [])
     )
     service._evaluate_post_render_guardian = AsyncMock(
-        return_value=(
-            ProductionQAStatus.BLOCKED
-            if guardian_blocks
-            else ProductionQAStatus.PASSED
-        )
+        return_value=guardian_qa_status
     )
     service._enqueue_terminal_evaluation = AsyncMock()
     service._record_job_failure = AsyncMock()
@@ -694,7 +686,9 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
         if isinstance(call.args[0], ProductionQAResult)
     ]
     expected_status = (
-        ProductionQAStatus.BLOCKED if guardian_blocks else local_qa_status
+        ProductionQAStatus.BLOCKED
+        if ProductionQAStatus.BLOCKED in (local_qa_status, guardian_qa_status)
+        else ProductionQAStatus.PASSED
     )
     assert status == expected_status
     assert artifact is not None
@@ -706,6 +700,7 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
     assert truth_rows[0].artifact_id == artifact.id
     assert truth_rows[0].payload == qa_snapshot.canonical_dict()
     assert truth_rows[0].manifest_run_fingerprint == runtime_result.run_fingerprint
+    assert qa_rows[0].status == expected_status.value
     assert artifact.is_current is (expected_status != ProductionQAStatus.BLOCKED)
     assert service.storage.resolve_stored_uri(
         channel_id, request_id, artifact.storage_uri
@@ -713,8 +708,7 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
     assert session.commit.await_count == 2
     session.refresh.assert_not_awaited()
     service._record_job_failure.assert_not_awaited()
-    if guardian_blocks:
-        service._evaluate_post_render_guardian.assert_awaited_once()
+    service._evaluate_post_render_guardian.assert_awaited_once()
     service.storage.cleanup_directory(test_storage_root)
 
 

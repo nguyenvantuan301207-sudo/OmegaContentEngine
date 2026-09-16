@@ -15,6 +15,7 @@ from sqlalchemy.orm import selectinload
 
 from omega.application.guardian.adapters.production_qa_adapter import ProductionQAAdapter
 from omega.application.guardian.detectors.base import BaseDetector, GuardianEvaluationContext
+from omega.application.production_runtime_truth import ProductionRuntimeTruthSnapshot
 from omega.domain.guardian import (
     DetectorFailurePolicy,
     GuardianCheckpoint,
@@ -27,6 +28,26 @@ from omega.infrastructure.models import (
     ProductionScene,
     ScriptVersion,
 )
+
+
+def _runtime_truth_snapshot(
+    payload: object,
+    *,
+    artifact_id: object | None,
+    production_request_id: object | None,
+    channel_id: object | None = None,
+) -> ProductionRuntimeTruthSnapshot:
+    snapshot = ProductionRuntimeTruthSnapshot.model_validate(payload)
+    if artifact_id is not None and str(snapshot.lineage.media_artifact_id) != str(artifact_id):
+        raise ValueError("Runtime truth does not belong to the requested media artifact")
+    if (
+        production_request_id is not None
+        and str(snapshot.lineage.production_request_id) != str(production_request_id)
+    ):
+        raise ValueError("Runtime truth does not belong to the requested production request")
+    if channel_id is not None and str(snapshot.lineage.channel_id) != str(channel_id):
+        raise ValueError("Runtime truth does not belong to the production request channel")
+    return snapshot
 
 
 class MediaIntegrityDetector(BaseDetector):
@@ -49,7 +70,20 @@ class MediaIntegrityDetector(BaseDetector):
         diag = context.diagnostic_context or {}
 
         # 1. Direct evaluation from diagnostic payload if provided
-        if "request_data" in diag and "script_version_data" in diag:
+        if (
+            context.media_artifact_id is None
+            and "request_data" in diag
+            and "script_version_data" in diag
+        ):
+            runtime_snapshot = None
+            if diag.get("runtime_truth_snapshot") is not None:
+                runtime_snapshot = _runtime_truth_snapshot(
+                    diag["runtime_truth_snapshot"],
+                    artifact_id=context.media_artifact_id,
+                    production_request_id=context.production_request_id
+                    or diag["request_data"].get("id"),
+                    channel_id=diag["request_data"].get("channel_id"),
+                )
             return self.adapter.evaluate(
                 request_data=diag["request_data"],
                 script_version_data=diag["script_version_data"],
@@ -62,6 +96,7 @@ class MediaIntegrityDetector(BaseDetector):
                 artifact_file_path=diag.get("artifact_file_path"),
                 expected_hash=diag.get("expected_hash"),
                 scenes_data=diag.get("scenes_data"),
+                runtime_truth_snapshot=runtime_snapshot,
             )
 
         # 2. Database resolution via production_request_id or media_artifact_id
@@ -76,6 +111,8 @@ class MediaIntegrityDetector(BaseDetector):
                     target_prod_id = art.production_request_id
 
             if not target_prod_id:
+                if context.media_artifact_id is not None:
+                    raise ValueError("Exact media artifact could not be resolved")
                 return findings
 
             stmt = (
@@ -91,17 +128,57 @@ class MediaIntegrityDetector(BaseDetector):
                     selectinload(ProductionRequest.assets),
                     selectinload(ProductionRequest.narration_segments),
                     selectinload(ProductionRequest.subtitle_cues),
-                    selectinload(ProductionRequest.artifacts),
+                    selectinload(ProductionRequest.artifacts).selectinload(
+                        MediaArtifact.runtime_truth
+                    ),
                 )
             )
             res = await session.execute(stmt)
             prod_req = res.scalar_one_or_none()
             if not prod_req:
+                if context.media_artifact_id is not None:
+                    raise ValueError(
+                        "Production request for exact media artifact could not be resolved"
+                    )
                 return findings
 
-            current_artifact = next((a for a in prod_req.artifacts if a.is_current), None)
-            if not current_artifact and prod_req.artifacts:
-                current_artifact = prod_req.artifacts[0]
+            exact_artifact = None
+            if context.media_artifact_id is not None:
+                exact_artifact = next(
+                    (
+                        artifact
+                        for artifact in prod_req.artifacts
+                        if artifact.id == context.media_artifact_id
+                    ),
+                    None,
+                )
+                if exact_artifact is None and diag.get("runtime_truth_snapshot") is None:
+                    raise ValueError("Exact media artifact could not be resolved")
+
+            selected_artifact = exact_artifact
+            if selected_artifact is None and context.media_artifact_id is None:
+                selected_artifact = next(
+                    (artifact for artifact in prod_req.artifacts if artifact.is_current),
+                    None,
+                )
+                if selected_artifact is None and prod_req.artifacts:
+                    selected_artifact = prod_req.artifacts[0]
+
+            runtime_snapshot = None
+            if diag.get("runtime_truth_snapshot") is not None:
+                runtime_snapshot = _runtime_truth_snapshot(
+                    diag["runtime_truth_snapshot"],
+                    artifact_id=context.media_artifact_id,
+                    production_request_id=prod_req.id,
+                    channel_id=prod_req.channel_id,
+                )
+            elif selected_artifact is not None and selected_artifact.runtime_truth is not None:
+                runtime_snapshot = _runtime_truth_snapshot(
+                    selected_artifact.runtime_truth.payload,
+                    artifact_id=selected_artifact.id,
+                    production_request_id=prod_req.id,
+                    channel_id=prod_req.channel_id,
+                )
 
             req_data = {
                 "id": str(prod_req.id),
@@ -257,18 +334,18 @@ class MediaIntegrityDetector(BaseDetector):
             artifact_path = diag.get("artifact_file_path")
             expected_hash = diag.get("expected_hash")
 
-            if probe_summary is None and current_artifact:
+            if probe_summary is None and selected_artifact:
                 probe_summary = {
-                    "width": current_artifact.width,
-                    "height": current_artifact.height,
-                    "duration_ms": current_artifact.duration_ms,
+                    "width": selected_artifact.width,
+                    "height": selected_artifact.height,
+                    "duration_ms": selected_artifact.duration_ms,
                     "video_codec": prod_req.video_codec,
                     "has_audio": True,
                 }
-            if artifact_path is None and current_artifact:
-                artifact_path = current_artifact.storage_uri
-            if expected_hash is None and current_artifact:
-                expected_hash = current_artifact.content_hash
+            if artifact_path is None and selected_artifact:
+                artifact_path = selected_artifact.storage_uri
+            if expected_hash is None and selected_artifact:
+                expected_hash = selected_artifact.content_hash
 
             return self.adapter.evaluate(
                 request_data=req_data,
@@ -282,4 +359,5 @@ class MediaIntegrityDetector(BaseDetector):
                 artifact_file_path=artifact_path,
                 expected_hash=expected_hash,
                 scenes_data=scenes_data,
+                runtime_truth_snapshot=runtime_snapshot,
             )

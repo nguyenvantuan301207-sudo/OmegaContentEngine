@@ -506,7 +506,7 @@ class ProductionRenderService:
 
             # POST_RENDER Guardian Check
             if mission_id:
-                qa_status = await self._evaluate_post_render_guardian(
+                guardian_status = await self._evaluate_post_render_guardian(
                     mission_id,
                     request_id,
                     media_art.id,
@@ -520,7 +520,12 @@ class ProductionRenderService:
                     runtime_narration_segments=guardian_runtime_narration_segments,
                     runtime_subtitle_cues=guardian_runtime_subtitle_cues,
                     runtime_scenes=runtime_scenes,
+                    runtime_truth_snapshot=runtime_snapshot,
                 )
+                if guardian_status == ProductionQAStatus.BLOCKED:
+                    qa_status = ProductionQAStatus.BLOCKED
+
+            qa_record.status = qa_status.value
 
             # 5. Atomically promote only an accepted candidate. A blocked
             # candidate and its evidence remain queryable without displacing
@@ -706,6 +711,7 @@ class ProductionRenderService:
         runtime_narration_segments: tuple | list = (),
         runtime_subtitle_cues: tuple | list = (),
         runtime_scenes: tuple | list = (),
+        runtime_truth_snapshot: ProductionRuntimeTruthSnapshot | None = None,
     ) -> ProductionQAStatus:
         def _to_dict(item):
             return item.model_dump() if hasattr(item, "model_dump") else dict(item)
@@ -725,6 +731,7 @@ class ProductionRenderService:
                 GuardianCheckCreate(
                     mission_id=mission_id,
                     production_request_id=request_id,
+                    media_artifact_id=media_art_id,
                     checkpoint=GuardianCheckpoint.POST_RENDER,
                     trigger_type=CheckTriggerType.POST_RENDER,
                     diagnostic_context={
@@ -740,6 +747,11 @@ class ProductionRenderService:
                         "runtime_narration_segments": [_to_dict(n) for n in runtime_narration_segments],
                         "runtime_subtitle_cues": [_to_dict(s) for s in runtime_subtitle_cues],
                         "runtime_scenes": [_to_dict(sc) for sc in runtime_scenes],
+                        "runtime_truth_snapshot": (
+                            runtime_truth_snapshot.canonical_dict()
+                            if runtime_truth_snapshot is not None
+                            else None
+                        ),
                     },
                 )
             )

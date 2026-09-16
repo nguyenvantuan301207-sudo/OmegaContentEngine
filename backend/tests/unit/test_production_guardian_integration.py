@@ -333,6 +333,8 @@ async def test_pre_render_exception_fails_closed_before_render():
 @pytest.mark.asyncio
 async def test_post_render_payload_uses_request_target():
     service = ProductionRenderService()
+    runtime_snapshot = MagicMock()
+    runtime_snapshot.canonical_dict.return_value = {"schema_version": 3}
 
     mission_id = uuid.uuid4()
     request_id = uuid.uuid4()
@@ -381,6 +383,7 @@ async def test_post_render_payload_uses_request_target():
                     "text": "runtime cue",
                 },
             ),
+            runtime_truth_snapshot=runtime_snapshot,
         )
 
     assert status == ProductionQAStatus.PASSED
@@ -389,7 +392,7 @@ async def test_post_render_payload_uses_request_target():
     payload = engine.execute_check.await_args.args[0]
 
     assert payload.production_request_id == request_id
-    assert payload.media_artifact_id is None
+    assert payload.media_artifact_id == artifact_id
     assert payload.diagnostic_context["artifact_id"] == str(artifact_id)
     assert payload.diagnostic_context["expected_hash"] == "abc123"
     assert payload.diagnostic_context["media_probe_summary"] == {
@@ -416,6 +419,9 @@ async def test_post_render_payload_uses_request_target():
             "text": "runtime cue",
         },
     ]
+    assert payload.diagnostic_context["runtime_truth_snapshot"] == {
+        "schema_version": 3
+    }
 
 
 

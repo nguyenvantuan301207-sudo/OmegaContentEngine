@@ -474,7 +474,7 @@ class ProductionQAEngine:
                     message="No visual scene assets were generated for the production request.",
                 )
             )
-        elif visual_assets and all(
+        elif runtime_visual_scene_indexes is None and visual_assets and all(
             str(a.get("provider_type", "")).upper() == "PLACEHOLDER"
             or "PLACEHOLDER" in str(a.get("source_ref", "")).upper()
             for a in visual_assets

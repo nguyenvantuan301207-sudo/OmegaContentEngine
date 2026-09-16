@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from omega.application.production_qa import ProductionQAEngine
+from omega.application.production_runtime_truth import ProductionRuntimeTruthSnapshot
 from omega.domain.guardian import GuardianFindingData, GuardianRiskType, GuardianSeverity
 from omega.domain.production import ProductionQARuleCode
 
@@ -181,6 +182,7 @@ class ProductionQAAdapter:
         artifact_file_path: Path | str | None,
         expected_hash: str | None,
         scenes_data: list[dict[str, Any]] | None = None,
+        runtime_truth_snapshot: ProductionRuntimeTruthSnapshot | None = None,
     ) -> list[GuardianFindingData]:
         """Run OMEGA-007 canonical QA rules and return standardized Guardian findings."""
         _status, qa_findings = self.engine.evaluate(
@@ -195,6 +197,7 @@ class ProductionQAAdapter:
             artifact_file_path=artifact_file_path,
             expected_hash=expected_hash,
             scenes_data=scenes_data,
+            runtime_truth_snapshot=runtime_truth_snapshot,
         )
 
         findings: list[GuardianFindingData] = []
