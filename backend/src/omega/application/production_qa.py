@@ -161,26 +161,69 @@ class ProductionQAEngine:
             )
 
         # ── 4. BLOCKED_ASSET_RIGHTS (BLOCKING) ──
-        for asset in assets_data:
-            if asset.get("license_status") == LicenseStatus.BLOCKED.value:
+        rights_evidence = (
+            runtime_truth_snapshot.visuals
+            if runtime_truth_snapshot is not None
+            else assets_data
+        )
+        for asset in rights_evidence:
+            if (
+                str(_runtime_value(asset, "license_status", "")).upper()
+                == LicenseStatus.BLOCKED.value
+            ):
+                asset_identifier = (
+                    _runtime_value(asset, "provider_asset_id")
+                    or _runtime_value(asset, "template_id")
+                    or _runtime_value(asset, "id")
+                    or f"scene {_runtime_value(asset, 'scene_index', 'unknown')}"
+                )
                 findings.append(
                     ProductionQAFinding(
                         rule_code=ProductionQARuleCode.BLOCKED_ASSET_RIGHTS,
                         severity=ProductionQASeverity.BLOCKING,
-                        message=f"Asset {asset.get('id')} has BLOCKED license status: {asset.get('source_ref')}.",
+                        message=(
+                            f"Rendered visual {asset_identifier} has BLOCKED license status."
+                            if runtime_truth_snapshot is not None
+                            else f"Asset {asset.get('id')} has BLOCKED license status: {asset.get('source_ref')}."
+                        ),
                     )
                 )
 
         # ── 5. UNKNOWN_REQUIRED_ASSET_RIGHTS (BLOCKING) ──
-        for asset in assets_data:
-            if asset.get("license_status") == LicenseStatus.UNKNOWN.value and asset.get(
-                "asset_requirement_id"
-            ):
+        required_visual_scene_indexes = {
+            int(requirement.get("scene_index") or 0)
+            for requirement in requirements_data
+            if requirement.get("required", True)
+        }
+        for asset in rights_evidence:
+            if runtime_truth_snapshot is not None:
+                unknown_required = (
+                    str(_runtime_value(asset, "license_status", "")).upper()
+                    == LicenseStatus.UNKNOWN.value
+                    and int(_runtime_value(asset, "scene_index", 0))
+                    in required_visual_scene_indexes
+                )
+            else:
+                unknown_required = (
+                    asset.get("license_status") == LicenseStatus.UNKNOWN.value
+                    and bool(asset.get("asset_requirement_id"))
+                )
+            if unknown_required:
+                asset_identifier = (
+                    _runtime_value(asset, "provider_asset_id")
+                    or _runtime_value(asset, "template_id")
+                    or _runtime_value(asset, "id")
+                    or f"scene {_runtime_value(asset, 'scene_index', 'unknown')}"
+                )
                 findings.append(
                     ProductionQAFinding(
                         rule_code=ProductionQARuleCode.UNKNOWN_REQUIRED_ASSET_RIGHTS,
                         severity=ProductionQASeverity.BLOCKING,
-                        message=f"Required asset {asset.get('id')} has UNKNOWN rights status.",
+                        message=(
+                            f"Required rendered visual {asset_identifier} has UNKNOWN rights status."
+                            if runtime_truth_snapshot is not None
+                            else f"Required asset {asset.get('id')} has UNKNOWN rights status."
+                        ),
                     )
                 )
 
