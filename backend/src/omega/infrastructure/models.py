@@ -1976,6 +1976,11 @@ class MediaArtifact(Base):
         cascade="all, delete-orphan",
         uselist=False,
     )
+    attribution_delivery_evidence: Mapped[list[AttributionDeliveryEvidence]] = relationship(
+        "AttributionDeliveryEvidence",
+        back_populates="artifact",
+        order_by="AttributionDeliveryEvidence.recorded_at",
+    )
     guardian_checks: Mapped[list[GuardianCheck]] = relationship(
         "GuardianCheck", back_populates="media_artifact"
     )
@@ -2019,6 +2024,96 @@ class ProductionRuntimeTruth(Base):
         return (
             f"<ProductionRuntimeTruth artifact_id={self.artifact_id} "
             f"schema_version={self.schema_version}>"
+        )
+
+
+class AttributionDeliveryEvidence(Base):
+    """Append-only attribution delivery evidence bound to one media artifact."""
+
+    __tablename__ = "attribution_delivery_evidence"
+    __table_args__ = (
+        CheckConstraint(
+            "delivery_channel IN ('PHYSICAL_RENDER', 'PUBLISH_METADATA', 'EXPORT_SIDECAR')",
+            name="ck_attribution_delivery_evidence_channel",
+        ),
+        CheckConstraint(
+            "verification_state IN ('UNVERIFIED', 'VERIFIED', 'REJECTED')",
+            name="ck_attribution_delivery_evidence_verification_state",
+        ),
+        CheckConstraint(
+            "length(artifact_sha256) = 64",
+            name="ck_attribution_delivery_evidence_artifact_hash_length",
+        ),
+        CheckConstraint(
+            "length(delivered_text_sha256) = 64",
+            name="ck_attribution_delivery_evidence_text_hash_length",
+        ),
+        CheckConstraint(
+            "length(evidence_checksum) = 64",
+            name="ck_attribution_delivery_evidence_checksum_length",
+        ),
+        CheckConstraint(
+            "schema_version = 1",
+            name="ck_attribution_delivery_evidence_schema_version",
+        ),
+        CheckConstraint(
+            "delivery_channel != 'PUBLISH_METADATA' OR "
+            "(target_platform IS NOT NULL AND target_account_id IS NOT NULL)",
+            name="ck_attribution_delivery_evidence_publish_target",
+        ),
+        CheckConstraint(
+            "delivery_channel = 'PUBLISH_METADATA' OR "
+            "(target_platform IS NULL AND target_account_id IS NULL)",
+            name="ck_attribution_delivery_evidence_non_publish_target",
+        ),
+        Index(
+            "idx_attribution_delivery_evidence_artifact_recorded",
+            "artifact_id",
+            "recorded_at",
+        ),
+        Index(
+            "idx_attribution_delivery_evidence_publish_target",
+            "target_platform",
+            "target_account_id",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("media_artifacts.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    artifact_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    obligation_ids: Mapped[list] = mapped_column(JSON, nullable=False)
+    delivery_channel: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_context_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_platform: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_account_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    delivered_text: Mapped[str] = mapped_column(Text, nullable=False)
+    delivered_text_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    verification_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    evidence_reference: Mapped[str] = mapped_column(Text, nullable=False)
+    evidence_checksum: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    supersedes_evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("attribution_delivery_evidence.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    recorded_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    artifact: Mapped[MediaArtifact] = relationship(
+        "MediaArtifact", back_populates="attribution_delivery_evidence"
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AttributionDeliveryEvidence id={self.id} "
+            f"artifact={self.artifact_id} channel={self.delivery_channel}>"
         )
 
 

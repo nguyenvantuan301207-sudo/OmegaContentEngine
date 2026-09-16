@@ -13,12 +13,19 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.media_storage import LocalMediaStorageProvider, StorageSecurityError
+from omega.application.production_runtime_truth import read_attribution_foundation
 from omega.application.production_service import (
     ProductionLineageError,
     ProductionService,
     ProductionStateError,
 )
 from omega.application.subtitle_engine import SubtitleRenderStyle
+from omega.domain.attribution_delivery import (
+    AttributionDeliveryEvidence,
+    AttributionDeliveryEvidenceList,
+    derive_attribution_delivery_state,
+    validate_evidence_coverage,
+)
 from omega.domain.production import (
     MediaArtifactResponse,
     NarrationSegmentResponse,
@@ -37,6 +44,9 @@ from omega.domain.production import (
     SubtitleMode,
 )
 from omega.infrastructure.database import get_async_session
+from omega.infrastructure.models import (
+    AttributionDeliveryEvidence as AttributionDeliveryEvidenceRecord,
+)
 from omega.infrastructure.models import (
     MediaArtifact,
     NarrationSegment,
@@ -460,12 +470,128 @@ async def get_artifact_runtime_truth(
             detail="Rendered runtime truth is not available for this channel/request/artifact.",
         )
     truth, artifact, render_job = row
+    try:
+        obligations, delivery_state = read_attribution_foundation(truth.payload)
+    except (TypeError, ValueError) as exc:
+        logger.error(
+            "Malformed attribution foundation in runtime truth",
+            artifact_id=str(artifact.id),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Rendered runtime truth attribution foundation is malformed.",
+        ) from exc
     return ProductionRuntimeTruthResponse(
         artifact_id=artifact.id,
         render_job_id=render_job.id,
         render_plan_id=render_job.render_plan_id,
         render_version=artifact.version,
         runtime_snapshot=truth.payload,
+        attribution_obligations=obligations,
+        attribution_delivery_state=delivery_state,
+    )
+
+
+@router.get(
+    "/{request_id}/artifacts/{artifact_id}/attribution-delivery-evidence",
+    response_model=AttributionDeliveryEvidenceList,
+    summary="Read append-only attribution delivery evidence for one artifact",
+)
+async def get_artifact_attribution_delivery_evidence(
+    channel_id: UUID,
+    request_id: UUID,
+    artifact_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_async_session)],
+) -> AttributionDeliveryEvidenceList:
+    artifact_stmt = (
+        select(MediaArtifact, ProductionRuntimeTruth)
+        .join(ProductionRequest, MediaArtifact.production_request_id == ProductionRequest.id)
+        .outerjoin(
+            ProductionRuntimeTruth,
+            ProductionRuntimeTruth.artifact_id == MediaArtifact.id,
+        )
+        .where(
+            MediaArtifact.id == artifact_id,
+            MediaArtifact.production_request_id == request_id,
+            ProductionRequest.channel_id == channel_id,
+        )
+    )
+    artifact_row = (await session.execute(artifact_stmt)).one_or_none()
+    if artifact_row is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Media artifact not found on this channel/request.",
+        )
+    artifact, runtime_truth = artifact_row
+    try:
+        obligations = (
+            read_attribution_foundation(runtime_truth.payload)[0]
+            if runtime_truth is not None
+            else ()
+        )
+    except (TypeError, ValueError) as exc:
+        logger.error(
+            "Malformed attribution foundation in runtime truth",
+            artifact_id=str(artifact_id),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Rendered runtime truth attribution foundation is malformed.",
+        ) from exc
+    required_obligation_ids = tuple(
+        sorted(obligation.obligation_id for obligation in obligations)
+    )
+
+    evidence_stmt = (
+        select(AttributionDeliveryEvidenceRecord)
+        .where(AttributionDeliveryEvidenceRecord.artifact_id == artifact_id)
+        .order_by(
+            AttributionDeliveryEvidenceRecord.recorded_at,
+            AttributionDeliveryEvidenceRecord.id,
+        )
+    )
+    records = (await session.execute(evidence_stmt)).scalars().all()
+    try:
+        evidence = tuple(
+            AttributionDeliveryEvidence(
+                schema_version=record.schema_version,
+                evidence_id=record.id,
+                artifact_id=record.artifact_id,
+                artifact_sha256=record.artifact_sha256,
+                obligation_ids=tuple(record.obligation_ids),
+                delivery_channel=record.delivery_channel,
+                target_context_id=record.target_context_id,
+                target_platform=record.target_platform,
+                target_account_id=record.target_account_id,
+                delivered_text=record.delivered_text,
+                delivered_text_sha256=record.delivered_text_sha256,
+                verification_state=record.verification_state,
+                evidence_reference=record.evidence_reference,
+                evidence_checksum=record.evidence_checksum,
+                supersedes_evidence_id=record.supersedes_evidence_id,
+                recorded_at=record.recorded_at,
+            )
+            for record in records
+        )
+        for item in evidence:
+            validate_evidence_coverage(item, obligations)
+    except (TypeError, ValueError) as exc:
+        logger.error(
+            "Malformed attribution delivery evidence",
+            artifact_id=str(artifact_id),
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Attribution delivery evidence is malformed.",
+        ) from exc
+    return AttributionDeliveryEvidenceList(
+        artifact_id=artifact.id,
+        artifact_sha256=artifact.content_hash,
+        required_obligation_ids=required_obligation_ids,
+        delivery_state=derive_attribution_delivery_state(
+            list(evidence), required_obligation_ids
+        ),
+        evidence=evidence,
     )
 
 

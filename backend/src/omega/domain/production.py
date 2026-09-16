@@ -9,6 +9,11 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from omega.domain.attribution_delivery import (
+    AttributionDeliveryState,
+    AttributionObligation,
+)
+
 # ── Enums ──
 
 
@@ -591,6 +596,8 @@ class ProductionRuntimeTruthResponse(BaseModel):
     render_plan_id: UUID
     render_version: int = Field(ge=1)
     runtime_snapshot: dict[str, Any]
+    attribution_obligations: tuple[AttributionObligation, ...] = ()
+    attribution_delivery_state: AttributionDeliveryState = AttributionDeliveryState.UNKNOWN
 
 
 class ProductionQAFinding(BaseModel):

@@ -15,9 +15,15 @@ from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, model_v
 from pydantic_core import core_schema
 
 from omega.application.production_contract import CanonicalProductionContract
+from omega.domain.attribution_delivery import (
+    AttributionDeliveryState,
+    AttributionObligation,
+    canonicalize_attribution_obligations,
+    create_attribution_obligation,
+)
 from omega.domain.production import LicenseStatus
 
-RUNTIME_TRUTH_SCHEMA_VERSION = 2
+RUNTIME_TRUTH_SCHEMA_VERSION = 3
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SECRET_MARKERS = ("token", "secret", "signature", "credential", "apikey", "api_key")
 
@@ -346,8 +352,34 @@ class RuntimeFingerprints(_FrozenModel):
         return self
 
 
+def _build_attribution_obligations(
+    *,
+    artifact_id: UUID,
+    artifact_sha256: str,
+    visuals: tuple[RuntimeVisualTruth, ...] | list[RuntimeVisualTruth],
+) -> tuple[AttributionObligation, ...]:
+    obligations = [
+        create_attribution_obligation(
+            artifact_id=artifact_id,
+            artifact_sha256=artifact_sha256,
+            scene_index=visual.scene_index,
+            attribution_text=visual.attribution,
+            provider=visual.provider,
+            provider_asset_id=visual.provider_asset_id,
+            visual_content_sha256=visual.content_sha256,
+            template_id=visual.template_id,
+            source_reference=visual.license_url or visual.source_page_url,
+        )
+        for visual in visuals
+        if visual.license_status == LicenseStatus.ATTRIBUTION_REQUIRED
+        and visual.attribution
+        and visual.attribution.strip()
+    ]
+    return canonicalize_attribution_obligations(obligations)
+
+
 class ProductionRuntimeTruthSnapshot(_FrozenModel):
-    schema_version: Literal[2] = RUNTIME_TRUTH_SCHEMA_VERSION
+    schema_version: Literal[3] = RUNTIME_TRUTH_SCHEMA_VERSION
     lineage: RuntimeTruthLineage
     scenes: tuple[RuntimeSceneTruth, ...]
     narration: tuple[RuntimeNarrationTruth, ...]
@@ -359,6 +391,10 @@ class ProductionRuntimeTruthSnapshot(_FrozenModel):
     probe: FrozenJsonObject
     artifact: FrozenJsonObject
     fingerprints: RuntimeFingerprints
+    attribution_obligations: tuple[AttributionObligation, ...] = ()
+    attribution_delivery_state: Literal[AttributionDeliveryState.UNKNOWN] = (
+        AttributionDeliveryState.UNKNOWN
+    )
 
     @model_validator(mode="after")
     def validate_runtime_coherence(self) -> ProductionRuntimeTruthSnapshot:
@@ -421,6 +457,16 @@ class ProductionRuntimeTruthSnapshot(_FrozenModel):
             not self.subtitles.cues or not self.subtitles.artifacts
         ):
             raise ValueError("Enabled subtitles require rendered cues and artifacts")
+
+        expected_obligations = _build_attribution_obligations(
+            artifact_id=self.lineage.media_artifact_id,
+            artifact_sha256=self.render_target.content_sha256,
+            visuals=self.visuals,
+        )
+        if self.attribution_obligations != expected_obligations:
+            raise ValueError(
+                "Attribution obligations do not match rendered runtime visual truth"
+            )
         return self
 
     def canonical_dict(self) -> dict[str, Any]:
@@ -506,6 +552,43 @@ def _sanitize_json_metadata(value: Any) -> Any:
     )
 
 
+def read_attribution_foundation(
+    payload: Mapping[str, Any],
+) -> tuple[tuple[AttributionObligation, ...], AttributionDeliveryState]:
+    """Read Phase-1 attribution fields without rewriting legacy payloads."""
+    try:
+        schema_version = int(payload.get("schema_version", 0))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Runtime truth schema_version is malformed") from exc
+    if schema_version in (1, 2):
+        return (), AttributionDeliveryState.UNKNOWN
+    if schema_version != RUNTIME_TRUTH_SCHEMA_VERSION:
+        raise ValueError("Unsupported runtime truth schema_version")
+    if "attribution_obligations" not in payload:
+        raise ValueError("Runtime truth attribution obligations are missing")
+    if payload.get("attribution_delivery_state") != AttributionDeliveryState.UNKNOWN.value:
+        raise ValueError("Runtime truth cannot claim attribution delivery success")
+    raw_obligations = payload["attribution_obligations"]
+    if not isinstance(raw_obligations, (list, tuple)):
+        raise ValueError("Runtime truth attribution obligations must be an array")
+    obligations = tuple(AttributionObligation.model_validate(item) for item in raw_obligations)
+    if obligations != canonicalize_attribution_obligations(obligations):
+        raise ValueError("Runtime truth attribution obligations are not canonical")
+    try:
+        artifact_id = UUID(str(payload["lineage"]["media_artifact_id"]))
+        artifact_sha256 = str(payload["render_target"]["content_sha256"])
+        visuals = tuple(RuntimeVisualTruth.model_validate(item) for item in payload["visuals"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Runtime truth attribution foundation is incomplete") from exc
+    if obligations != _build_attribution_obligations(
+        artifact_id=artifact_id,
+        artifact_sha256=artifact_sha256,
+        visuals=visuals,
+    ):
+        raise ValueError("Runtime truth attribution obligations do not match visuals")
+    return obligations, AttributionDeliveryState.UNKNOWN
+
+
 def build_production_runtime_truth_snapshot(
     *,
     contract: CanonicalProductionContract,
@@ -550,37 +633,30 @@ def build_production_runtime_truth_snapshot(
     for visual_index, raw_scene in enumerate(result_scenes):
         scene = _as_dict(raw_scene)
         origin = str(scene.get("visual_origin") or "TEMPLATE")
-        visuals.append(
-            RuntimeVisualTruth(
-                scene_index=scene["sequence_index"],
-                origin=origin,
-                visual_mode=str(scene.get("visual_mode") or "LOCAL_TEMPLATE_ONLY"),
-                kind=scene.get("asset_kind"),
-                template_id=scene.get("template_id"),
-                provider=scene.get("asset_provider"),
-                provider_asset_id=scene.get("asset_id"),
-                license_status=scene["asset_license_status"],
-                source_url=sanitize_runtime_reference(scene.get("asset_source_url")),
-                source_page_url=sanitize_runtime_reference(
-                    scene.get("asset_source_page_url")
-                ),
-                license_name=scene.get("asset_license_name"),
-                license_url=sanitize_runtime_reference(scene.get("asset_license_url")),
-                attribution=scene.get("asset_attribution"),
-                query=scene.get("asset_query"),
-                storage_reference=sanitize_runtime_reference(
-                    scene.get("asset_storage_reference")
-                ),
-                content_sha256=scene.get("visual_content_sha256"),
-                mime_type=scene.get("visual_mime_type"),
-                width=scene.get("visual_width"),
-                height=scene.get("visual_height"),
-                duration_ms=scene.get("visual_duration_ms"),
-                provider_metadata=_sanitize_json_metadata(
-                    scene.get("asset_provider_metadata") or {}
-                ),
-            )
+        visual = RuntimeVisualTruth(
+            scene_index=scene["sequence_index"],
+            origin=origin,
+            visual_mode=str(scene.get("visual_mode") or "LOCAL_TEMPLATE_ONLY"),
+            kind=scene.get("asset_kind"),
+            template_id=scene.get("template_id"),
+            provider=scene.get("asset_provider"),
+            provider_asset_id=scene.get("asset_id"),
+            license_status=scene["asset_license_status"],
+            source_url=sanitize_runtime_reference(scene.get("asset_source_url")),
+            source_page_url=sanitize_runtime_reference(scene.get("asset_source_page_url")),
+            license_name=scene.get("asset_license_name"),
+            license_url=sanitize_runtime_reference(scene.get("asset_license_url")),
+            attribution=scene.get("asset_attribution"),
+            query=scene.get("asset_query"),
+            storage_reference=sanitize_runtime_reference(scene.get("asset_storage_reference")),
+            content_sha256=scene.get("visual_content_sha256"),
+            mime_type=scene.get("visual_mime_type"),
+            width=scene.get("visual_width"),
+            height=scene.get("visual_height"),
+            duration_ms=scene.get("visual_duration_ms"),
+            provider_metadata=_sanitize_json_metadata(scene.get("asset_provider_metadata") or {}),
         )
+        visuals.append(visual)
         scenes.append(
             RuntimeSceneTruth(
                 sequence_index=scene["sequence_index"],
@@ -726,6 +802,12 @@ def build_production_runtime_truth_snapshot(
                 _read(v2_result, "subtitle_semantics_version")
             ),
         ),
+        attribution_obligations=_build_attribution_obligations(
+            artifact_id=media_artifact_id,
+            artifact_sha256=artifact_sha256,
+            visuals=visuals,
+        ),
+        attribution_delivery_state=AttributionDeliveryState.UNKNOWN,
     )
 
 
@@ -733,5 +815,6 @@ __all__ = [
     "ProductionRuntimeTruthSnapshot",
     "RUNTIME_TRUTH_SCHEMA_VERSION",
     "build_production_runtime_truth_snapshot",
+    "read_attribution_foundation",
     "sanitize_runtime_reference",
 ]
