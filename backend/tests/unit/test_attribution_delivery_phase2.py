@@ -20,6 +20,10 @@ from omega.application.attribution_sidecar_export import (
     validate_export_package,
 )
 from omega.application.media_storage import LocalMediaStorageProvider
+from omega.application.production_runtime_truth import (
+    RuntimeVisualTruth,
+    _build_attribution_obligations,
+)
 from omega.domain.attribution_delivery import (
     AttributionDeliveryChannel,
     AttributionDeliveryState,
@@ -40,6 +44,87 @@ MEDIA_BYTES = b"deterministic rendered media"
 MEDIA_HASH = hashlib.sha256(MEDIA_BYTES).hexdigest()
 VISUAL_HASH = "b" * 64
 RECORDED_AT = datetime(2026, 9, 16, tzinfo=UTC)
+
+
+def _runtime_visual(
+    *,
+    scene_index: int = 1,
+    license_status: str = "ATTRIBUTION_REQUIRED",
+    attribution: str | None = "Photo by Alice",
+    allowed_channels: tuple[AttributionDeliveryChannel, ...] = (),
+) -> RuntimeVisualTruth:
+    return RuntimeVisualTruth(
+        scene_index=scene_index,
+        origin="PROVIDER",
+        visual_mode="PEXELS",
+        kind="IMAGE",
+        provider="provider-a",
+        provider_asset_id=f"asset-{scene_index}",
+        license_status=license_status,
+        source_page_url=f"https://example.test/assets/{scene_index}",
+        license_url="https://example.test/license",
+        attribution=attribution,
+        allowed_attribution_channels=allowed_channels,
+        content_sha256=chr(ord("a") + scene_index) * 64,
+    )
+
+
+def test_runtime_obligation_builder_propagates_explicit_sidecar_authority():
+    artifact_id = uuid4()
+    attributed = _runtime_visual(
+        allowed_channels=(AttributionDeliveryChannel.EXPORT_SIDECAR,),
+    )
+    licensed = _runtime_visual(
+        scene_index=2,
+        license_status="LICENSED",
+        attribution=None,
+    )
+
+    obligations = _build_attribution_obligations(
+        artifact_id=artifact_id,
+        artifact_sha256=MEDIA_HASH,
+        visuals=(attributed, licensed),
+    )
+
+    assert len(obligations) == 1
+    obligation = obligations[0]
+    assert obligation.artifact_id == artifact_id
+    assert obligation.artifact_sha256 == MEDIA_HASH
+    assert obligation.scene_index == attributed.scene_index
+    assert obligation.provider_asset_id == attributed.provider_asset_id
+    assert obligation.visual_content_sha256 == attributed.content_sha256
+    assert obligation.attribution_text == attributed.attribution
+    assert obligation.allowed_channels == (
+        AttributionDeliveryChannel.EXPORT_SIDECAR,
+    )
+
+
+def test_runtime_obligation_builder_preserves_unresolved_channel_authority():
+    artifact_id = uuid4()
+    obligations = _build_attribution_obligations(
+        artifact_id=artifact_id,
+        artifact_sha256=MEDIA_HASH,
+        visuals=(_runtime_visual(),),
+    )
+
+    assert len(obligations) == 1
+    assert obligations[0].allowed_channels == ()
+
+
+def test_unresolved_runtime_obligation_is_rejected_by_sidecar():
+    artifact_id = uuid4()
+    obligation = _build_attribution_obligations(
+        artifact_id=artifact_id,
+        artifact_sha256=MEDIA_HASH,
+        visuals=(_runtime_visual(),),
+    )[0]
+
+    with pytest.raises(ValidationError, match="EXPORT_SIDECAR is not allowed"):
+        create_attribution_sidecar(
+            artifact_id=artifact_id,
+            artifact_sha256=MEDIA_HASH,
+            obligations=(obligation,),
+        )
 
 
 def _obligation(

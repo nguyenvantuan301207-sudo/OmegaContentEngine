@@ -521,6 +521,7 @@ class ProductionRenderService:
                     runtime_subtitle_cues=guardian_runtime_subtitle_cues,
                     runtime_scenes=runtime_scenes,
                     runtime_truth_snapshot=runtime_snapshot,
+                    session=session,
                 )
                 if guardian_status == ProductionQAStatus.BLOCKED:
                     qa_status = ProductionQAStatus.BLOCKED
@@ -712,6 +713,7 @@ class ProductionRenderService:
         runtime_subtitle_cues: tuple | list = (),
         runtime_scenes: tuple | list = (),
         runtime_truth_snapshot: ProductionRuntimeTruthSnapshot | None = None,
+        session: AsyncSession | None = None,
     ) -> ProductionQAStatus:
         def _to_dict(item):
             return item.model_dump() if hasattr(item, "model_dump") else dict(item)
@@ -727,8 +729,7 @@ class ProductionRenderService:
             from omega.infrastructure.database import AsyncSessionLocal
 
             guardian_engine = GuardianEngine(session_factory=AsyncSessionLocal)
-            post_check = await guardian_engine.execute_check(
-                GuardianCheckCreate(
+            check_payload = GuardianCheckCreate(
                     mission_id=mission_id,
                     production_request_id=request_id,
                     media_artifact_id=media_art_id,
@@ -753,6 +754,13 @@ class ProductionRenderService:
                             else None
                         ),
                     },
+                )
+            post_check = (
+                await guardian_engine.execute_check(check_payload)
+                if session is None
+                else await guardian_engine.execute_check(
+                    check_payload,
+                    session=session,
                 )
             )
             if (

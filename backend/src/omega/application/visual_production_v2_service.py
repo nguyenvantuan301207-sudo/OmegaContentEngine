@@ -52,6 +52,7 @@ from omega.application.visual_direction import VisualAssetKind, VisualDirector
 from omega.application.visual_template_renderer import VisualTemplateRenderer
 from omega.domain.channel_dna import BrandFormat, resolve_production_brand_spec
 from omega.domain.channel_style import ChannelStyleProfile, extract_channel_style_profile
+from omega.domain.attribution_delivery import AttributionDeliveryChannel
 from omega.domain.production import (
     SubtitleFallbackPolicy,
     SubtitleMode,
@@ -404,6 +405,7 @@ class VerticalSliceSceneResult(BaseModel):
     asset_license_name: str | None = None
     asset_license_url: str | None = None
     asset_attribution: str | None = None
+    asset_allowed_attribution_channels: tuple[AttributionDeliveryChannel, ...] = ()
     asset_storage_reference: str | None = None
     visual_content_sha256: str | None = None
     visual_mime_type: str | None = None
@@ -1712,6 +1714,16 @@ class VisualProductionV2Service:
                                 resolved_asset.attribution_text
                                 if resolved_asset is not None
                                 else None
+                            ),
+                            asset_allowed_attribution_channels=(
+                                tuple(
+                                    sorted(
+                                        set(resolved_asset.allowed_attribution_channels),
+                                        key=str,
+                                    )
+                                )
+                                if resolved_asset is not None
+                                else ()
                             ),
                             visual_content_sha256=(
                                 visual_runtime_sha

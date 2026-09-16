@@ -220,7 +220,12 @@ class MediaIntegrityDetector(BaseDetector):
                 for a in prod_req.assets
             ]
             reqs_data = [
-                {"id": str(r.id), "purpose": r.purpose, "required": r.required}
+                {
+                    "id": str(r.id),
+                    "scene_index": s.scene_order,
+                    "purpose": r.purpose,
+                    "required": r.required,
+                }
                 for s in prod_req.scenes
                 for r in s.asset_requirements
             ]

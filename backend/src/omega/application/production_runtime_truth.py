@@ -16,6 +16,7 @@ from pydantic_core import core_schema
 
 from omega.application.production_contract import CanonicalProductionContract
 from omega.domain.attribution_delivery import (
+    AttributionDeliveryChannel,
     AttributionDeliveryState,
     AttributionObligation,
     canonicalize_attribution_obligations,
@@ -263,6 +264,7 @@ class RuntimeVisualTruth(_FrozenModel):
     license_name: str | None = None
     license_url: str | None = None
     attribution: str | None = None
+    allowed_attribution_channels: tuple[AttributionDeliveryChannel, ...] = ()
     query: str | None = None
     storage_reference: str | None = None
     content_sha256: str | None = None
@@ -292,6 +294,13 @@ class RuntimeVisualTruth(_FrozenModel):
             )
         ):
             raise ValueError("Template visual truth cannot claim provider provenance")
+        expected_channels = tuple(
+            sorted(set(self.allowed_attribution_channels), key=str)
+        )
+        if self.allowed_attribution_channels != expected_channels:
+            raise ValueError(
+                "Runtime visual attribution channels must be unique and canonically ordered"
+            )
         return self
 
 
@@ -369,6 +378,7 @@ def _build_attribution_obligations(
             visual_content_sha256=visual.content_sha256,
             template_id=visual.template_id,
             source_reference=visual.license_url or visual.source_page_url,
+            allowed_channels=visual.allowed_attribution_channels,
         )
         for visual in visuals
         if visual.license_status == LicenseStatus.ATTRIBUTION_REQUIRED
@@ -647,6 +657,9 @@ def build_production_runtime_truth_snapshot(
             license_name=scene.get("asset_license_name"),
             license_url=sanitize_runtime_reference(scene.get("asset_license_url")),
             attribution=scene.get("asset_attribution"),
+            allowed_attribution_channels=tuple(
+                scene.get("asset_allowed_attribution_channels") or ()
+            ),
             query=scene.get("asset_query"),
             storage_reference=sanitize_runtime_reference(scene.get("asset_storage_reference")),
             content_sha256=scene.get("visual_content_sha256"),

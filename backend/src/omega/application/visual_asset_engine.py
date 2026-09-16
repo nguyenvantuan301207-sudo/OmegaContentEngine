@@ -4,6 +4,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from omega.application.visual_direction import VisualAssetKind, VisualAssetRequirement
+from omega.domain.attribution_delivery import AttributionDeliveryChannel
 from omega.domain.production import LicenseStatus
 
 
@@ -55,6 +56,7 @@ class ResolvedVisualAsset(BaseModel):
     license_name: str | None
     license_url: str | None
     attribution_text: str | None
+    allowed_attribution_channels: tuple[AttributionDeliveryChannel, ...] = ()
     query: str
     metadata: dict[str, Any]
 

@@ -11,6 +11,7 @@ Phase 4: Final short transaction locking Mission first, evaluating exceptions, c
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -82,6 +83,26 @@ class GuardianEngine:
         self.session_factory = session_factory
         self.detectors = detectors or ALL_DETECTORS
 
+    @asynccontextmanager
+    async def _session_scope(self, ambient_session: AsyncSession | None):
+        """Borrow a caller transaction or create the engine's usual session."""
+        if ambient_session is not None:
+            yield ambient_session
+            return
+        async with self.session_factory() as owned_session:
+            yield owned_session
+
+    @staticmethod
+    async def _finish_phase(
+        phase_session: AsyncSession,
+        ambient_session: AsyncSession | None,
+    ) -> None:
+        """Persist a phase without taking ownership of an ambient transaction."""
+        if ambient_session is None:
+            await phase_session.commit()
+        else:
+            await phase_session.flush()
+
     async def get_or_create_default_ruleset(self, session: AsyncSession) -> GuardianRuleSet:
         """Retrieve active ruleset or lazily initialize default v1.0.0."""
         stmt = (
@@ -106,12 +127,23 @@ class GuardianEngine:
             await session.flush()
         return ruleset
 
-    async def execute_check(self, payload: GuardianCheckCreate) -> GuardianCheckResponse:
-        """Execute the decoupled four-phase evaluation lifecycle."""
+    async def execute_check(
+        self,
+        payload: GuardianCheckCreate,
+        *,
+        session: AsyncSession | None = None,
+    ) -> GuardianCheckResponse:
+        """Execute a check, optionally inside a caller-owned transaction.
+
+        The default remains the decoupled four-transaction lifecycle.  A caller
+        that supplies ``session`` owns the final commit or rollback; Guardian
+        only flushes its rows so exact uncommitted targets remain FK-visible.
+        """
+        ambient_session = session
         # ══════════════════════════════════════════════════════════════════
         # PHASE 1: SHORT CLAIM TRANSACTION
         # ══════════════════════════════════════════════════════════════════
-        async with self.session_factory() as session:
+        async with self._session_scope(ambient_session) as session:
             # 1. Lock Mission FIRST
             mission_res = await session.execute(
                 select(Mission).where(Mission.id == payload.mission_id).with_for_update()
@@ -222,7 +254,7 @@ class GuardianEngine:
                     session.add(det_run)
                 detector_runs_map[det.detector_type] = det_run
 
-            await session.commit()
+            await self._finish_phase(session, ambient_session)
 
         # ══════════════════════════════════════════════════════════════════
         # PHASE 2: EVALUATE DETECTORS OUTSIDE OPEN DB TRANSACTION
@@ -244,7 +276,12 @@ class GuardianEngine:
         ] = []
         for det in applicable_detectors:
             try:
-                findings_data = await det.evaluate(context, self.session_factory)
+                detector_session_factory = (
+                    self.session_factory
+                    if ambient_session is None
+                    else lambda: self._session_scope(ambient_session)
+                )
+                findings_data = await det.evaluate(context, detector_session_factory)
                 detector_results.append((det, findings_data, None))
             except Exception as exc:
                 logger.error(
@@ -263,7 +300,7 @@ class GuardianEngine:
         detector_failures: list[tuple[str, DetectorFailurePolicy, str]] = []
 
         for det, findings_data, exc in detector_results:
-            async with self.session_factory() as session:
+            async with self._session_scope(ambient_session) as session:
                 run_stmt = (
                     select(GuardianDetectorRun)
                     .where(
@@ -305,12 +342,12 @@ class GuardianEngine:
                         await session.flush()
                         persisted_findings.append((f, finding_row.id))
 
-                await session.commit()
+                await self._finish_phase(session, ambient_session)
 
         # ══════════════════════════════════════════════════════════════════
         # PHASE 4: FINAL SHORT DECISION TRANSACTION
         # ══════════════════════════════════════════════════════════════════
-        async with self.session_factory() as session:
+        async with self._session_scope(ambient_session) as session:
             # 1. Lock Mission FIRST
             mission_res = await session.execute(
                 select(Mission).where(Mission.id == payload.mission_id).with_for_update()
@@ -421,10 +458,10 @@ class GuardianEngine:
                     },
                 )
 
-            await session.commit()
+            await self._finish_phase(session, ambient_session)
 
         # Reload complete record for response
-        async with self.session_factory() as session:
+        async with self._session_scope(ambient_session) as session:
             final_res = await session.execute(
                 select(GuardianCheck)
                 .where(GuardianCheck.id == check_id)
