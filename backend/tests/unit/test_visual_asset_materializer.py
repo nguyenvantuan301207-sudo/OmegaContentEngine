@@ -6,6 +6,7 @@ import pytest
 
 from omega.application.visual_asset_engine import ResolvedVisualAsset
 from omega.application.visual_direction import VisualAssetKind
+from omega.domain.production import LicenseStatus
 from omega.infrastructure.visual_asset_materializer import (
     VisualAssetMaterializer,
     VisualAssetMaterializerError,
@@ -38,6 +39,7 @@ def make_resolved(
         height=1080,
         duration_seconds=None,
         content_sha256=content_sha,
+        license_status=LicenseStatus.LICENSED,
         license_name="Pexels License",
         license_url="https://www.pexels.com/license/",
         attribution_text="Photo by Test on Pexels",
@@ -128,6 +130,7 @@ def test_materialize_missing_file_rejected(tmp_path: Path):
         height=100,
         duration_seconds=None,
         content_sha256=content_sha,
+        license_status=LicenseStatus.LICENSED,
         license_name=None,
         license_url=None,
         attribution_text=None,
@@ -157,6 +160,7 @@ def test_materialize_non_file_path_rejected(tmp_path: Path):
         height=100,
         duration_seconds=None,
         content_sha256=content_sha,
+        license_status=LicenseStatus.LICENSED,
         license_name=None,
         license_url=None,
         attribution_text=None,

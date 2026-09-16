@@ -5,6 +5,7 @@ import pytest
 
 from omega.application.visual_asset_engine import ResolvedVisualAsset
 from omega.application.visual_direction import VisualAssetKind
+from omega.domain.production import LicenseStatus
 from omega.infrastructure.visual_asset_materializer import (
     VisualAssetMaterializer,
     VisualAssetMaterializerError,
@@ -39,6 +40,7 @@ def make_resolved_broll(
         height=height,
         duration_seconds=duration_seconds,
         content_sha256=content_sha,
+        license_status=LicenseStatus.LICENSED,
         license_name="Pexels License",
         license_url="https://www.pexels.com/license/",
         attribution_text="Video by Test on Pexels",
@@ -93,6 +95,7 @@ def test_materialize_broll_missing_file(tmp_path: Path):
         height=1080,
         duration_seconds=10.0,
         content_sha256="0" * 64,
+        license_status=LicenseStatus.LICENSED,
         license_name=None,
         license_url=None,
         attribution_text=None,
@@ -119,6 +122,7 @@ def test_materialize_broll_directory(tmp_path: Path):
         height=1080,
         duration_seconds=10.0,
         content_sha256="0" * 64,
+        license_status=LicenseStatus.LICENSED,
         license_name=None,
         license_url=None,
         attribution_text=None,
