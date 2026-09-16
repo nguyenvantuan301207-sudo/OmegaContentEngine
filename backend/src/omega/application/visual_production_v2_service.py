@@ -400,6 +400,7 @@ class VerticalSliceSceneResult(BaseModel):
     visual_mode: str = "LOCAL_TEMPLATE_ONLY"
     asset_source_url: str | None = None
     asset_source_page_url: str | None = None
+    asset_license_status: LicenseStatus
     asset_license_name: str | None = None
     asset_license_url: str | None = None
     asset_attribution: str | None = None
@@ -1692,6 +1693,11 @@ class VisualProductionV2Service:
                                 if resolved_asset is not None
                                 else None
                             ),
+                            asset_license_status=(
+                                resolved_asset.license_status
+                                if resolved_asset is not None
+                                else LicenseStatus.GENERATED
+                            ),
                             asset_license_name=(
                                 resolved_asset.license_name
                                 if resolved_asset is not None
@@ -2126,7 +2132,7 @@ class VisualProductionV2Service:
                 ),
                 "runtime_branding": runtime_branding,
                 "runtime_audio_mix": runtime_audio_mix,
-                "scenes": [s.model_dump() for s in scene_results],
+                "scenes": [s.model_dump(mode="json") for s in scene_results],
             }
 
             with open(manifest_path, "w", encoding="utf-8") as f:

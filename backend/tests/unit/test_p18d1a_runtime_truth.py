@@ -97,6 +97,7 @@ def _runtime_result(mode="STANDARD", *, provider=False):
             "https://cdn.example/asset.jpg?token=secret" if provider else None
         ),
         "asset_source_page_url": "https://example/item/7#fragment" if provider else None,
+        "asset_license_status": "LICENSED" if provider else "GENERATED",
         "asset_license_name": "Pexels License" if provider else None,
         "asset_license_url": "https://example/license?signature=x" if provider else None,
         "asset_attribution": "Example Creator" if provider else None,
@@ -202,10 +203,62 @@ def test_snapshot_is_deterministic_strict_json_and_deeply_immutable():
     assert snapshot.schema_version == RUNTIME_TRUTH_SCHEMA_VERSION
     assert snapshot.canonical_json() == snapshot.canonical_json()
     assert json.loads(snapshot.canonical_json())["artifact"]["version"] == 1
+    assert snapshot.visuals[0].license_status.value == "GENERATED"
     with pytest.raises((TypeError, AttributeError)):
         snapshot.audio_mix["events"][0]["gain_db"] = 0
     with pytest.raises(ValidationError):
         snapshot.schema_version = 2
+
+
+def test_schema_v2_visual_license_status_is_required_and_validated():
+    contract = _contract()
+    result = _runtime_result()
+    del result.runtime_scenes[0]["asset_license_status"]
+    result.content_request_id = contract.lineage.content_request_id
+    result.script_version_id = contract.lineage.script_version_id
+    result.mission_execution_id = contract.lineage.mission_execution_id
+    result.mission_id = contract.lineage.mission_id
+
+    with pytest.raises(KeyError, match="asset_license_status"):
+        build_production_runtime_truth_snapshot(
+            contract=contract,
+            render_plan_id=uuid4(),
+            render_job_id=contract.lineage.render_job_id,
+            media_artifact_id=uuid4(),
+            artifact_version=1,
+            artifact_storage_uri="artifacts/video.mp4",
+            artifact_size_bytes=1234,
+            artifact_sha256="f" * 64,
+            v2_result=result,
+            probe_summary={
+                "duration_ms": 1000,
+                "width": 1920,
+                "height": 1080,
+                "video_codec": "h264",
+                "has_audio": True,
+            },
+        )
+
+    result.runtime_scenes[0]["asset_license_status"] = "NOT_A_STATUS"
+    with pytest.raises(ValidationError, match="license_status"):
+        build_production_runtime_truth_snapshot(
+            contract=contract,
+            render_plan_id=uuid4(),
+            render_job_id=contract.lineage.render_job_id,
+            media_artifact_id=uuid4(),
+            artifact_version=1,
+            artifact_storage_uri="artifacts/video.mp4",
+            artifact_size_bytes=1234,
+            artifact_sha256="f" * 64,
+            v2_result=result,
+            probe_summary={
+                "duration_ms": 1000,
+                "width": 1920,
+                "height": 1080,
+                "video_codec": "h264",
+                "has_audio": True,
+            },
+        )
 
 
 def test_snapshot_lineage_has_no_synthetic_mission_ids():
@@ -382,6 +435,7 @@ def test_migration_round_trip_fk_uniqueness_cascade_and_json(tmp_path, monkeypat
 
 def test_pre_d1a_cache_manifest_is_fenced_from_runtime_truth_finalization():
     legacy_manifest = {
+        "runtime_truth_schema_version": 1,
         "subtitle_semantics_version": SUBTITLE_SEMANTICS_VERSION,
         "requested_subtitle_mode": "OFF",
         "effective_subtitle_mode": "OFF",

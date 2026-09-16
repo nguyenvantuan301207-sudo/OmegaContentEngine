@@ -29,6 +29,7 @@ from omega.application.visual_production_v2_service import (
     VisualProductionV2Service,
     _safe_provider_metadata,
 )
+from omega.domain.production import LicenseStatus
 from omega.infrastructure.models import (
     ChannelDNARevision,
     ContentCitation,
@@ -73,6 +74,7 @@ def make_mock_orchestrator(tmp_path: Path):
                     height=1080,
                     duration_seconds=None,
                     mime_type="image/jpeg",
+                    license_status=LicenseStatus.LICENSED,
                     license_name="Pexels",
                     license_url="https://pexels.com/license",
                     attribution_text=None,
@@ -91,6 +93,7 @@ def make_mock_orchestrator(tmp_path: Path):
                     height=1080,
                     duration_seconds=10.0,
                     mime_type="video/mp4",
+                    license_status=LicenseStatus.LICENSED,
                     license_name="Pexels",
                     license_url="https://pexels.com/license",
                     attribution_text=None,
@@ -116,6 +119,7 @@ def make_mock_orchestrator(tmp_path: Path):
                 height=1080,
                 duration_seconds=None,
                 content_sha256=image_sha,
+                license_status=candidate.license_status,
                 license_name="Pexels",
                 license_url="https://pexels.com/license",
                 attribution_text=None,
@@ -147,6 +151,7 @@ def make_mock_orchestrator(tmp_path: Path):
                 height=1080,
                 duration_seconds=10.0,
                 content_sha256=broll_sha,
+                license_status=candidate.license_status,
                 license_name="Pexels",
                 license_url="https://pexels.com/license",
                 attribution_text=None,
@@ -801,12 +806,16 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
     assert [scene.start_ms for scene in res.runtime_scenes] == [0, 5000, 10000]
     assert [scene.end_ms for scene in res.runtime_scenes] == [5000, 10000, 15000]
     assert res.runtime_scenes[0].visual_origin == "TEMPLATE"
+    assert res.runtime_scenes[0].asset_license_status == LicenseStatus.GENERATED
     assert res.runtime_scenes[0].visual_width == 1280
     assert res.runtime_scenes[0].visual_height == 720
     assert res.runtime_scenes[1].visual_origin == "PROVIDER"
     assert res.runtime_scenes[1].asset_provider == "pexels"
     assert res.runtime_scenes[1].asset_source_page_url == "https://pexels.com/photo/1"
     assert res.runtime_scenes[1].asset_license_name == "Pexels"
+    assert res.runtime_scenes[1].asset_license_status == LicenseStatus.LICENSED
+    assert manifest["scenes"][1]["asset_license_status"] == "LICENSED"
+    assert res2.runtime_scenes[1].asset_license_status == LicenseStatus.LICENSED
     assert res.runtime_scenes[1].asset_storage_reference is None
     assert res2.runtime_scenes[1].visual_content_sha256 == res.runtime_scenes[1].visual_content_sha256
 

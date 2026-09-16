@@ -15,8 +15,9 @@ from pydantic import BaseModel, ConfigDict, Field, GetCoreSchemaHandler, model_v
 from pydantic_core import core_schema
 
 from omega.application.production_contract import CanonicalProductionContract
+from omega.domain.production import LicenseStatus
 
-RUNTIME_TRUTH_SCHEMA_VERSION = 1
+RUNTIME_TRUTH_SCHEMA_VERSION = 2
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SECRET_MARKERS = ("token", "secret", "signature", "credential", "apikey", "api_key")
 
@@ -250,6 +251,7 @@ class RuntimeVisualTruth(_FrozenModel):
     template_id: str | None = None
     provider: str | None = None
     provider_asset_id: str | None = None
+    license_status: LicenseStatus
     source_url: str | None = None
     source_page_url: str | None = None
     license_name: str | None = None
@@ -345,7 +347,7 @@ class RuntimeFingerprints(_FrozenModel):
 
 
 class ProductionRuntimeTruthSnapshot(_FrozenModel):
-    schema_version: Literal[1] = RUNTIME_TRUTH_SCHEMA_VERSION
+    schema_version: Literal[2] = RUNTIME_TRUTH_SCHEMA_VERSION
     lineage: RuntimeTruthLineage
     scenes: tuple[RuntimeSceneTruth, ...]
     narration: tuple[RuntimeNarrationTruth, ...]
@@ -557,6 +559,7 @@ def build_production_runtime_truth_snapshot(
                 template_id=scene.get("template_id"),
                 provider=scene.get("asset_provider"),
                 provider_asset_id=scene.get("asset_id"),
+                license_status=scene["asset_license_status"],
                 source_url=sanitize_runtime_reference(scene.get("asset_source_url")),
                 source_page_url=sanitize_runtime_reference(
                     scene.get("asset_source_page_url")
