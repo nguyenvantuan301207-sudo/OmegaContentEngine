@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from omega.application.visual_asset_engine import ResolvedVisualAsset, VisualAssetKind
+from omega.domain.production import LicenseStatus
 
 
 class VisualAssetCacheError(ValueError):
@@ -38,6 +39,7 @@ class VisualAssetCache:
         provider: str,
         mime_type: str,
         query: str,
+        license_status: LicenseStatus,
         source_url: str | None = None,
         source_page_url: str | None = None,
         width: int | None = None,
@@ -62,6 +64,10 @@ class VisualAssetCache:
 
         if mime_type not in self.ALLOWED_MIME_TYPES:
             raise VisualAssetCacheError(f"Unsupported MIME type: {mime_type}")
+        try:
+            canonical_license_status = LicenseStatus(license_status)
+        except ValueError as exc:
+            raise VisualAssetCacheError("Invalid license status") from exc
 
         sha256_hash = hashlib.sha256(content).hexdigest()
         asset_id = sha256_hash
@@ -83,6 +89,7 @@ class VisualAssetCache:
             "height": height,
             "duration_seconds": duration_seconds,
             "content_sha256": sha256_hash,
+            "license_status": canonical_license_status.value,
             "license_name": license_name,
             "license_url": license_url,
             "attribution_text": attribution_text,
@@ -183,6 +190,12 @@ class VisualAssetCache:
 
         if meta_dict.get("mime_type") not in self.ALLOWED_MIME_TYPES:
             raise VisualAssetCacheError(f"Cache corruption: unsupported MIME type {meta_dict.get('mime_type')}")
+
+        raw_license_status = meta_dict.get("license_status", LicenseStatus.UNKNOWN.value)
+        try:
+            meta_dict["license_status"] = LicenseStatus(raw_license_status)
+        except ValueError as exc:
+            raise VisualAssetCacheError("Cache corruption: invalid license status") from exc
 
         meta_dict["local_path"] = asset_file.absolute()
         try:

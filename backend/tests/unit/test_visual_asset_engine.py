@@ -7,6 +7,7 @@ from omega.application.visual_asset_engine import (
     VisualAssetRequest,
 )
 from omega.application.visual_direction import VisualAssetKind, VisualAssetRequirement
+from omega.domain.production import LicenseStatus
 
 
 def test_build_request_success():
@@ -100,6 +101,7 @@ def test_deterministic_selection():
         width=100,
         height=100,
         duration_seconds=None,
+        license_status=LicenseStatus.LICENSED,
         license_name=None,
         license_url=None,
         attribution_text=None,
@@ -115,6 +117,7 @@ def test_deterministic_selection():
         width=100,
         height=100,
         duration_seconds=None,
+        license_status=LicenseStatus.LICENSED,
         license_name=None,
         license_url=None,
         attribution_text=None,
@@ -130,6 +133,7 @@ def test_deterministic_selection():
         width=100,
         height=100,
         duration_seconds=None,
+        license_status=LicenseStatus.LICENSED,
         license_name=None,
         license_url=None,
         attribution_text=None,
@@ -166,6 +170,7 @@ def test_candidate_provenance_rejections():
             width=100,
             height=100,
             duration_seconds=None,
+            license_status=LicenseStatus.LICENSED,
             license_name=None,
             license_url=None,
             attribution_text=None,
@@ -179,6 +184,35 @@ def test_candidate_provenance_rejections():
     assert engine.select_candidate(req, [c_empty_provider_id]) is None
     assert engine.select_candidate(req, [c_empty_provider]) is None
     assert engine.select_candidate(req, [c_no_sources]) is None
+
+
+def test_blocked_candidate_is_not_selectable():
+    engine = VisualAssetEngine()
+    request = VisualAssetRequest(
+        scene_index=1,
+        kind=VisualAssetKind.IMAGE,
+        query="test",
+        purpose="test",
+        required=True,
+    )
+    blocked = VisualAssetCandidate(
+        provider_id="blocked",
+        kind=VisualAssetKind.IMAGE,
+        provider="test",
+        source_url="https://test/blocked.jpg",
+        source_page_url=None,
+        mime_type="image/jpeg",
+        width=1920,
+        height=1080,
+        duration_seconds=None,
+        license_status=LicenseStatus.BLOCKED,
+        license_name=None,
+        license_url=None,
+        attribution_text=None,
+        metadata={},
+    )
+
+    assert engine.select_candidate(request, [blocked]) is None
 
 
 def test_candidate_tie_breaking():
@@ -202,6 +236,7 @@ def test_candidate_tie_breaking():
             width=100,
             height=100,
             duration_seconds=None,
+            license_status=LicenseStatus.LICENSED,
             license_name=None,
             license_url=None,
             attribution_text=None,
@@ -222,7 +257,7 @@ def test_image_dimension_scoring():
     engine = VisualAssetEngine()
     req = VisualAssetRequest(scene_index=1, kind=VisualAssetKind.IMAGE, query="test", purpose="test", required=True)
     def c(w, h, p_id):
-        return VisualAssetCandidate(provider_id=p_id, kind=VisualAssetKind.IMAGE, provider="test", source_url="http://test", source_page_url=None, mime_type="image/jpeg", width=w, height=h, duration_seconds=None, license_name=None, license_url=None, attribution_text=None, metadata={})
+        return VisualAssetCandidate(provider_id=p_id, kind=VisualAssetKind.IMAGE, provider="test", source_url="http://test", source_page_url=None, mime_type="image/jpeg", width=w, height=h, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None, attribution_text=None, metadata={})
 
     c_large = c(1920, 1080, "large")
     c_small = c(800, 600, "small")
@@ -236,7 +271,7 @@ def test_broll_duration_scoring():
     engine = VisualAssetEngine()
     req = VisualAssetRequest(scene_index=1, kind=VisualAssetKind.BROLL, query="test", purpose="test", required=True)
     def c(w, h, d, p_id):
-        return VisualAssetCandidate(provider_id=p_id, kind=VisualAssetKind.BROLL, provider="test", source_url="http://test", source_page_url=None, mime_type="video/mp4", width=w, height=h, duration_seconds=d, license_name=None, license_url=None, attribution_text=None, metadata={})
+        return VisualAssetCandidate(provider_id=p_id, kind=VisualAssetKind.BROLL, provider="test", source_url="http://test", source_page_url=None, mime_type="video/mp4", width=w, height=h, duration_seconds=d, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None, attribution_text=None, metadata={})
 
     c_valid = c(1920, 1080, 5.0, "valid")
     c_no_dur = c(1920, 1080, None, "nodur")
@@ -251,7 +286,7 @@ def test_original_provider_order_is_tiebreaker():
     engine = VisualAssetEngine()
     req = VisualAssetRequest(scene_index=1, kind=VisualAssetKind.IMAGE, query="test", purpose="test", required=True)
     def c(p_id):
-        return VisualAssetCandidate(provider_id=p_id, kind=VisualAssetKind.IMAGE, provider="test", source_url="http://test", source_page_url=None, mime_type="image/jpeg", width=1920, height=1080, duration_seconds=None, license_name=None, license_url=None, attribution_text=None, metadata={})
+        return VisualAssetCandidate(provider_id=p_id, kind=VisualAssetKind.IMAGE, provider="test", source_url="http://test", source_page_url=None, mime_type="image/jpeg", width=1920, height=1080, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None, attribution_text=None, metadata={})
 
     c1 = c("Z")
     c2 = c("A")

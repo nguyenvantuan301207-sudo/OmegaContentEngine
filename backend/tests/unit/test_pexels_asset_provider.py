@@ -5,6 +5,7 @@ import pytest
 
 from omega.application.visual_asset_engine import VisualAssetCandidate, VisualAssetRequest
 from omega.application.visual_direction import VisualAssetKind
+from omega.domain.production import LicenseStatus
 from omega.infrastructure.pexels_asset_provider import PexelsAssetProvider, PexelsAssetProviderError
 from omega.infrastructure.visual_asset_cache import VisualAssetCache
 
@@ -82,10 +83,15 @@ async def test_photo_search(dummy_cache: VisualAssetCache):
         assert c.source_page_url == "https://www.pexels.com/photo/12345"
         assert c.attribution_text == "Photo by John Doe on Pexels"
         assert c.license_name == "Pexels License"
+        assert c.license_status == LicenseStatus.LICENSED
 
 
+@pytest.mark.parametrize("kind", [VisualAssetKind.VIDEO, VisualAssetKind.BROLL])
 @pytest.mark.asyncio
-async def test_video_search_and_deterministic_selection(dummy_cache: VisualAssetCache):
+async def test_video_search_and_deterministic_selection(
+    dummy_cache: VisualAssetCache,
+    kind: VisualAssetKind,
+):
     def mock_handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/v1/videos/search"
 
@@ -113,7 +119,7 @@ async def test_video_search_and_deterministic_selection(dummy_cache: VisualAsset
         provider = PexelsAssetProvider("test-api-key", dummy_cache, client=client)
         req = VisualAssetRequest(
             scene_index=1,
-            kind=VisualAssetKind.VIDEO,
+            kind=kind,
             query="test query",
             purpose="test",
             required=True
@@ -124,6 +130,7 @@ async def test_video_search_and_deterministic_selection(dummy_cache: VisualAsset
         c = candidates[0]
         # Should prefer landscape 1080p over 4k
         assert c.source_url == "https://1080p_landscape"
+        assert c.license_status == LicenseStatus.LICENSED
 
 
 @pytest.mark.asyncio
@@ -238,6 +245,7 @@ async def test_fetch_success(dummy_cache: VisualAssetCache):
             width=100,
             height=100,
             duration_seconds=None,
+            license_status=LicenseStatus.LICENSED,
             license_name="Pexels License",
             license_url=None,
             attribution_text=None,
@@ -247,6 +255,7 @@ async def test_fetch_success(dummy_cache: VisualAssetCache):
         asset = await provider.fetch(c)
         assert asset.kind == VisualAssetKind.IMAGE
         assert asset.query == "original query"
+        assert asset.license_status == LicenseStatus.LICENSED
         assert asset.mime_type == "image/jpeg"
         assert asset.local_path.exists()
         assert asset.content_sha256 is not None
@@ -270,7 +279,7 @@ async def test_stream_size_abort(dummy_cache: VisualAssetCache):
         c = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://test/stream", source_page_url=None, mime_type="image/jpeg",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
         with pytest.raises(PexelsAssetProviderError, match="Received body exceeds limit"):
@@ -288,7 +297,7 @@ async def test_content_length_validation(dummy_cache: VisualAssetCache):
         c = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://test/x", source_page_url=None, mime_type="image/jpeg",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
         with pytest.raises(PexelsAssetProviderError, match="Malformed Content-Length"):
@@ -309,7 +318,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
     c_http = VisualAssetCandidate(
         provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
         source_url="http://example.test/file.jpg", source_page_url=None, mime_type="image/jpeg",
-        width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
         attribution_text=None, metadata={"search_query": "q"}
     )
     with pytest.raises(PexelsAssetProviderError, match="Final URL scheme must be https"):
@@ -329,7 +338,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
         c_https = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://example.test/file.jpg", source_page_url=None, mime_type="image/jpeg",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
         with pytest.raises(PexelsAssetProviderError, match="Redirected to non-https URL"):
@@ -352,7 +361,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
         c_safe = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://one.test/file", source_page_url=None, mime_type="image/jpeg",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
         await provider3.fetch(c_safe)
@@ -373,7 +382,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
         c_loop = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://loop.test/file", source_page_url=None, mime_type="image/jpeg",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
         with pytest.raises(PexelsAssetProviderError, match="Redirect limit exceeded"):
@@ -405,7 +414,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
         c_exact = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://start.test/file", source_page_url=None, mime_type="image/jpeg",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
         await provider_exact.fetch(c_exact)
@@ -416,7 +425,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
     c_malformed_source = VisualAssetCandidate(
         provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
         source_url="http://[::1]:invalid_port/", source_page_url=None, mime_type="image/jpeg",
-        width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
         attribution_text=None, metadata={"search_query": "q"}
     )
     with pytest.raises(PexelsAssetProviderError, match="Invalid candidate source URL"):
@@ -432,7 +441,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
         c_malformed_loc = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://test/file", source_page_url=None, mime_type="image/jpeg",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
 
@@ -448,7 +457,7 @@ async def test_mime_validation(dummy_cache: VisualAssetCache):
     c_img_mp4 = VisualAssetCandidate(
         provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
         source_url="https://test/file.jpg", source_page_url=None, mime_type="video/mp4",
-        width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
         attribution_text=None, metadata={"search_query": "q"}
     )
     with pytest.raises(PexelsAssetProviderError, match="Unsupported image candidate MIME: video/mp4"):
@@ -457,7 +466,7 @@ async def test_mime_validation(dummy_cache: VisualAssetCache):
     c_vid_jpg = VisualAssetCandidate(
         provider_id="1", kind=VisualAssetKind.VIDEO, provider="pexels",
         source_url="https://test/file.mp4", source_page_url=None, mime_type="image/jpeg",
-        width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
         attribution_text=None, metadata={"search_query": "q"}
     )
     with pytest.raises(PexelsAssetProviderError, match="Unsupported video candidate MIME: image/jpeg"):
@@ -473,7 +482,7 @@ async def test_mime_validation(dummy_cache: VisualAssetCache):
         c_jpeg = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://test/file.jpg", source_page_url=None, mime_type="image/jpeg",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
         asset_png = await provider2.fetch(c_jpeg)
@@ -509,7 +518,7 @@ async def test_mime_validation(dummy_cache: VisualAssetCache):
         c_vid = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.VIDEO, provider="pexels",
             source_url="https://test/file.mp4", source_page_url=None, mime_type="video/mp4",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata={"search_query": "q"}
         )
         with pytest.raises(PexelsAssetProviderError, match="Invalid video Content-Type: video/webm"):
@@ -523,7 +532,7 @@ async def test_search_query_validation(dummy_cache: VisualAssetCache):
         c = VisualAssetCandidate(
             provider_id="1", kind=VisualAssetKind.IMAGE, provider="pexels",
             source_url="https://test/file.jpg", source_page_url=None, mime_type="image/jpeg",
-            width=100, height=100, duration_seconds=None, license_name=None, license_url=None,
+            width=100, height=100, duration_seconds=None, license_status=LicenseStatus.LICENSED, license_name=None, license_url=None,
             attribution_text=None, metadata=invalid_meta
         )
         with pytest.raises(PexelsAssetProviderError, match="search_query"):

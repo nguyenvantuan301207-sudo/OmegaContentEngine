@@ -4,6 +4,7 @@ from typing import Any, Protocol
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from omega.application.visual_direction import VisualAssetKind, VisualAssetRequirement
+from omega.domain.production import LicenseStatus
 
 
 class VisualAssetEngineError(ValueError):
@@ -50,6 +51,7 @@ class ResolvedVisualAsset(BaseModel):
     height: int | None
     duration_seconds: float | None
     content_sha256: str
+    license_status: LicenseStatus
     license_name: str | None
     license_url: str | None
     attribution_text: str | None
@@ -68,6 +70,7 @@ class VisualAssetCandidate(BaseModel):
     width: int | None
     height: int | None
     duration_seconds: float | None
+    license_status: LicenseStatus
     license_name: str | None
     license_url: str | None
     attribution_text: str | None
@@ -130,6 +133,8 @@ class VisualAssetEngine:
     def select_candidate(self, request: VisualAssetRequest, candidates: list[VisualAssetCandidate]) -> VisualAssetCandidate | None:
         valid_candidates = []
         for i, c in enumerate(candidates):
+            if c.license_status == LicenseStatus.BLOCKED:
+                continue
             if c.kind != request.kind:
                 continue
             if not c.provider_id or not c.provider_id.strip():

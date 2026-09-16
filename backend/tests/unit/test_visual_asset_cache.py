@@ -1,9 +1,11 @@
 import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 from omega.application.visual_direction import VisualAssetKind
+from omega.domain.production import LicenseStatus
 from omega.infrastructure.visual_asset_cache import VisualAssetCache, VisualAssetCacheError
 
 
@@ -18,12 +20,14 @@ def test_cache_round_trip(tmp_path: Path):
         provider="test_provider",
         mime_type="image/png",
         query="test query",
+        license_status=LicenseStatus.LICENSED,
     )
 
     assert asset.content_sha256 == expected_hash
     assert asset.provider == "test_provider"
     assert asset.mime_type == "image/png"
     assert asset.query == "test query"
+    assert asset.license_status == LicenseStatus.LICENSED
 
     assert str(tmp_path) in str(asset.local_path)
 
@@ -31,6 +35,12 @@ def test_cache_round_trip(tmp_path: Path):
     assert asset2 is not None
     assert asset2.content_sha256 == expected_hash
     assert asset2.asset_id == expected_hash
+    assert asset2.license_status == LicenseStatus.LICENSED
+
+    metadata_path = (
+        tmp_path / "sha256" / expected_hash[:2] / expected_hash / "metadata.json"
+    )
+    assert json.loads(metadata_path.read_text())["license_status"] == "LICENSED"
 
     asset3 = cache.store(
         content=content,
@@ -38,8 +48,60 @@ def test_cache_round_trip(tmp_path: Path):
         provider="test_provider",
         mime_type="image/png",
         query="test query",
+        license_status=LicenseStatus.LICENSED,
     )
     assert asset3.content_sha256 == expected_hash
+
+
+def test_legacy_cache_missing_status_is_unknown_without_rewrite(tmp_path: Path):
+    cache = VisualAssetCache(tmp_path)
+    content = b"legacy"
+    content_hash = hashlib.sha256(content).hexdigest()
+    cache.store(
+        content,
+        VisualAssetKind.IMAGE,
+        "pexels",
+        "image/png",
+        "legacy query",
+        LicenseStatus.LICENSED,
+    )
+    metadata_path = (
+        tmp_path / "sha256" / content_hash[:2] / content_hash / "metadata.json"
+    )
+    metadata = json.loads(metadata_path.read_text())
+    del metadata["license_status"]
+    metadata_path.write_text(json.dumps(metadata))
+    original_metadata = metadata_path.read_text()
+
+    asset = cache.get(content_hash)
+
+    assert asset is not None
+    assert asset.provider == "pexels"
+    assert asset.license_status == LicenseStatus.UNKNOWN
+    assert metadata_path.read_text() == original_metadata
+
+
+def test_invalid_cached_license_status_fails_closed(tmp_path: Path):
+    cache = VisualAssetCache(tmp_path)
+    content = b"invalid-license"
+    content_hash = hashlib.sha256(content).hexdigest()
+    cache.store(
+        content,
+        VisualAssetKind.IMAGE,
+        "test",
+        "image/png",
+        "query",
+        LicenseStatus.LICENSED,
+    )
+    metadata_path = (
+        tmp_path / "sha256" / content_hash[:2] / content_hash / "metadata.json"
+    )
+    metadata = json.loads(metadata_path.read_text())
+    metadata["license_status"] = "APPROVED_BY_GUESS"
+    metadata_path.write_text(json.dumps(metadata))
+
+    with pytest.raises(VisualAssetCacheError, match="invalid license status"):
+        cache.get(content_hash)
 
 
 def test_cache_corruption(tmp_path: Path):
@@ -51,6 +113,7 @@ def test_cache_corruption(tmp_path: Path):
         provider="test_provider",
         mime_type="image/png",
         query="test query",
+        license_status=LicenseStatus.LICENSED,
     )
 
     with open(asset.local_path, "wb") as f:
@@ -81,6 +144,7 @@ def test_mime_safety(tmp_path: Path):
             provider="test",
             mime_type="application/octet-stream",
             query="query",
+            license_status=LicenseStatus.LICENSED,
         )
 
 def test_cache_sha_validation(tmp_path: Path):
@@ -100,7 +164,7 @@ def test_cache_partial_entry(tmp_path: Path):
     content = b"partial"
     expected_hash = hashlib.sha256(content).hexdigest()
 
-    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query")
+    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query", LicenseStatus.LICENSED)
 
     # Remove metadata
     import os
@@ -110,7 +174,7 @@ def test_cache_partial_entry(tmp_path: Path):
         cache.get(expected_hash)
 
     # Recreate and remove asset
-    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query")
+    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query", LicenseStatus.LICENSED)
     os.remove(tmp_path / "sha256" / expected_hash[:2] / expected_hash / "asset.bin")
 
     with pytest.raises(VisualAssetCacheError, match="Partial cache entry"):
@@ -122,7 +186,7 @@ def test_cache_metadata_corruption(tmp_path: Path):
     content = b"meta"
     expected_hash = hashlib.sha256(content).hexdigest()
 
-    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query")
+    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query", LicenseStatus.LICENSED)
     meta_path = tmp_path / "sha256" / expected_hash[:2] / expected_hash / "metadata.json"
 
     def alter_meta(cb):
@@ -138,13 +202,13 @@ def test_cache_metadata_corruption(tmp_path: Path):
         cache.get(expected_hash)
 
     # Reset
-    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query")
+    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query", LicenseStatus.LICENSED)
     alter_meta(lambda d: d.update({"content_sha256": "bad"}))
     with pytest.raises(VisualAssetCacheError, match="metadata hash mismatch"):
         cache.get(expected_hash)
 
     # Reset
-    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query")
+    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query", LicenseStatus.LICENSED)
     alter_meta(lambda d: d.update({"mime_type": "text/plain"}))
     with pytest.raises(VisualAssetCacheError, match="unsupported MIME"):
         cache.get(expected_hash)
@@ -160,7 +224,7 @@ def test_cache_portability(tmp_path: Path):
     content = b"portability"
     expected_hash = hashlib.sha256(content).hexdigest()
 
-    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query")
+    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "test query", LicenseStatus.LICENSED)
 
     # Metadata should NOT contain absolute root path
     meta_path = tmp_path / "sha256" / expected_hash[:2] / expected_hash / "metadata.json"
@@ -180,10 +244,10 @@ def test_store_input_validation(tmp_path: Path):
 
     for invalid_val in ["", "   "]:
         with pytest.raises(VisualAssetCacheError, match="Provider cannot be empty"):
-            cache.store(content, VisualAssetKind.IMAGE, invalid_val, "image/png", "query")
+            cache.store(content, VisualAssetKind.IMAGE, invalid_val, "image/png", "query", LicenseStatus.LICENSED)
 
         with pytest.raises(VisualAssetCacheError, match="Query cannot be empty"):
-            cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", invalid_val)
+            cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", invalid_val, LicenseStatus.LICENSED)
 
 def test_first_store_replace_failure_rollback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import os
@@ -204,7 +268,7 @@ def test_first_store_replace_failure_rollback(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setattr(os, "replace", mock_replace)
 
     with pytest.raises(VisualAssetCacheError, match="Failed to replace final cache files"):
-        cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "query")
+        cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "query", LicenseStatus.LICENSED)
 
     assert replace_calls == 2
 
@@ -221,7 +285,7 @@ def test_existing_entry_replace_failure_preservation(tmp_path: Path, monkeypatch
     content = b"existing_test"
     expected_hash = hashlib.sha256(content).hexdigest()
 
-    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "query")
+    cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "query", LicenseStatus.LICENSED)
 
     assert cache.get(expected_hash) is not None
 
@@ -238,7 +302,7 @@ def test_existing_entry_replace_failure_preservation(tmp_path: Path, monkeypatch
     monkeypatch.setattr(os, "replace", mock_replace)
 
     with pytest.raises(VisualAssetCacheError, match="Failed to replace final cache files"):
-        cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "query2")
+        cache.store(content, VisualAssetKind.IMAGE, "test", "image/png", "query2", LicenseStatus.LICENSED)
 
     assert replace_calls == 2
 

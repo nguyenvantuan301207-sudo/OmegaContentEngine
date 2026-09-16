@@ -13,6 +13,7 @@ from omega.application.visual_asset_orchestrator import (
     VisualAssetOrchestrator,
     VisualAssetOrchestratorError,
 )
+from omega.domain.production import LicenseStatus
 
 
 class MockProvider:
@@ -61,6 +62,7 @@ class MockProvider:
             height=candidate.height,
             duration_seconds=candidate.duration_seconds,
             content_sha256="0" * 64,
+            license_status=candidate.license_status,
             license_name=candidate.license_name,
             license_url=candidate.license_url,
             attribution_text=candidate.attribution_text,
@@ -97,6 +99,7 @@ def make_candidate(
         width=1920,
         height=1080,
         duration_seconds=10.0 if kind != VisualAssetKind.IMAGE else None,
+        license_status=LicenseStatus.LICENSED,
         license_name="Test License",
         license_url="https://test.license",
         attribution_text="Test Attribution",
@@ -138,6 +141,7 @@ async def test_successful_image_resolution(engine):
     assert res.license_name == "Test License"
     assert res.license_url == "https://test.license"
     assert res.attribution_text == "Test Attribution"
+    assert res.license_status == LicenseStatus.LICENSED
     assert res.metadata == {"custom_key": "custom_val"}
     assert res.content_sha256 == "0" * 64
     assert p.searches == 1

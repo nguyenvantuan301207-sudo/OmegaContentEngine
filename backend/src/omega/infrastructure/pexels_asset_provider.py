@@ -8,6 +8,7 @@ from omega.application.visual_asset_engine import (
     VisualAssetRequest,
 )
 from omega.application.visual_direction import VisualAssetKind
+from omega.domain.production import LicenseStatus
 from omega.infrastructure.visual_asset_cache import VisualAssetCache
 
 
@@ -157,6 +158,7 @@ class PexelsAssetProvider:
                     width=photo.get("width"),
                     height=photo.get("height"),
                     duration_seconds=None,
+                    license_status=LicenseStatus.LICENSED,
                     license_name="Pexels License",
                     license_url="https://www.pexels.com/license/",
                     attribution_text=attr,
@@ -200,6 +202,7 @@ class PexelsAssetProvider:
                     width=variant["width"],
                     height=variant["height"],
                     duration_seconds=video.get("duration"),
+                    license_status=LicenseStatus.LICENSED,
                     license_name="Pexels License",
                     license_url="https://www.pexels.com/license/",
                     attribution_text=attr,
@@ -326,6 +329,7 @@ class PexelsAssetProvider:
             provider="pexels",
             mime_type=actual_mime_type,
             query=search_query,
+            license_status=candidate.license_status,
             source_url=candidate.source_url,
             source_page_url=candidate.source_page_url,
             width=candidate.width,
