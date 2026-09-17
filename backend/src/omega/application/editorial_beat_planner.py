@@ -21,6 +21,7 @@ from omega.application.editorial_beat import (
     EditorialBeatTiming,
     MaterializedBeatTimingPlan,
 )
+from omega.application.mechanism_diagram import resolve_mechanism_diagram_spec
 from omega.application.storyboard_engine import StoryboardScene, VisualStrategy
 
 MIN_BEAT_DURATION_MS: int = 1500
@@ -471,20 +472,23 @@ class EditorialBeatPlanner:
         if parent_strategy == VisualStrategy.DIAGRAM or any(
             cue in lower for cue in mechanism_cues
         ):
-            strat = (
-                VisualStrategy.DIAGRAM
-                if parent_strategy == VisualStrategy.DIAGRAM
-                else VisualStrategy.BROLL
-            )
-            reuse = (
-                AssetReuseIntent.LOCAL_EXPLAINER
-                if strat == VisualStrategy.DIAGRAM
-                else (
-                    AssetReuseIntent.REUSE_PARENT
-                    if unit_index == 0
-                    else AssetReuseIntent.ALLOW_SECONDARY_PROVIDER
-                )
-            )
+            if parent_strategy == VisualStrategy.DIAGRAM:
+                strat = VisualStrategy.DIAGRAM
+                reuse = AssetReuseIntent.LOCAL_EXPLAINER
+            else:
+                # Conservative promotion: only promote to DIAGRAM if trustworthy spec exists
+                spec = resolve_mechanism_diagram_spec(span)
+                if spec is not None:
+                    strat = VisualStrategy.DIAGRAM
+                    reuse = AssetReuseIntent.LOCAL_EXPLAINER
+                else:
+                    strat = VisualStrategy.BROLL
+                    reuse = (
+                        AssetReuseIntent.REUSE_PARENT
+                        if unit_index == 0
+                        else AssetReuseIntent.ALLOW_SECONDARY_PROVIDER
+                    )
+
             return BeatSemanticRole.MECHANISM, strat, BeatMotionIntent.STATIC, reuse
 
         # Context (establishing scene baseline)

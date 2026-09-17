@@ -1,8 +1,11 @@
+import inspect
 import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
+from omega.application.editorial_beat import BeatSemanticRole
+from omega.application.mechanism_diagram import resolve_mechanism_diagram_spec
 from omega.application.scene_template_registry import (
     SceneTemplateRegistry,
     TemplateInputKey,
@@ -79,7 +82,11 @@ class TemplatePayloadResolver:
         definition = reg.validate_direction(direction)
 
         # 3. Resolve semantic inputs
-        inputs = self._resolve_inputs(scene, direction.template_id)
+        sig = inspect.signature(self._resolve_inputs)
+        if "direction" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+            inputs = self._resolve_inputs(scene, direction.template_id, direction=direction)
+        else:
+            inputs = self._resolve_inputs(scene, direction.template_id)
 
         # 4. Validate required inputs exist and are meaningful
         for req_key in definition.required_inputs:
@@ -118,7 +125,12 @@ class TemplatePayloadResolver:
                 return False
         return not (isinstance(val, (list, tuple, dict, set)) and len(val) == 0)
 
-    def _resolve_inputs(self, scene: StoryboardScene, template_id: VisualTemplateId) -> dict[TemplateInputKey, Any]:
+    def _resolve_inputs(
+        self,
+        scene: StoryboardScene,
+        template_id: VisualTemplateId,
+        direction: VisualDirection | None = None,
+    ) -> dict[TemplateInputKey, Any]:
         inputs: dict[TemplateInputKey, Any] = {}
 
         def meaningful_str(val: str | None) -> str | None:
@@ -148,12 +160,29 @@ class TemplatePayloadResolver:
                 inputs[TemplateInputKey.TITLE] = viewer_title
 
             content = narration or os_text or brief
-            nodes, edges = self._extract_diagram(content)
-            if len(nodes) >= 2:
-                inputs[TemplateInputKey.NODES] = nodes
-                inputs[TemplateInputKey.EDGES] = edges
+
+            # G2C2B0 gate: mechanism shared-authority extraction is strictly gated to G2 beats
+            dir_metadata = direction.metadata if direction else {}
+            is_g2_mechanism_beat = (
+                isinstance(dir_metadata.get("beat_index"), int)
+                and dir_metadata.get("beat_index") >= 0
+                and dir_metadata.get("semantic_role") == BeatSemanticRole.MECHANISM.value
+            )
+
+            mech_spec = resolve_mechanism_diagram_spec(content) if is_g2_mechanism_beat else None
+            if mech_spec is not None and len(mech_spec.nodes) >= 2:
+                inputs[TemplateInputKey.NODES] = list(mech_spec.nodes)
+                inputs[TemplateInputKey.EDGES] = [
+                    TemplateEdge(from_node=e.from_node, to_node=e.to_node)
+                    for e in mech_spec.edges
+                ]
             else:
-                raise TemplatePayloadError("Could not extract at least two trustworthy diagram nodes.")
+                nodes, edges = self._extract_diagram(content)
+                if len(nodes) >= 2:
+                    inputs[TemplateInputKey.NODES] = nodes
+                    inputs[TemplateInputKey.EDGES] = edges
+                else:
+                    raise TemplatePayloadError("Could not extract at least two trustworthy diagram nodes.")
 
         elif template_id == VisualTemplateId.STATISTIC_HERO:
             if viewer_title:

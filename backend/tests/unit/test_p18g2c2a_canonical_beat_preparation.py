@@ -382,6 +382,27 @@ def test_11_sunset_like_non_production_architectural_fixture():
     assert roles[2] == BeatSemanticRole.EXPLANATION.value
     assert len(set(roles)) == 3
 
+    # Check exact strategies and template IDs
+    u0, u1, u2 = prep_res.render_plan.units
+    assert u0.scene_view.visual_strategy == VisualStrategy.BROLL
+    assert u0.direction_view.template_id == VisualTemplateId.BROLL_EXPLAINER
+    assert u0.asset_decision.action == BeatAssetAction.ACQUIRE_IF_NEEDED
+
+    assert u1.scene_view.visual_strategy == VisualStrategy.DIAGRAM
+    assert u1.direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM
+    assert u1.asset_decision.action == BeatAssetAction.LOCAL_TEMPLATE
+
+    assert u2.scene_view.visual_strategy == VisualStrategy.BROLL
+    assert u2.direction_view.template_id == VisualTemplateId.BROLL_EXPLAINER
+    assert u2.asset_decision.action == BeatAssetAction.REUSE_COMPATIBLE
+    assert u2.asset_decision.reuse_from_beat_index == 0
+
+    # Assert planned external acquisition count == 1
+    external_acquisitions = [
+        d for d in prep_res.asset_plan.decisions if d.action == BeatAssetAction.ACQUIRE_IF_NEEDED
+    ]
+    assert len(external_acquisitions) == 1
+
 
 def test_12_prepare_from_script_dict_happy_path_and_types_preserved():
     """prepare_from_script_dict resolves statements and executes planning, preserving HOOK types."""
