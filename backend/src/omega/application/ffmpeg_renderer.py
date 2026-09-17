@@ -229,6 +229,76 @@ class FFmpegRenderer:
                 f"FFmpeg concatenation failed (code {proc.returncode}): {err_msg}"
             )
 
+    async def concatenate_visual_clips(
+        self,
+        clip_paths: list[Path | str],
+        output_path: Path | str,
+        target_fps: int = 24,
+        timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
+    ) -> None:
+        """Concatenate visual-only clips into a single CFR video with zero audio streams."""
+        out_p = Path(output_path)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        if not 1 <= target_fps <= 60:
+            raise ValueError("target_fps must be between 1 and 60")
+        if not clip_paths:
+            raise ValueError("clip_paths must not be empty")
+
+        manifest_path = out_p.parent / f"concat_visual_{out_p.stem}.txt"
+        manifest_content = "\n".join(f"file '{Path(p).resolve().as_posix()}'" for p in clip_paths)
+        manifest_path.write_text(manifest_content, encoding="utf-8")
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-fflags",
+            "+genpts",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            str(manifest_path),
+            "-vf",
+            f"fps={target_fps}",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-fps_mode",
+            "cfr",
+            "-r",
+            str(target_fps),
+            "-an",
+            "-avoid_negative_ts",
+            "make_zero",
+            "-movflags",
+            "+faststart",
+            str(out_p),
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except TimeoutError as exc:
+            proc.kill()
+            raise FFmpegExecutionError(
+                f"FFmpeg visual concatenation timed out after {timeout_seconds}s."
+            ) from exc
+
+        with contextlib.suppress(OSError):
+            manifest_path.unlink(missing_ok=True)
+
+        if proc.returncode != 0:
+            err_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
+            raise FFmpegExecutionError(
+                f"FFmpeg visual concatenation failed (code {proc.returncode}): {err_msg}"
+            )
+
     async def overlay_logo(
         self,
         video_path: Path | str,
