@@ -292,8 +292,8 @@ def test_active_production_rules_have_complete_fail_closed_guardian_mapping():
     active_rules = set(ProductionQARuleCode) - DEFERRED_RULES
     active_rule_values = {rule.value for rule in active_rules}
 
-    assert len(active_rules) == 28
-    assert len(PROD_RULE_SEVERITY_RISK_MAP) == 28
+    assert len(active_rules) == 29
+    assert len(PROD_RULE_SEVERITY_RISK_MAP) == 29
     assert set(PROD_RULE_SEVERITY_RISK_MAP) == active_rule_values
     for rule_code in active_rule_values:
         assert PROD_RULE_SEVERITY_RISK_MAP[rule_code]

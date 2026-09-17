@@ -269,7 +269,7 @@ async def test_interactive_neutral_render_uses_exact_pins_and_cache_parity(tmp_p
     assert fresh.script_version_id != latest.id
     assert fresh.mission_id is None
     assert fresh.mission_execution_id is None
-    assert fresh.subtitle_semantics_version == 2
+    assert fresh.subtitle_semantics_version == 3
     assert fresh.requested_subtitle_mode == "OFF"
     assert fresh.runtime_subtitle_cues == ()
     assert captured_scripts[0]["title"] == "Pinned script"
@@ -318,7 +318,7 @@ async def test_neutral_subtitle_modes_synthesize_once_and_cache(mode, tmp_path):
     assert fresh.effective_subtitle_mode == mode.value
     assert fresh.subtitle_timing_source == "DERIVED_SEGMENT_TIMING"
     assert fresh.runtime_subtitle_cues
-    assert fresh.subtitle_semantics_version == 2
+    assert fresh.subtitle_semantics_version == 3
     narration_provider.synthesize_segment_audio.assert_awaited_once_with(
         channel_id=request.channel_id,
         request_id=request.content_request_id,
@@ -430,8 +430,8 @@ def test_unsupported_canonical_target_fails_closed():
     assert request.mode == ProductionMode.INTERACTIVE.value
 
 
-def test_subtitle_semantics_version_remains_two():
-    assert SUBTITLE_SEMANTICS_VERSION == 2
+def test_subtitle_semantics_version_is_three():
+    assert SUBTITLE_SEMANTICS_VERSION == 3
 
 
 @pytest.mark.asyncio
@@ -519,7 +519,7 @@ async def test_mission_and_neutral_share_pinned_physical_cache(
     assert (
         mission_result.subtitle_semantics_version
         == neutral_result.subtitle_semantics_version
-        == 2
+        == 3
     )
     assert captured_scripts[0]["title"] == "Pinned script"
     assert video_renderer.render_clip.await_count == 1

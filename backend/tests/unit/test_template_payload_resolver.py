@@ -171,9 +171,15 @@ def test_image_explainer_resolve(resolver, scene_base):
     )
 
     payload = resolver.resolve(scene_base, direction)
-    assert payload.inputs[TemplateInputKey.BODY] == "Modern data centers coordinate thousands of machines."
+    # Under P18-G1, BODY takes concise on_screen_text if distinct from narration, never full narration
+    assert payload.inputs[TemplateInputKey.BODY] == scene_base.on_screen_text
     assert len(payload.asset_requirements) == 1
     assert payload.asset_requirements[0].kind == VisualAssetKind.IMAGE
+
+    # When on_screen_text is identical to narration or None, BODY is omitted entirely
+    scene_base.on_screen_text = scene_base.narration_excerpt
+    payload_no_dup = resolver.resolve(scene_base, direction)
+    assert TemplateInputKey.BODY not in payload_no_dup.inputs
 
 
 def test_diagram_without_nodes_fails(resolver, scene_base):
@@ -370,11 +376,18 @@ def test_broll_explainer_preserves_asset(resolver, scene_base):
     payload = resolver.resolve(scene_base, direction)
     assert len(payload.asset_requirements) == 1
     assert payload.asset_requirements[0].kind == VisualAssetKind.BROLL
-    assert payload.inputs[TemplateInputKey.BODY] == scene_base.narration_excerpt
+    # Under P18-G1, BODY uses concise on_screen_text if distinct, not full narration
+    assert payload.inputs[TemplateInputKey.BODY] == scene_base.on_screen_text
+
+    # When on_screen_text is absent or equals narration, BODY is omitted
+    scene_base.on_screen_text = scene_base.narration_excerpt
+    payload_no_dup = resolver.resolve(scene_base, direction)
+    assert TemplateInputKey.BODY not in payload_no_dup.inputs
 
 
 def test_screenshot_focus_preserves_asset(resolver, scene_base):
     scene_base.visual_strategy = VisualStrategy.TITLE_MOTION
+    scene_base.on_screen_text = "Detailed screenshot preview"
     assets = [VisualAssetRequirement(kind=VisualAssetKind.SCREENSHOT, purpose="", query_hint="")]
     direction = VisualDirection(
         scene_index=1,
@@ -387,7 +400,7 @@ def test_screenshot_focus_preserves_asset(resolver, scene_base):
     payload = resolver.resolve(scene_base, direction)
     assert len(payload.asset_requirements) == 1
     assert payload.asset_requirements[0].kind == VisualAssetKind.SCREENSHOT
-    assert payload.inputs[TemplateInputKey.BODY] == scene_base.narration_excerpt
+    assert payload.inputs[TemplateInputKey.BODY] == "Detailed screenshot preview"
 
 
 def test_cta_resolves_text(resolver, scene_base):

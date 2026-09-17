@@ -14,6 +14,30 @@ from omega.application.visual_direction import (
     VisualTemplateId,
 )
 
+_INTERNAL_STRUCTURAL_EXACT = frozenset({
+    "hook",
+    "closing",
+    "cta",
+    "call to action",
+    "call-to-action",
+})
+
+_INTERNAL_STRUCTURAL_PATTERN = re.compile(
+    r"^(?:section|scene)\s*\d+$",
+    re.IGNORECASE,
+)
+
+
+def is_internal_structural_label(label: str | None) -> bool:
+    """Identify internal orchestration/structural planning labels that must not leak to viewers."""
+    if not label or not label.strip():
+        return True
+    cleaned = label.strip()
+    lower = cleaned.lower()
+    if lower in _INTERNAL_STRUCTURAL_EXACT:
+        return True
+    return bool(_INTERNAL_STRUCTURAL_PATTERN.match(cleaned))
+
 
 class TemplateEdge(BaseModel):
     model_config = ConfigDict(frozen=True)
@@ -78,7 +102,10 @@ class TemplatePayloadResolver:
             inputs=final_inputs,
             asset_requirements=tuple(direction.asset_requirements),
             motion_profile=direction.motion_profile,
-            metadata={}
+            metadata={
+                "visual_strategy": scene.visual_strategy.value,
+                "importance": scene.importance,
+            }
         )
 
     def _is_meaningful(self, val: Any) -> bool:
@@ -106,15 +133,19 @@ class TemplatePayloadResolver:
         os_text = meaningful_str(scene.on_screen_text)
         brief = meaningful_str(scene.visual_brief) or ""
 
+        viewer_title = None if is_internal_structural_label(sec_id) else sec_id
+
         if template_id == VisualTemplateId.HERO_TITLE:
-            if sec_id:
+            if viewer_title:
+                inputs[TemplateInputKey.TITLE] = viewer_title
+            elif sec_id and not is_internal_structural_label(sec_id):
                 inputs[TemplateInputKey.TITLE] = sec_id
-            if os_text:
+            if os_text and os_text.strip().lower() != narration.strip().lower():
                 inputs[TemplateInputKey.SUBTITLE] = os_text
 
         elif template_id == VisualTemplateId.FLOW_DIAGRAM:
-            if sec_id:
-                inputs[TemplateInputKey.TITLE] = sec_id
+            if viewer_title:
+                inputs[TemplateInputKey.TITLE] = viewer_title
 
             content = narration or os_text or brief
             nodes, edges = self._extract_diagram(content)
@@ -125,8 +156,8 @@ class TemplatePayloadResolver:
                 raise TemplatePayloadError("Could not extract at least two trustworthy diagram nodes.")
 
         elif template_id == VisualTemplateId.STATISTIC_HERO:
-            if sec_id:
-                inputs[TemplateInputKey.TITLE] = sec_id
+            if viewer_title:
+                inputs[TemplateInputKey.TITLE] = viewer_title
 
             content = narration or os_text or brief
             metric = self._extract_metric(content)
@@ -137,8 +168,8 @@ class TemplatePayloadResolver:
                 raise TemplatePayloadError("Could not extract a trustworthy metric.")
 
         elif template_id == VisualTemplateId.CODE_EDITOR:
-            if sec_id:
-                inputs[TemplateInputKey.TITLE] = sec_id
+            if viewer_title:
+                inputs[TemplateInputKey.TITLE] = viewer_title
 
             content = narration or os_text or brief
             code, lang = self._extract_code(content)
@@ -150,26 +181,29 @@ class TemplatePayloadResolver:
                 raise TemplatePayloadError("Could not extract trustworthy code.")
 
         elif template_id in (VisualTemplateId.IMAGE_EXPLAINER, VisualTemplateId.BROLL_EXPLAINER, VisualTemplateId.SCREENSHOT_FOCUS):
-            inputs[TemplateInputKey.BODY] = narration
-            if sec_id:
-                inputs[TemplateInputKey.TITLE] = sec_id
-            if os_text and os_text != narration:
-                inputs[TemplateInputKey.CAPTION] = os_text
+            if viewer_title:
+                inputs[TemplateInputKey.TITLE] = viewer_title
+            # G1A: BODY must NOT duplicate full spoken narration paragraph.
+            # Only use concise on_screen_text if present and distinct from narration.
+            if os_text and os_text.strip().lower() != narration.strip().lower():
+                inputs[TemplateInputKey.BODY] = os_text
+            elif template_id == VisualTemplateId.SCREENSHOT_FOCUS and narration:
+                inputs[TemplateInputKey.BODY] = narration
 
         elif template_id == VisualTemplateId.KINETIC_TEXT:
             inputs[TemplateInputKey.BODY] = os_text or narration
 
         elif template_id in (VisualTemplateId.INFOGRAPHIC, VisualTemplateId.COMPARISON, VisualTemplateId.TIMELINE, VisualTemplateId.LIST, VisualTemplateId.RECAP):
-            if sec_id:
-                inputs[TemplateInputKey.TITLE] = sec_id
+            if viewer_title:
+                inputs[TemplateInputKey.TITLE] = viewer_title
             items = self._extract_items(narration)
             if items:
                 inputs[TemplateInputKey.ITEMS] = items
 
         elif template_id == VisualTemplateId.CTA:
+            if viewer_title:
+                inputs[TemplateInputKey.TITLE] = viewer_title
             inputs[TemplateInputKey.CTA_TEXT] = os_text or narration
-            if sec_id:
-                inputs[TemplateInputKey.TITLE] = sec_id
 
         elif template_id == VisualTemplateId.NEWS_CARD:
             inputs[TemplateInputKey.HEADLINE] = os_text or self._first_sentence(narration)

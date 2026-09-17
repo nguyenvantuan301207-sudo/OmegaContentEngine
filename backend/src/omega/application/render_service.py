@@ -47,6 +47,7 @@ from omega.infrastructure.models import (
     ProductionRequest,
     ProductionRuntimeTruth,
     ProductionScene,
+    ScriptSection,
     ScriptVersion,
 )
 from omega.logging import get_logger
@@ -154,7 +155,9 @@ class ProductionRenderService:
                 ),
                 selectinload(ProductionRenderJob.production_request).selectinload(
                     ProductionRequest.script_version
-                ).selectinload(ScriptVersion.sections),
+                ).selectinload(ScriptVersion.sections).selectinload(
+                    ScriptSection.statements
+                ),
                 selectinload(ProductionRenderJob.production_request).selectinload(
                     ProductionRequest.content_request
                 ),
@@ -271,6 +274,17 @@ class ProductionRenderService:
                     "section_order": sec.section_order,
                     "heading": sec.heading,
                     "narration_text": sec.narration_text,
+                    "statements": [
+                        {
+                            "statement_order": statement.statement_order,
+                            "statement_text": statement.statement_text,
+                            "statement_type": statement.statement_type,
+                        }
+                        for statement in sorted(
+                            sec.statements,
+                            key=lambda item: item.statement_order,
+                        )
+                    ],
                 }
                 for sec in sorted(req.script_version.sections, key=lambda s: s.section_order)
             ] if req.script_version and getattr(req.script_version, "sections", None) else []

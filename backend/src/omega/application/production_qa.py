@@ -9,11 +9,62 @@ from omega.application.media_storage import compute_sha256
 from omega.application.production_runtime_truth import ProductionRuntimeTruthSnapshot
 from omega.domain.production import (
     LicenseStatus,
+    NarrationQuality,
     ProductionQAFinding,
     ProductionQARuleCode,
     ProductionQASeverity,
     ProductionQAStatus,
 )
+
+
+def _uses_development_fallback_narration(
+    assets_data: list[dict[str, Any]],
+) -> bool:
+    """Fail closed unless every rendered narration asset is explicitly neural."""
+    audio_assets = [
+        asset
+        for asset in assets_data
+        if str(asset.get("asset_type", "")).upper() == "AUDIO"
+    ]
+    return bool(audio_assets) and any(
+        str(asset.get("narration_quality") or "").strip().upper()
+        != NarrationQuality.NEURAL_PRODUCTION.value
+        for asset in audio_assets
+    )
+
+
+def _has_final_closing_statement(script_version_data: dict[str, Any]) -> bool:
+    """Return whether the final canonical script statement is a closing."""
+    sections = script_version_data.get("sections") or []
+    ordered_statements: list[tuple[int, int, str]] = []
+    for section_index, section in enumerate(sections):
+        section_order = section.get("section_order", section_index)
+        for statement_index, statement in enumerate(section.get("statements") or []):
+            statement_order = statement.get("statement_order", statement_index)
+            ordered_statements.append(
+                (
+                    int(section_order),
+                    int(statement_order),
+                    str(statement.get("statement_type") or "").strip().upper(),
+                )
+            )
+    return bool(ordered_statements) and max(ordered_statements)[2] == "CLOSING"
+
+
+def _has_runtime_closing_scene(scenes_data: list[dict[str, Any]] | None) -> bool:
+    """Return whether the final runtime scene carries canonical CLOSING semantics."""
+    if not scenes_data:
+        return False
+    final_scene = max(
+        scenes_data,
+        key=lambda scene: int(scene.get("sequence_index") or 0),
+    )
+    raw_types = final_scene.get("statement_types") or []
+    if isinstance(raw_types, str):
+        raw_types = [raw_types]
+    return "CLOSING" in {
+        str(statement_type).strip().upper() for statement_type in raw_types
+    }
 
 
 def _runtime_value(value: Any, name: str, default: Any = None) -> Any:
@@ -514,12 +565,7 @@ class ProductionQAEngine:
             )
 
         # ── QA V2: ROBOTIC_FALLBACK_TTS (WARNING) ──
-        is_fallback_tts = any(
-            str(a.get("narration_quality", "")).upper() == "DEVELOPMENT_FALLBACK"
-            or "Local TTS" in str(a.get("source_ref", ""))
-            for a in assets_data
-            if str(a.get("asset_type", "")).upper() == "AUDIO"
-        )
+        is_fallback_tts = _uses_development_fallback_narration(assets_data)
         if is_fallback_tts:
             findings.append(
                 ProductionQAFinding(
@@ -592,10 +638,14 @@ class ProductionQAEngine:
         if script_version_data:
             has_hook_field = "hook_text" in script_version_data
             has_cta_field = "cta_text" in script_version_data
+            has_closing_field = "closing_text" in script_version_data
             has_sections_field = "sections" in script_version_data
 
             hook_text = str(script_version_data.get("hook_text") or "").strip()
             cta_text = str(script_version_data.get("cta_text") or "").strip()
+            closing_text = str(
+                script_version_data.get("closing_text") or ""
+            ).strip()
             headings = [
                 str(s.get("heading", "")).lower()
                 for s in script_version_data.get("sections", [])
@@ -612,14 +662,28 @@ class ProductionQAEngine:
                         )
                     )
 
-            if has_cta_field or has_sections_field:
-                has_outro = bool(cta_text) or any("recap" in h or "outro" in h for h in headings)
+            if (
+                has_cta_field
+                or has_closing_field
+                or has_sections_field
+                or scenes_data is not None
+            ):
+                has_outro = (
+                    bool(closing_text)
+                    or bool(cta_text)
+                    or _has_final_closing_statement(script_version_data)
+                    or _has_runtime_closing_scene(scenes_data)
+                    or any("recap" in h or "outro" in h for h in headings)
+                )
                 if not has_outro:
                     findings.append(
                         ProductionQAFinding(
                             rule_code=ProductionQARuleCode.MISSING_OUTRO,
                             severity=ProductionQASeverity.WARNING,
-                            message="Script is missing a CTA or outro/recap section.",
+                            message=(
+                                "Script is missing canonical closing content, a CTA, "
+                                "or an outro/recap section."
+                            ),
                         )
                     )
 

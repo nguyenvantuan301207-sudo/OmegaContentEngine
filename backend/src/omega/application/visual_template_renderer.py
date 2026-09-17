@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from omega.application.scene_template_registry import SceneTemplateRegistry, TemplateInputKey
+from omega.application.subtitle_engine import CANONICAL_SUBTITLE_SAFE_BOTTOM_PX
 from omega.application.template_payload_resolver import TemplatePayload
 from omega.application.text_fitting import TextFittingDecision, fit_text
 from omega.application.visual_asset_binding import (
@@ -523,12 +524,17 @@ class VisualTemplateRenderer:
         if bound_asset.mime_type not in allowed_mimes:
             raise VisualTemplateRenderError("Invalid image MIME for IMAGE_EXPLAINER")
 
-        raw_body = payload.inputs[TemplateInputKey.BODY]
-        body = html.escape(raw_body)
+        raw_body = payload.inputs.get(TemplateInputKey.BODY)
         title = payload.inputs.get(TemplateInputKey.TITLE)
         caption = payload.inputs.get(TemplateInputKey.CAPTION)
 
-        semantic_ids = ["scene-root", "image-body", "image-frame"]
+        semantic_ids = ["scene-root", "image-frame"]
+
+        body_html = ""
+        if raw_body:
+            esc_body = html.escape(raw_body)
+            body_html = f'<div id="image-body" class="image-body">{esc_body}</div>'
+            semantic_ids.append("image-body")
 
         title_html = ""
         if title:
@@ -550,7 +556,7 @@ class VisualTemplateRenderer:
 
         content = f"""
         <style>
-        .split-container {{ display: flex; height: 100%; width: 100%; gap: 60px; }}
+        .split-container {{ display: flex; height: 100%; width: 100%; gap: 60px; padding-bottom: {CANONICAL_SUBTITLE_SAFE_BOTTOM_PX}px; box-sizing: border-box; }}
         .split-text {{ flex: 1; display: flex; flex-direction: column; justify-content: center; max-width: 50%; }}
         .image-title {{ font-size: 32px; font-weight: 600; color: var(--accent); margin-bottom: 40px; letter-spacing: 0.05em; text-transform: uppercase; }}
         .image-body {{ font-size: 48px; line-height: 1.4; color: var(--text-primary); margin-bottom: 30px; word-wrap: break-word; }}
@@ -562,7 +568,7 @@ class VisualTemplateRenderer:
         <div class="split-container">
             <div class="split-text">
                 {title_html}
-                <div id="image-body" class="image-body">{body}</div>
+                {body_html}
                 {caption_html}
             </div>
             <div class="split-media">
@@ -591,12 +597,17 @@ class VisualTemplateRenderer:
         if bound_asset.mime_type != "video/mp4":
             raise VisualTemplateRenderError("Invalid BROLL asset for BROLL_EXPLAINER")
 
-        raw_body = payload.inputs[TemplateInputKey.BODY]
-        body = html.escape(raw_body)
+        raw_body = payload.inputs.get(TemplateInputKey.BODY)
         title = payload.inputs.get(TemplateInputKey.TITLE)
         caption = payload.inputs.get(TemplateInputKey.CAPTION)
 
-        semantic_ids = ["scene-root", "broll-scrim", "broll-body"]
+        semantic_ids = ["scene-root", "broll-scrim"]
+
+        body_html = ""
+        if raw_body:
+            esc_body = html.escape(raw_body)
+            body_html = f'<div id="broll-body" data-motion-role="broll-body" class="broll-body">{esc_body}</div>'
+            semantic_ids.append("broll-body")
 
         title_html = ""
         if title:
@@ -636,8 +647,8 @@ class VisualTemplateRenderer:
             position: relative;
             z-index: 2;
             max-width: 1100px;
-            margin-bottom: 40px;
-            margin-left: 20px;
+            margin-bottom: {CANONICAL_SUBTITLE_SAFE_BOTTOM_PX}px;
+            margin-left: 80px;
         }}
         .broll-title {{
             font-size: 36px;
@@ -670,7 +681,7 @@ class VisualTemplateRenderer:
             <div id="broll-scrim" data-motion-role="broll-scrim" class="broll-scrim"></div>
             <div class="broll-content">
                 {title_html}
-                <div id="broll-body" data-motion-role="broll-body" class="broll-body">{body}</div>
+                {body_html}
                 {caption_html}
             </div>
         </div>
@@ -753,7 +764,7 @@ class VisualTemplateRenderer:
 
         content = f"""
         <style>
-        .cta-container {{ display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 0 100px; box-sizing: border-box; }}
+        .cta-container {{ display: flex; flex-direction: column; justify-content: center; align-items: center; height: 100%; width: 100%; padding: 0 100px {CANONICAL_SUBTITLE_SAFE_BOTTOM_PX}px 100px; box-sizing: border-box; }}
         .cta-accent {{ width: 120px; height: 8px; background-color: var(--accent); border-radius: 4px; margin-bottom: 40px; }}
         .cta-title {{ font-size: 64px; font-weight: 700; color: var(--text-primary); margin-bottom: 40px; text-align: center; word-wrap: break-word; }}
         .cta-text {{ font-size: 48px; font-weight: 600; color: var(--bg); background-color: var(--accent); padding: 24px 64px; border-radius: 40px; text-align: center; display: inline-block; box-shadow: 0 20px 40px rgba(59, 130, 246, 0.4); word-wrap: break-word; }}

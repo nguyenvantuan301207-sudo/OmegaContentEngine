@@ -15,6 +15,8 @@ from omega.domain.production import (
     LicenseStatus,
 )
 
+CANONICAL_SUBTITLE_SAFE_BOTTOM_PX: int = 240
+
 
 class SubtitleRenderStyle(BaseModel):
     """Canonical render-time subtitle controls supported by the ASS pipeline."""
@@ -94,7 +96,7 @@ def _layout_karaoke_words(
     lines: list[list[dict[str, Any]]] = []
 
     while resolved_size >= style.min_font_size:
-        chars_per_line = max(8, int((width * style.max_width_ratio) / (resolved_size * 0.58)))
+        chars_per_line = min(55, max(8, int((width * style.max_width_ratio) / (resolved_size * 0.58))))
         candidate: list[list[dict[str, Any]]] = [[]]
         current_chars = 0
         for word in safe_words:
@@ -116,7 +118,7 @@ def _layout_karaoke_words(
         resolved_size -= 2
 
     resolved_size = style.min_font_size
-    chars_per_line = max(8, int((width * style.max_width_ratio) / (resolved_size * 0.58)))
+    chars_per_line = min(55, max(8, int((width * style.max_width_ratio) / (resolved_size * 0.58))))
     token_truncated = False
     for line in lines:
         for word in line:
@@ -178,6 +180,9 @@ def generate_karaoke_cues(
     max_chars_per_cue: int = 36,
     sentence_mode: bool = False,
 ) -> list[dict[str, Any]]:
+    effective_max_words = 12 if sentence_mode and max_words_per_cue == 5 else max_words_per_cue
+    effective_max_chars = 50 if sentence_mode and max_chars_per_cue == 36 else max_chars_per_cue
+
     cues = []
     cue_order = 1
     previous_end_ms = -1
@@ -245,13 +250,17 @@ def generate_karaoke_cues(
                 is_last_word = idx == len(words) - 1
                 is_sentence_end = any(w.endswith(p) for p in [".", "!", "?"])
                 is_clause_end = any(w.endswith(p) for p in [",", ";", ":", "—"])
-                too_many_words = len(current_cue_words) >= max_words_per_cue
-                too_many_chars = current_chars >= max_chars_per_cue
+                too_many_words = len(current_cue_words) >= effective_max_words
+                too_many_chars = current_chars >= effective_max_chars
+
+                next_word_len = len(words[idx + 1]) if idx + 1 < len(words) else 0
+                will_overflow_chars = (current_chars + 1 + next_word_len) > effective_max_chars
 
                 should_split = not is_last_word and (
                     is_sentence_end
                     or ((too_many_words or too_many_chars) and is_clause_end)
-                    or len(current_cue_words) >= max_words_per_cue + 4
+                    or will_overflow_chars
+                    or len(current_cue_words) >= effective_max_words + 4
                 )
 
                 if should_split and current_cue_words:
@@ -307,8 +316,8 @@ def generate_karaoke_cues(
 def generate_sentence_cues(
     segments: list[dict[str, Any]],
     *,
-    max_words_per_cue: int = 16,
-    max_chars_per_cue: int = 80,
+    max_words_per_cue: int = 12,
+    max_chars_per_cue: int = 50,
 ) -> list[dict[str, Any]]:
     """Generate full-sentence / full-cue subtitle cues from narration segments.
 

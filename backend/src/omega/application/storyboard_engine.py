@@ -144,7 +144,9 @@ class StoryboardEngine:
 
         refs = [s.get("statement_order", 0) for s in statements]
 
-        raw_strategy = self._select_strategy(narration, word_count, is_first, is_last)
+        raw_strategy = self._select_strategy(
+            narration, word_count, is_first, is_last, statements=statements
+        )
         strategy = self._enforce_variety_rules(raw_strategy, history)
 
         purpose = f"Illustrate {section_heading}"
@@ -213,11 +215,23 @@ class StoryboardEngine:
             citations=citations
         )
 
-    def _select_strategy(self, narration: str, word_count: int, is_first: bool, is_last: bool) -> VisualStrategy:
+    def _select_strategy(
+        self,
+        narration: str,
+        word_count: int,
+        is_first: bool,
+        is_last: bool,
+        statements: list[dict[str, Any]] | None = None,
+    ) -> VisualStrategy:
         if is_first:
             return VisualStrategy.TITLE_MOTION
         if is_last:
-            return VisualStrategy.CTA
+            has_cta = any(
+                str(s.get("statement_type", "")).strip().upper() == "CTA"
+                for s in (statements or [])
+            )
+            if has_cta:
+                return VisualStrategy.CTA
 
         n_lower = narration.lower()
 

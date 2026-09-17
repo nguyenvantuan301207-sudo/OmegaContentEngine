@@ -26,7 +26,10 @@ from omega.application.brand_asset_resolver import (
     BrandMediaKind,
     ResolvedBrandAsset,
 )
-from omega.application.ffmpeg_renderer import FFmpegRenderer
+from omega.application.ffmpeg_renderer import (
+    FINAL_MASTER_SAMPLE_RATE_HZ,
+    FFmpegRenderer,
+)
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.narration_provider import NarrationProvider
 from omega.application.production_contract import (
@@ -50,9 +53,9 @@ from omega.application.visual_asset_engine import VisualAssetEngine, VisualAsset
 from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import VisualAssetKind, VisualDirector
 from omega.application.visual_template_renderer import VisualTemplateRenderer
+from omega.domain.attribution_delivery import AttributionDeliveryChannel
 from omega.domain.channel_dna import BrandFormat, resolve_production_brand_spec
 from omega.domain.channel_style import ChannelStyleProfile, extract_channel_style_profile
-from omega.domain.attribution_delivery import AttributionDeliveryChannel
 from omega.domain.production import (
     SubtitleFallbackPolicy,
     SubtitleMode,
@@ -153,13 +156,46 @@ class VerticalSliceError(Exception):
 
 
 KARAOKE_SUBTITLE_VERSION = "v1"
-SUBTITLE_SEMANTICS_VERSION = 2
+SUBTITLE_SEMANTICS_VERSION = 3
+CANONICAL_RENDER_SEMANTICS_VERSION = 2
+FINAL_MASTER_TARGET_I = -16.0
+FINAL_MASTER_TARGET_TP = -1.5
+FINAL_MASTER_TARGET_LRA = 7.0
 KARAOKE_MAX_WORDS_PER_CUE = 5
 KARAOKE_MAX_CHARS_PER_CUE = 36
-SENTENCE_MAX_WORDS_PER_CUE = 16
-SENTENCE_MAX_CHARS_PER_CUE = 80
+SENTENCE_MAX_WORDS_PER_CUE = 12
+SENTENCE_MAX_CHARS_PER_CUE = 50
 
 VISUAL_DIRECTOR_VERSION = "v2"
+
+
+def _canonical_render_semantics_identity(
+    *,
+    render_semantics_version: int | None = None,
+    target_i: float | None = None,
+    target_tp: float | None = None,
+    target_lra: float | None = None,
+    sample_rate_hz: int | None = None,
+) -> str:
+    """Return deterministic physical-output semantics included in cache identity."""
+    render_semantics_version = (
+        CANONICAL_RENDER_SEMANTICS_VERSION
+        if render_semantics_version is None
+        else render_semantics_version
+    )
+    target_i = FINAL_MASTER_TARGET_I if target_i is None else target_i
+    target_tp = FINAL_MASTER_TARGET_TP if target_tp is None else target_tp
+    target_lra = FINAL_MASTER_TARGET_LRA if target_lra is None else target_lra
+    sample_rate_hz = (
+        FINAL_MASTER_SAMPLE_RATE_HZ
+        if sample_rate_hz is None
+        else sample_rate_hz
+    )
+    return (
+        f"canonical-render-semantics-v{render_semantics_version}:"
+        f"mastering-policy-v1:i={target_i:.1f}:tp={target_tp:.1f}:"
+        f"lra={target_lra:.1f}:sample_rate={sample_rate_hz}"
+    )
 
 
 def _has_current_subtitle_semantics_version(manifest: dict[str, Any]) -> bool:
@@ -271,6 +307,32 @@ def _validate_cached_subtitle_semantics(
                 and manifest.get("subtitle_burn_applied") is False
             )
         )
+    )
+
+
+def _validate_cached_render_semantics(
+    *,
+    manifest: dict[str, Any],
+    canonical_requested_mode: SubtitleMode,
+    fallback_policy: SubtitleFallbackPolicy,
+) -> bool:
+    """Validate all versioned physical-output semantics for cache reuse."""
+    render_version = manifest.get("canonical_render_semantics_version")
+    if (
+        type(render_version) is not int
+        or render_version != CANONICAL_RENDER_SEMANTICS_VERSION
+    ):
+        return False
+    sample_rate_hz = manifest.get("final_master_sample_rate_hz")
+    if (
+        type(sample_rate_hz) is not int
+        or sample_rate_hz != FINAL_MASTER_SAMPLE_RATE_HZ
+    ):
+        return False
+    return _validate_cached_subtitle_semantics(
+        manifest=manifest,
+        canonical_requested_mode=canonical_requested_mode,
+        fallback_policy=fallback_policy,
     )
 
 
@@ -554,11 +616,12 @@ class ScriptStoryboardAdapter:
         ).strip()
         cta_text = str(getattr(script_version, "cta_text", None) or "").strip()
         if hook_text:
+            hook_heading = str(getattr(script_version, "title", None) or "").strip() or "Introduction"
             sections_data.insert(
                 0,
                 {
                     "section_order": -1,
-                    "heading": "Hook",
+                    "heading": hook_heading,
                     "narration_text": hook_text,
                     "estimated_duration_seconds": None,
                     "statements": [
@@ -996,6 +1059,7 @@ class VisualProductionV2Service:
             f"subtitle-semantics-v{SUBTITLE_SEMANTICS_VERSION}:"
             f"runtime-truth-v{RUNTIME_TRUTH_SCHEMA_VERSION}"
         )
+        fingerprint_input += f":{_canonical_render_semantics_identity()}"
         if style_profile:
             fingerprint_input += f":style-profile-v1:{style_profile.model_dump_json()}"
         if resolved_brand.identity is not None:
@@ -1090,7 +1154,7 @@ class VisualProductionV2Service:
                     cached_manifest = json.load(f)
             except (OSError, json.JSONDecodeError):
                 break
-            if _validate_cached_subtitle_semantics(
+            if _validate_cached_render_semantics(
                 manifest=cached_manifest,
                 canonical_requested_mode=canonical_sub_mode,
                 fallback_policy=canonical_sub_fallback,
@@ -2043,6 +2107,25 @@ class VisualProductionV2Service:
             else:
                 working_final_mp4 = working_content_mp4
 
+            # Master audio loudness normalization (P18-G1)
+            # Normalized EXACTLY ONCE on final master after scene concatenation
+            # and optional audio mixing/branding, but before artifact hashing.
+            if self._narration_provider or audio_mix_enabled:
+                normalized_master_mp4 = work_dir / "final_normalized.mp4"
+                try:
+                    await self._ffmpeg_renderer.normalize_master_audio(
+                        video_path=working_final_mp4,
+                        output_path=normalized_master_mp4,
+                        target_i=FINAL_MASTER_TARGET_I,
+                        target_tp=FINAL_MASTER_TARGET_TP,
+                        target_lra=FINAL_MASTER_TARGET_LRA,
+                        sample_rate_hz=FINAL_MASTER_SAMPLE_RATE_HZ,
+                    )
+                except Exception as e:
+                    raise VerticalSliceError(f"Master audio normalization failed: {self._sanitize_error(e)}") from e
+                if normalized_master_mp4.is_file() and normalized_master_mp4.stat().st_size > 0:
+                    working_final_mp4 = normalized_master_mp4
+
             final_sha = self._compute_streaming_sha(working_final_mp4)
             working_final_mp4.replace(final_mp4_path)
 
@@ -2073,6 +2156,10 @@ class VisualProductionV2Service:
                 "run_fingerprint": run_fingerprint,
                 "runtime_truth_schema_version": RUNTIME_TRUTH_SCHEMA_VERSION,
                 "subtitle_semantics_version": SUBTITLE_SEMANTICS_VERSION,
+                "canonical_render_semantics_version": (
+                    CANONICAL_RENDER_SEMANTICS_VERSION
+                ),
+                "final_master_sample_rate_hz": FINAL_MASTER_SAMPLE_RATE_HZ,
                 "visual_asset_mode": canonical_visual_mode,
                 "scene_artifacts_version": "v1",
                 "resolved_brand_spec": resolved_brand.model_dump(mode="json"),

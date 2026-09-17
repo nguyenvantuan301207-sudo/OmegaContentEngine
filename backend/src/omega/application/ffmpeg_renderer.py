@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_RENDER_TIMEOUT_SECONDS = 180
+FINAL_MASTER_SAMPLE_RATE_HZ = 48_000
 
 
 class FFmpegExecutionError(RuntimeError):
@@ -527,3 +528,82 @@ class FFmpegRenderer:
 
         if not out_p.is_file() or out_p.stat().st_size == 0:
             raise FFmpegExecutionError(f"FFmpeg master mix succeeded but output is missing or empty: {out_p}")
+
+    async def normalize_master_audio(
+        self,
+        video_path: Path | str,
+        output_path: Path | str,
+        *,
+        target_i: float = -16.0,
+        target_tp: float = -1.5,
+        target_lra: float = 7.0,
+        audio_codec: str = "aac",
+        audio_bitrate: str = "192k",
+        sample_rate_hz: int = FINAL_MASTER_SAMPLE_RATE_HZ,
+        timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
+    ) -> None:
+        """Normalize master audio using FFmpeg loudnorm filter with stream-copied video.
+
+        Target delivery defaults:
+        - target_i: -16.0 LUFS (OMEGA narration-first baseline delivery target)
+        - target_tp: -1.5 dBTP (True peak ceiling)
+        - target_lra: 7.0 LU (Loudness Range target)
+        - sample_rate_hz: 48000 Hz (viewer-facing AAC distribution master)
+        """
+        in_p = Path(video_path).resolve()
+        if not in_p.is_file() or in_p.stat().st_size == 0:
+            raise ValueError(f"Input video missing or empty for audio normalization: {in_p}")
+
+        out_p = Path(output_path).resolve()
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+
+        loudnorm_filter = (
+            f"loudnorm=I={target_i:.1f}:TP={target_tp:.1f}:LRA={target_lra:.1f}:linear=true"
+        )
+
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(in_p),
+            "-c:v",
+            "copy",
+            "-af",
+            loudnorm_filter,
+            "-c:a",
+            audio_codec,
+            "-b:a",
+            audio_bitrate,
+            "-ar",
+            str(sample_rate_hz),
+            str(out_p),
+        ]
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+        except TimeoutError as exc:
+            proc.kill()
+            await proc.wait()
+            raise FFmpegExecutionError(
+                f"FFmpeg master audio normalization timed out after {timeout_seconds}s."
+            ) from exc
+
+        if proc.returncode != 0:
+            err_msg = (
+                stderr.decode("utf-8", errors="replace")[-500:]
+                if stderr
+                else "Unknown error"
+            )
+            raise FFmpegExecutionError(
+                f"FFmpeg master audio normalization failed (code {proc.returncode}): {err_msg}"
+            )
+
+        if not out_p.is_file() or out_p.stat().st_size == 0:
+            raise FFmpegExecutionError(
+                f"FFmpeg master audio normalization succeeded but output missing or empty: {out_p}"
+            )

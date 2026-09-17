@@ -24,7 +24,8 @@ def test_storyboard_engine_longform():
 
     # Check opening and ending
     assert plan.scenes[0].visual_strategy == VisualStrategy.TITLE_MOTION
-    assert plan.scenes[-1].visual_strategy == VisualStrategy.CTA
+    # Documentary script without explicit CTA statements must NOT default to CTA
+    assert plan.scenes[-1].visual_strategy != VisualStrategy.CTA
 
     strategies = [s.visual_strategy for s in plan.scenes]
 
@@ -56,8 +57,17 @@ def test_storyboard_engine_longform():
 def test_storyboard_engine_routing_v2():
     engine = StoryboardEngine()
 
-    def check_strat(narration: str, expected: VisualStrategy, word_count: int = 20, is_first: bool = False, is_last: bool = False):
-        strat = engine._select_strategy(narration, word_count, is_first, is_last)
+    def check_strat(
+        narration: str,
+        expected: VisualStrategy,
+        word_count: int = 20,
+        is_first: bool = False,
+        is_last: bool = False,
+        statements: list[dict] | None = None,
+    ):
+        strat = engine._select_strategy(
+            narration, word_count, is_first, is_last, statements=statements
+        )
         assert strat == expected, f"Expected {expected} for '{narration}', got {strat}"
 
     # A. Code signal
@@ -77,8 +87,20 @@ def test_storyboard_engine_routing_v2():
     # E. KINETIC_TEXT fallback for short punchy text
     check_strat("Short text.", VisualStrategy.KINETIC_TEXT, word_count=2)
 
-    # F. CTA for last scene
-    check_strat("Subscribe now.", VisualStrategy.CTA, is_last=True)
+    # F. CTA only when explicit CTA statement exists
+    check_strat(
+        "Subscribe now.",
+        VisualStrategy.CTA,
+        is_last=True,
+        statements=[{"statement_type": "CTA", "statement_text": "Subscribe now."}],
+    )
+    # Closing-only without CTA statement passes to normal visual strategy (not CTA)
+    check_strat(
+        "In the real world, this looks beautiful.",
+        VisualStrategy.BROLL,
+        is_last=True,
+        statements=[{"statement_type": "CLOSING", "statement_text": "In the real world, this looks beautiful."}],
+    )
 
     # G. TITLE_MOTION for first scene
     check_strat("Welcome.", VisualStrategy.TITLE_MOTION, is_first=True)
