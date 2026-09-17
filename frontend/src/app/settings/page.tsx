@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getSystemInfo, getSystemStatus, getTTSCapability, type SystemInfo, type SystemStatus, type TTSCapability } from "@/lib/api";
 import { useOperatorContext } from "@/lib/operator-context";
-import { DEFAULT_PREFERENCES, persistPreferences, readPreferences, type LocalPreferences } from "@/lib/preferences";
+import { DEFAULT_PREFERENCES, persistPreferences, PREFERENCES_EVENT, readPreferences, type LocalPreferences } from "@/lib/preferences";
 import { Alert, StatusBadge } from "@/components/ui";
 
 type Section = "general" | "appearance" | "workspace" | "providers" | "production" | "guardian" | "publishing" | "cost" | "privacy" | "developer" | "language" | "notifications";
@@ -62,7 +62,14 @@ export default function SettingsPage() {
   const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
   const [ttsCapability, setTtsCapability] = useState<TTSCapability | null>(null);
 
-  useEffect(() => { setPrefs(readPreferences()); }, []);
+  useEffect(() => {
+    setPrefs(readPreferences());
+    const handlePrefs = () => {
+      setPrefs(readPreferences());
+    };
+    window.addEventListener(PREFERENCES_EVENT, handlePrefs);
+    return () => window.removeEventListener(PREFERENCES_EVENT, handlePrefs);
+  }, []);
   useEffect(() => {
     void Promise.allSettled([getSystemInfo(), getSystemStatus(), getTTSCapability()]).then(([info, status, tts]) => {
       if (info.status === "fulfilled") setSystemInfo(info.value);
@@ -72,7 +79,10 @@ export default function SettingsPage() {
   }, []);
 
   const updatePref = <K extends keyof LocalPreferences>(key: K, value: LocalPreferences[K]) => {
-    const updated = { ...prefs, [key]: value };
+    const updated: LocalPreferences = {
+      ...readPreferences(),
+      [key]: value,
+    };
     setPrefs(updated);
     persistPreferences(updated);
     setNotice("Preference applied and saved in this browser");

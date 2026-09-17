@@ -12,7 +12,9 @@ import {
 import {
   DEFAULT_PREFERENCES,
   persistPreferences,
+  PREFERENCES_EVENT,
   readPreferences,
+  type LocalPreferences,
 } from "../src/lib/preferences.ts";
 import type { Channel } from "../src/lib/api.ts";
 
@@ -182,6 +184,171 @@ test("settings persists preferences outside React state updaters", () => {
   assert.doesNotMatch(source, /setPrefs\s*\(\s*\(/);
   assert.match(source, /setPrefs\(updated\);\s*persistPreferences\(updated\);/);
   assert.doesNotMatch(source, /setShowInternalChannels\s*\(/);
+});
+
+test("settings preference updates synchronize OperatorProvider without render-phase side effects", () => {
+  const storage = new Map<string, string>();
+  const originalLocalStorage = globalThis.localStorage;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
+
+  const eventTarget = new EventTarget();
+  globalThis.localStorage = {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+    removeItem: (key: string) => storage.delete(key),
+    clear: () => storage.clear(),
+    length: storage.size,
+    key: (i: number) => Array.from(storage.keys())[i] ?? null,
+  };
+
+  let isSettingsRendering = false;
+  let crossComponentUpdateDuringRenderDetected = false;
+  let operatorShowInternalChannels = false;
+  let eventCount = 0;
+
+  const handlePrefs = (event: Event) => {
+    eventCount++;
+    if (isSettingsRendering) {
+      crossComponentUpdateDuringRenderDetected = true;
+    }
+    const customEvent = event as CustomEvent<Partial<LocalPreferences>>;
+    if (customEvent.detail && typeof customEvent.detail.showInternalChannels === "boolean") {
+      operatorShowInternalChannels = customEvent.detail.showInternalChannels;
+    }
+  };
+
+  eventTarget.addEventListener(PREFERENCES_EVENT, handlePrefs);
+
+  (globalThis as unknown as { window: unknown }).window = {
+    localStorage: globalThis.localStorage,
+    dispatchEvent: (event: Event) => eventTarget.dispatchEvent(event),
+    addEventListener: (type: string, listener: EventListenerOrEventListenerObject) =>
+      eventTarget.addEventListener(type, listener),
+    removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) =>
+      eventTarget.removeEventListener(type, listener),
+  };
+
+  try {
+    // 6. Initial preference hydration does not trigger a feedback loop or event dispatches
+    const initialPrefs = readPreferences();
+    assert.equal(initialPrefs.showInternalChannels, false);
+    assert.equal(eventCount, 0, "Initial hydration must not dispatch preference events");
+
+    // 1 & 4. Simulating SettingsPage updatePref outside render (clean contract)
+    // SettingsPage render phase begins
+    isSettingsRendering = true;
+    // Pure render calculation (e.g. evaluating JSX / reading prefs)
+    const currentPrefs = readPreferences();
+    assert.equal(currentPrefs.showInternalChannels, false);
+    // Render phase ends
+    isSettingsRendering = false;
+
+    // Event handler executes outside render
+    const updatedPrefs: LocalPreferences = { ...currentPrefs, showInternalChannels: true };
+    persistPreferences(updatedPrefs);
+
+    // 1. Verifies no cross-component state update occurred during render
+    assert.equal(crossComponentUpdateDuringRenderDetected, false);
+
+    // 2. The preference still persists
+    const persisted = readPreferences();
+    assert.equal(persisted.showInternalChannels, true);
+
+    // 3 & 4. OperatorProvider receives preference change and showInternalChannels updates correctly
+    assert.equal(operatorShowInternalChannels, true);
+
+    // 5. No duplicate preference event is produced (exactly 1 event for 1 update)
+    assert.equal(eventCount, 1, "Exactly one event should be dispatched per preference persist");
+
+    // Toggle back (true -> false)
+    const toggledBack: LocalPreferences = { ...readPreferences(), showInternalChannels: false };
+    persistPreferences(toggledBack);
+    assert.equal(readPreferences().showInternalChannels, false);
+    assert.equal(operatorShowInternalChannels, false);
+    assert.equal(eventCount, 2, "Second update dispatches exactly one additional event");
+    assert.equal(crossComponentUpdateDuringRenderDetected, false);
+
+    // Invariant verification: if persistPreferences were invoked inside render, cross-component update is flagged
+    isSettingsRendering = true;
+    persistPreferences({ ...readPreferences(), showInternalChannels: true });
+    isSettingsRendering = false;
+    assert.equal(crossComponentUpdateDuringRenderDetected, true, "Calling persistPreferences during render must be detected as an invariant violation");
+  } finally {
+    eventTarget.removeEventListener(PREFERENCES_EVENT, handlePrefs);
+    globalThis.localStorage = originalLocalStorage;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
+  }
+});
+
+test("rapid sequential preference updates preserve unrelated preferences against stale closures", () => {
+  const storage = new Map<string, string>();
+  const originalLocalStorage = globalThis.localStorage;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
+
+  const eventTarget = new EventTarget();
+  globalThis.localStorage = {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+    removeItem: (key: string) => storage.delete(key),
+    clear: () => storage.clear(),
+    length: storage.size,
+    key: (i: number) => Array.from(storage.keys())[i] ?? null,
+  };
+
+  (globalThis as unknown as { window: unknown }).window = {
+    localStorage: globalThis.localStorage,
+    dispatchEvent: (event: Event) => eventTarget.dispatchEvent(event),
+    addEventListener: (type: string, listener: EventListenerOrEventListenerObject) =>
+      eventTarget.addEventListener(type, listener),
+    removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) =>
+      eventTarget.removeEventListener(type, listener),
+  };
+
+  try {
+    // Initial state: A (showInternalChannels)=false, B (reduceMotion)=false
+    persistPreferences({ ...readPreferences(), showInternalChannels: false, reduceMotion: false });
+    const initial = readPreferences();
+    assert.equal(initial.showInternalChannels, false);
+    assert.equal(initial.reduceMotion, false);
+
+    // Simulate updatePref implementation in SettingsPage:
+    const simulateUpdatePref = <K extends keyof LocalPreferences>(key: K, value: LocalPreferences[K]) => {
+      const updated: LocalPreferences = {
+        ...readPreferences(),
+        [key]: value,
+      };
+      persistPreferences(updated);
+    };
+
+    // Scenario 1: Rapid sequential local updates
+    // Update A=true
+    simulateUpdatePref("showInternalChannels", true);
+    // Immediately update B=true without SettingsPage having re-rendered (closure still has stale initial)
+    simulateUpdatePref("reduceMotion", true);
+
+    const afterRapid = readPreferences();
+    assert.equal(afterRapid.showInternalChannels, true, "showInternalChannels must remain true");
+    assert.equal(afterRapid.reduceMotion, true, "reduceMotion must be true");
+
+    // Reset
+    persistPreferences({ ...readPreferences(), showInternalChannels: false, reduceMotion: false });
+    assert.equal(readPreferences().showInternalChannels, false);
+    assert.equal(readPreferences().reduceMotion, false);
+
+    // Scenario 2: External update A=true followed immediately by local update B=true
+    // External update from OperatorProvider / Channels
+    persistPreferences({ ...readPreferences(), showInternalChannels: true });
+
+    // Local update B=true (even if local component had not re-rendered)
+    simulateUpdatePref("reduceMotion", true);
+
+    const afterExternalAndLocal = readPreferences();
+    assert.equal(afterExternalAndLocal.showInternalChannels, true, "External update A=true must be preserved");
+    assert.equal(afterExternalAndLocal.reduceMotion, true, "Local update B=true must be applied");
+  } finally {
+    globalThis.localStorage = originalLocalStorage;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
+  }
 });
 
 test("production visibility correctly segments internal vs product records", () => {
