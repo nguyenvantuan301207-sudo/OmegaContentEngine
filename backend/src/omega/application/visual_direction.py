@@ -77,16 +77,30 @@ _STRATEGY_MAPPING = {
 }
 
 
+def map_visual_strategy(
+    strategy: VisualStrategy,
+) -> tuple[VisualRenderMode, VisualTemplateId, str, str]:
+    """Map a VisualStrategy to its canonical render mode, template ID, motion profile, and rationale."""
+    if strategy not in _STRATEGY_MAPPING:
+        raise VisualDirectionError(f"Unsupported VisualStrategy: {strategy}")
+    return _STRATEGY_MAPPING[strategy]
+
+
+def is_meaningful_query(hint: str | None) -> bool:
+    """Check if an asset query hint contains meaningful semantic text."""
+    if not hint:
+        return False
+    clean = hint.strip().lower()
+    if not clean:
+        return False
+    if "abstract technology background" in clean:
+        return False
+    return clean not in ["placeholder", "generic"]
+
+
 class VisualDirector:
     def _is_meaningful_query(self, hint: str | None) -> bool:
-        if not hint:
-            return False
-        clean = hint.strip().lower()
-        if not clean:
-            return False
-        if "abstract technology background" in clean:
-            return False
-        return clean not in ["placeholder", "generic"]
+        return is_meaningful_query(hint)
 
     def _resolve_query_hint(self, scene: StoryboardScene) -> str | None:
         if self._is_meaningful_query(scene.asset_query_hint):
