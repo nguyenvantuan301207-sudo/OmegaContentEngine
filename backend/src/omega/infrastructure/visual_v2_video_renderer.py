@@ -7,7 +7,14 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict
 
+from omega.application.editorial_beat import BeatMotionIntent
 from omega.application.visual_asset_binding import BoundBrollAsset
+from omega.application.visual_camera_motion import (
+    build_broll_zoompan_filter,
+    evaluate_camera_motion,
+    inject_camera_motion_style,
+    resolve_camera_motion_profile,
+)
 from omega.application.visual_direction import VisualTemplateId
 from omega.application.visual_dom_motion import VisualDomMotionError, VisualDomMotionRuntime
 from omega.application.visual_template_renderer import RenderedTemplateDocument
@@ -48,7 +55,20 @@ class VisualV2VideoRenderer:
         fps: int = 24,
         timeout_seconds: int = 120,
         broll_asset: BoundBrollAsset | None = None,
+        camera_motion_intent: BeatMotionIntent | None = None,
     ) -> VisualV2VideoRenderResult:
+        if (
+            camera_motion_intent is not None
+            and camera_motion_intent != BeatMotionIntent.STATIC
+            and document.template_id not in (
+                VisualTemplateId.IMAGE_EXPLAINER,
+                VisualTemplateId.BROLL_EXPLAINER,
+            )
+        ):
+            raise VisualV2VideoRenderError(
+                f"Camera motion {camera_motion_intent} not permitted on non-media template {document.template_id}"
+            )
+
         if document.template_id == VisualTemplateId.BROLL_EXPLAINER:
             if broll_asset is None:
                 raise VisualV2VideoRenderError("broll_asset is required for BROLL_EXPLAINER")
@@ -86,6 +106,28 @@ class VisualV2VideoRenderer:
                 except VisualDomMotionError as e:
                     raise VisualV2VideoRenderError(f"VisualDomMotionError: {e}") from e
 
+                # For IMAGE_EXPLAINER, inject camera motion state into frame HTML
+                if (
+                    document.template_id == VisualTemplateId.IMAGE_EXPLAINER
+                    and camera_motion_intent is not None
+                    and camera_motion_intent != BeatMotionIntent.STATIC
+                ):
+                    progress = (frame_index / (frame_count - 1)) if frame_count > 1 else 1.0
+                    cam_profile = resolve_camera_motion_profile(camera_motion_intent)
+                    cam_state = evaluate_camera_motion(cam_profile, progress)
+                    cam_html = inject_camera_motion_style(frame_doc.html, cam_state)
+                    cam_sha256 = hashlib.sha256(cam_html.encode("utf-8")).hexdigest()
+                    frame_doc = RenderedTemplateDocument(
+                        scene_index=frame_doc.scene_index,
+                        template_id=frame_doc.template_id,
+                        width=frame_doc.width,
+                        height=frame_doc.height,
+                        html=cam_html,
+                        semantic_element_ids=frame_doc.semantic_element_ids,
+                        content_sha256=cam_sha256,
+                        text_fitting=frame_doc.text_fitting,
+                    )
+
                 try:
                     frame = await browser_runtime.capture(
                         frame_doc,
@@ -120,17 +162,35 @@ class VisualV2VideoRenderer:
 
             if is_broll:
                 assert broll_asset is not None
-                filter_complex = (
-                    f"[0:v]setpts=PTS-STARTPTS,"
-                    f"scale=1920:1080:force_original_aspect_ratio=increase,"
-                    f"crop=1920:1080,"
-                    f"fps={fps},"
-                    f"trim=duration={duration_seconds},"
-                    f"setpts=PTS-STARTPTS[bg];"
-                    f"[1:v]format=rgba,"
-                    f"setpts=PTS-STARTPTS[overlay];"
-                    f"[bg][overlay]overlay=0:0:shortest=1[v]"
-                )
+                if camera_motion_intent is not None and camera_motion_intent != BeatMotionIntent.STATIC:
+                    cam_profile = resolve_camera_motion_profile(camera_motion_intent)
+                    zoompan_filter = build_broll_zoompan_filter(
+                        cam_profile, total_frames=frame_count, fps=fps
+                    )
+                    filter_complex = (
+                        f"[0:v]setpts=PTS-STARTPTS,"
+                        f"scale=1920:1080:force_original_aspect_ratio=increase,"
+                        f"crop=1920:1080,"
+                        f"fps={fps},"
+                        f"trim=duration={duration_seconds},"
+                        f"setpts=PTS-STARTPTS,"
+                        f"{zoompan_filter}[bg];"
+                        f"[1:v]format=rgba,"
+                        f"setpts=PTS-STARTPTS[overlay];"
+                        f"[bg][overlay]overlay=0:0:shortest=1[v]"
+                    )
+                else:
+                    filter_complex = (
+                        f"[0:v]setpts=PTS-STARTPTS,"
+                        f"scale=1920:1080:force_original_aspect_ratio=increase,"
+                        f"crop=1920:1080,"
+                        f"fps={fps},"
+                        f"trim=duration={duration_seconds},"
+                        f"setpts=PTS-STARTPTS[bg];"
+                        f"[1:v]format=rgba,"
+                        f"setpts=PTS-STARTPTS[overlay];"
+                        f"[bg][overlay]overlay=0:0:shortest=1[v]"
+                    )
                 ffmpeg_cmd = [
                     "ffmpeg",
                     "-y",

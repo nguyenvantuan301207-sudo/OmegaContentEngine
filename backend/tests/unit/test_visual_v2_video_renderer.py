@@ -204,3 +204,180 @@ async def test_non_broll_command_unchanged(tmp_path: Path, monkeypatch):
     # Non-broll transparent_background is False
     _, kwargs = mock_browser.capture.call_args
     assert kwargs.get("transparent_background") is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_parity_broll_omitted_vs_none_vs_static(tmp_path: Path, monkeypatch):
+    """Proves omitted, None, and STATIC camera_motion_intent take identical legacy FFmpeg path."""
+    from omega.application.editorial_beat import BeatMotionIntent
+
+    renderer = VisualV2VideoRenderer()
+    doc = make_doc(VisualTemplateId.BROLL_EXPLAINER)
+    broll = make_broll_asset(tmp_path / "input_broll.mp4")
+
+    mock_browser = MagicMock()
+    png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + (1920).to_bytes(4, "big") + (1080).to_bytes(4, "big") + b"\x08\x06\x00\x00\x00" + b"\x00" * 50
+    mock_frame = BrowserCapturedFrame(
+        scene_index=1,
+        template_id=VisualTemplateId.BROLL_EXPLAINER,
+        width=1920,
+        height=1080,
+        png_bytes=png_bytes,
+        png_sha256="fake_png_sha",
+        source_html_sha256="fake_html_sha",
+    )
+    mock_browser.capture = AsyncMock(return_value=mock_frame)
+
+    executed_cmds = []
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        executed_cmds.append(list(cmd))
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        out_f = Path(cmd[-1])
+        out_f.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100)
+        return mock_proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    # 1. Omitted
+    out_omitted = tmp_path / "out_omitted.mp4"
+    await renderer.render_clip(
+        document=doc,
+        motion_profile="broll_overlay",
+        duration_seconds=1.0,
+        output_path=out_omitted,
+        browser_runtime=mock_browser,
+        fps=12,
+        broll_asset=broll,
+    )
+
+    # 2. Explicit None
+    out_none = tmp_path / "out_none.mp4"
+    await renderer.render_clip(
+        document=doc,
+        motion_profile="broll_overlay",
+        duration_seconds=1.0,
+        output_path=out_none,
+        browser_runtime=mock_browser,
+        fps=12,
+        broll_asset=broll,
+        camera_motion_intent=None,
+    )
+
+    # 3. Explicit STATIC
+    out_static = tmp_path / "out_static.mp4"
+    await renderer.render_clip(
+        document=doc,
+        motion_profile="broll_overlay",
+        duration_seconds=1.0,
+        output_path=out_static,
+        browser_runtime=mock_browser,
+        fps=12,
+        broll_asset=broll,
+        camera_motion_intent=BeatMotionIntent.STATIC,
+    )
+
+    # 4. Explicit SLOW_PUSH_IN
+    out_push = tmp_path / "out_push.mp4"
+    await renderer.render_clip(
+        document=doc,
+        motion_profile="broll_overlay",
+        duration_seconds=1.0,
+        output_path=out_push,
+        browser_runtime=mock_browser,
+        fps=12,
+        broll_asset=broll,
+        camera_motion_intent=BeatMotionIntent.SLOW_PUSH_IN,
+    )
+
+    assert len(executed_cmds) == 4
+    cmd_omitted = executed_cmds[0]
+    cmd_none = executed_cmds[1]
+    cmd_static = executed_cmds[2]
+    cmd_push = executed_cmds[3]
+
+    fc_omitted = cmd_omitted[cmd_omitted.index("-filter_complex") + 1]
+    fc_none = cmd_none[cmd_none.index("-filter_complex") + 1]
+    fc_static = cmd_static[cmd_static.index("-filter_complex") + 1]
+    fc_push = cmd_push[cmd_push.index("-filter_complex") + 1]
+
+    # Exactly identical legacy filter strings
+    assert fc_omitted == fc_none
+    assert fc_omitted == fc_static
+    assert "zoompan" not in fc_omitted
+
+    # Verify full legacy FFmpeg argument parity
+    for cmd in (cmd_omitted, cmd_none, cmd_static):
+        assert "-stream_loop" in cmd and cmd[cmd.index("-stream_loop") + 1] == "-1"
+        assert "-an" in cmd
+        assert "-r" in cmd and cmd[cmd.index("-r") + 1] == "12"
+        assert "-t" in cmd and cmd[cmd.index("-t") + 1] == "1.0"
+        assert "-c:v" in cmd and cmd[cmd.index("-c:v") + 1] == "libx264"
+        assert "-pix_fmt" in cmd and cmd[cmd.index("-pix_fmt") + 1] == "yuv420p"
+        fc = cmd[cmd.index("-filter_complex") + 1]
+        assert "overlay=0:0:shortest=1" in fc
+
+    # Non-static motion contains zoompan filter
+    assert "zoompan" in fc_push
+
+
+@pytest.mark.asyncio
+async def test_legacy_positional_call_compatibility(tmp_path: Path, monkeypatch):
+    """Proves render_clip can be called with 8 legacy positional arguments seamlessly."""
+    renderer = VisualV2VideoRenderer()
+    doc = make_doc(VisualTemplateId.BROLL_EXPLAINER)
+    broll = make_broll_asset(tmp_path / "input_broll.mp4")
+
+    mock_browser = MagicMock()
+    png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + (1920).to_bytes(4, "big") + (1080).to_bytes(4, "big") + b"\x08\x06\x00\x00\x00" + b"\x00" * 50
+    mock_frame = BrowserCapturedFrame(
+        scene_index=1,
+        template_id=VisualTemplateId.BROLL_EXPLAINER,
+        width=1920,
+        height=1080,
+        png_bytes=png_bytes,
+        png_sha256="fake_png_sha",
+        source_html_sha256="fake_html_sha",
+    )
+    mock_browser.capture = AsyncMock(return_value=mock_frame)
+
+    executed_cmds = []
+
+    async def fake_create_subprocess_exec(*cmd, **kwargs):
+        executed_cmds.append(list(cmd))
+        mock_proc = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        mock_proc.returncode = 0
+        out_f = Path(cmd[-1])
+        out_f.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100)
+        return mock_proc
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", fake_create_subprocess_exec)
+
+    out_path = tmp_path / "legacy_positional_out.mp4"
+    # Call using 8 positional parameters exactly as pre-G2C2B
+    res = await renderer.render_clip(
+        doc,
+        "broll_overlay",
+        1.0,
+        out_path,
+        mock_browser,
+        12,
+        120,
+        broll,
+    )
+
+    assert len(executed_cmds) == 1
+    cmd = executed_cmds[0]
+    fc = cmd[cmd.index("-filter_complex") + 1]
+
+    # Verified positional interpretation:
+    assert cmd[cmd.index("-r") + 1] == "12"
+    assert cmd[cmd.index("-t") + 1] == "1.0"
+    assert "zoompan" not in fc
+    assert "overlay=0:0:shortest=1" in fc
+    assert "-an" in cmd
+    assert res.output_path == out_path
+    assert res.output_path.exists()
