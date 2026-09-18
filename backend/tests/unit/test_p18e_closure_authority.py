@@ -11,7 +11,10 @@ from omega.application.guardian.detectors.media_integrity import (
     _runtime_truth_snapshot,
 )
 from omega.application.production_qa import ProductionQAEngine
-from omega.application.production_runtime_truth import ProductionRuntimeTruthSnapshot
+from omega.application.production_runtime_truth import (
+    ProductionRuntimeTruthSnapshot,
+    RuntimeBeatVisualTruth,
+)
 from omega.domain.guardian import CheckTriggerType, GuardianCheckpoint
 from omega.domain.production import LicenseStatus, ProductionQARuleCode
 
@@ -291,7 +294,14 @@ def test_guardian_rejects_cross_artifact_runtime_truth_lineage():
             production_request_id=production_request_id,
             channel_id=channel_id,
         ),
-        scenes=(),
+        scenes=(
+            SimpleNamespace(
+                sequence_index=1,
+                start_ms=0,
+                end_ms=1000,
+                duration_ms=1000,
+            ),
+        ),
         narration=(),
         subtitles=SimpleNamespace(
             cues=(),
@@ -301,7 +311,24 @@ def test_guardian_rejects_cross_artifact_runtime_truth_lineage():
             fallback_applied=False,
             fallback_reason=None,
         ),
-        visuals=(),
+        visual_beats=(
+            RuntimeBeatVisualTruth(
+                parent_scene_index=1,
+                materialized_beat_index=0,
+                source_editorial_beat_index=0,
+                semantic_role="LEGACY_PARENT_SCENE",
+                start_offset_ms=0,
+                end_offset_ms=1000,
+                duration_ms=1000,
+                template_id="FLOW_DIAGRAM",
+                camera_motion_intent="LEGACY",
+                transition_intent="HARD_CUT",
+                asset_action="LOCAL_TEMPLATE",
+                visual_origin="TEMPLATE",
+                license_status=LicenseStatus.GENERATED,
+                rendered_beat_clip_sha256="e" * 64,
+            ),
+        ),
         render_target=SimpleNamespace(content_sha256="f" * 64),
     )
 

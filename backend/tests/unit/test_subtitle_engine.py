@@ -191,7 +191,9 @@ def test_ass_styles_are_validated_and_render_differently():
 
 
 def test_ass_escaping_and_explicit_truncation_provenance():
-    punctuation = "It's \"safe\", yes: really? wow! (ok) - fine — Unicode"
+    # Keep the injection marker inside the fitted text so this assertion tests
+    # escaping independently from the explicit truncation case below.
+    punctuation = "It's safe"
     hostile = punctuation + " {\\pos(0,0)}\nnext"
     cue = {
         "cue_order": 1,

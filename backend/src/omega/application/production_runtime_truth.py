@@ -24,7 +24,7 @@ from omega.domain.attribution_delivery import (
 )
 from omega.domain.production import LicenseStatus
 
-RUNTIME_TRUTH_SCHEMA_VERSION = 3
+RUNTIME_TRUTH_SCHEMA_VERSION = 4
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SECRET_MARKERS = ("token", "secret", "signature", "credential", "apikey", "api_key")
 
@@ -152,13 +152,13 @@ class RuntimeSceneTruth(_FrozenModel):
     narration_text: str | None = None
     original_strategy: str
     effective_strategy: str
-    template_id: str
+    template_id: str | None = None
     start_ms: int = Field(ge=0)
     end_ms: int = Field(gt=0)
     duration_ms: int = Field(gt=0)
     scene_content_sha256: str
-    visual_origin: Literal["EXPLICIT", "TEMPLATE", "PROVIDER"]
-    visual_index: int = Field(ge=0)
+    visual_origin: Literal["EXPLICIT", "TEMPLATE", "PROVIDER"] | None = None
+    visual_index: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def validate_timing_and_hash(self) -> RuntimeSceneTruth:
@@ -304,6 +304,72 @@ class RuntimeVisualTruth(_FrozenModel):
         return self
 
 
+class RuntimeBeatVisualTruth(_FrozenModel):
+    parent_scene_index: int = Field(ge=1)
+    materialized_beat_index: int = Field(ge=0)
+    source_editorial_beat_index: int = Field(ge=0)
+    source_statement_references: tuple[int, ...] = ()
+    semantic_role: str
+    start_offset_ms: int = Field(ge=0)
+    end_offset_ms: int = Field(gt=0)
+    duration_ms: int = Field(gt=0)
+    template_id: str
+    camera_motion_intent: str
+    transition_intent: str
+    asset_action: str
+    reuse_from_beat_index: int | None = Field(default=None, ge=0)
+    visual_origin: Literal["TEMPLATE", "PROVIDER"]
+    asset_kind: str | None = None
+    query: str | None = None
+    provider: str | None = None
+    provider_asset_id: str | None = None
+    source_url: str | None = None
+    source_page_url: str | None = None
+    license_status: LicenseStatus
+    license_name: str | None = None
+    license_url: str | None = None
+    attribution: str | None = None
+    allowed_attribution_channels: tuple[AttributionDeliveryChannel, ...] = ()
+    provider_metadata: FrozenJsonObject = Field(default_factory=FrozenJsonObject)
+    provider_asset_content_sha256: str | None = None
+    rendered_beat_clip_sha256: str
+
+    @model_validator(mode="after")
+    def validate_physical_provenance(self) -> RuntimeBeatVisualTruth:
+        if self.end_offset_ms - self.start_offset_ms != self.duration_ms:
+            raise ValueError("Runtime beat duration must equal end offset - start offset")
+        if not _SHA256.fullmatch(self.rendered_beat_clip_sha256):
+            raise ValueError("Rendered beat clip hash must be lowercase SHA-256")
+        if self.provider_asset_content_sha256 is not None and not _SHA256.fullmatch(
+            self.provider_asset_content_sha256
+        ):
+            raise ValueError("Provider asset hash must be lowercase SHA-256")
+        if self.visual_origin == "PROVIDER":
+            if not self.provider:
+                raise ValueError("Provider beat truth requires provider identity")
+            if not self.provider_asset_id or not self.provider_asset_content_sha256:
+                raise ValueError("Provider beat truth requires asset identity and content hash")
+        elif any(
+            (
+                self.provider,
+                self.provider_asset_id,
+                self.source_url,
+                self.source_page_url,
+                self.license_name,
+                self.license_url,
+                self.attribution,
+                self.provider_asset_content_sha256,
+            )
+        ) or self.allowed_attribution_channels or self.provider_metadata:
+            raise ValueError("Template beat truth cannot claim provider provenance")
+        expected_channels = tuple(sorted(set(self.allowed_attribution_channels), key=str))
+        if self.allowed_attribution_channels != expected_channels:
+            raise ValueError(
+                "Runtime beat attribution channels must be unique and canonically ordered"
+            )
+        return self
+
+
 class RuntimeBrandAssetTruth(_FrozenModel):
     role: Literal["CHANNEL_BUG", "INTRO", "OUTRO"]
     applied: bool
@@ -388,13 +454,40 @@ def _build_attribution_obligations(
     return canonicalize_attribution_obligations(obligations)
 
 
+def _build_beat_attribution_obligations(
+    *,
+    artifact_id: UUID,
+    artifact_sha256: str,
+    visual_beats: tuple[RuntimeBeatVisualTruth, ...] | list[RuntimeBeatVisualTruth],
+) -> tuple[AttributionObligation, ...]:
+    obligations = [
+        create_attribution_obligation(
+            artifact_id=artifact_id,
+            artifact_sha256=artifact_sha256,
+            scene_index=beat.parent_scene_index,
+            attribution_text=beat.attribution,
+            provider=beat.provider,
+            provider_asset_id=beat.provider_asset_id,
+            visual_content_sha256=beat.provider_asset_content_sha256,
+            template_id=beat.template_id,
+            source_reference=beat.license_url or beat.source_page_url,
+            allowed_channels=beat.allowed_attribution_channels,
+        )
+        for beat in visual_beats
+        if beat.license_status == LicenseStatus.ATTRIBUTION_REQUIRED
+        and beat.attribution
+        and beat.attribution.strip()
+    ]
+    return canonicalize_attribution_obligations(obligations)
+
+
 class ProductionRuntimeTruthSnapshot(_FrozenModel):
-    schema_version: Literal[3] = RUNTIME_TRUTH_SCHEMA_VERSION
+    schema_version: Literal[4] = RUNTIME_TRUTH_SCHEMA_VERSION
     lineage: RuntimeTruthLineage
     scenes: tuple[RuntimeSceneTruth, ...]
     narration: tuple[RuntimeNarrationTruth, ...]
     subtitles: RuntimeSubtitleTruth
-    visuals: tuple[RuntimeVisualTruth, ...]
+    visual_beats: tuple[RuntimeBeatVisualTruth, ...]
     branding: RuntimeBrandingTruth
     audio_mix: FrozenJsonObject
     render_target: RuntimeRenderTargetTruth
@@ -408,22 +501,66 @@ class ProductionRuntimeTruthSnapshot(_FrozenModel):
 
     @model_validator(mode="after")
     def validate_runtime_coherence(self) -> ProductionRuntimeTruthSnapshot:
-        if len(self.scenes) != len(self.visuals):
-            raise ValueError("Every runtime scene must have one visual truth entry")
         expected_start = 0
         previous_sequence_index = 0
-        for index, scene in enumerate(self.scenes):
+        for scene in self.scenes:
             if scene.sequence_index <= previous_sequence_index:
                 raise ValueError("Runtime scenes must use strictly increasing order")
             if scene.start_ms != expected_start:
                 raise ValueError("Runtime scenes must form one contiguous timeline")
-            if scene.visual_index != index:
-                raise ValueError("Runtime scene visual linkage is invalid")
-            visual = self.visuals[index]
-            if visual.scene_index != scene.sequence_index:
-                raise ValueError("Runtime scene and visual indices must match")
             expected_start = scene.end_ms
             previous_sequence_index = scene.sequence_index
+
+        beats_by_scene: dict[int, list[RuntimeBeatVisualTruth]] = {
+            scene.sequence_index: [] for scene in self.scenes
+        }
+        for beat in self.visual_beats:
+            if beat.parent_scene_index not in beats_by_scene:
+                raise ValueError("Runtime visual beat references an unknown scene")
+            beats_by_scene[beat.parent_scene_index].append(beat)
+        for scene in self.scenes:
+            beats = beats_by_scene[scene.sequence_index]
+            if not beats:
+                raise ValueError("Every runtime scene must have one or more visual beats")
+            expected_offset = 0
+            provider_by_source_index: dict[int, RuntimeBeatVisualTruth] = {}
+            seen_source_indices: set[int] = set()
+            total_beat_duration_ms = 0
+            for expected_index, beat in enumerate(beats):
+                if beat.materialized_beat_index != expected_index:
+                    raise ValueError("Runtime visual beat indices must be contiguous")
+                if beat.source_editorial_beat_index in seen_source_indices:
+                    raise ValueError("Runtime visual source beat indices must be unique")
+                seen_source_indices.add(beat.source_editorial_beat_index)
+                if beat.start_offset_ms != expected_offset:
+                    raise ValueError("Runtime visual beats must be gapless and non-overlapping")
+                expected_offset = beat.end_offset_ms
+                total_beat_duration_ms += beat.duration_ms
+                if beat.reuse_from_beat_index is not None:
+                    if beat.reuse_from_beat_index >= beat.source_editorial_beat_index:
+                        raise ValueError(
+                            "Runtime visual beat reuse must reference a preceding source beat"
+                        )
+                    source = provider_by_source_index.get(beat.reuse_from_beat_index)
+                    if source is None or beat.visual_origin != "PROVIDER":
+                        raise ValueError(
+                            "Runtime visual beat reuse source index is incompatible"
+                        )
+                    authority = (
+                        "asset_kind",
+                        "provider",
+                        "provider_asset_id",
+                        "provider_asset_content_sha256",
+                    )
+                    if any(getattr(beat, key) != getattr(source, key) for key in authority):
+                        raise ValueError("Runtime visual beat reuse provenance does not match source")
+                if beat.visual_origin == "PROVIDER":
+                    provider_by_source_index[beat.source_editorial_beat_index] = beat
+            if (
+                expected_offset != scene.duration_ms
+                or total_beat_duration_ms != scene.duration_ms
+            ):
+                raise ValueError("Runtime visual beats must cover the full parent scene")
 
         scene_by_index = {scene.sequence_index: scene for scene in self.scenes}
         for segment in self.narration:
@@ -468,10 +605,10 @@ class ProductionRuntimeTruthSnapshot(_FrozenModel):
         ):
             raise ValueError("Enabled subtitles require rendered cues and artifacts")
 
-        expected_obligations = _build_attribution_obligations(
+        expected_obligations = _build_beat_attribution_obligations(
             artifact_id=self.lineage.media_artifact_id,
             artifact_sha256=self.render_target.content_sha256,
-            visuals=self.visuals,
+            visual_beats=self.visual_beats,
         )
         if self.attribution_obligations != expected_obligations:
             raise ValueError(
@@ -566,13 +703,13 @@ def read_attribution_foundation(
     payload: Mapping[str, Any],
 ) -> tuple[tuple[AttributionObligation, ...], AttributionDeliveryState]:
     """Read Phase-1 attribution fields without rewriting legacy payloads."""
-    try:
-        schema_version = int(payload.get("schema_version", 0))
-    except (TypeError, ValueError) as exc:
-        raise ValueError("Runtime truth schema_version is malformed") from exc
+    raw_schema_version = payload.get("schema_version", 0)
+    if type(raw_schema_version) is not int:
+        raise ValueError("Runtime truth schema_version is malformed")
+    schema_version = raw_schema_version
     if schema_version in (1, 2):
         return (), AttributionDeliveryState.UNKNOWN
-    if schema_version != RUNTIME_TRUTH_SCHEMA_VERSION:
+    if schema_version not in (3, RUNTIME_TRUTH_SCHEMA_VERSION):
         raise ValueError("Unsupported runtime truth schema_version")
     if "attribution_obligations" not in payload:
         raise ValueError("Runtime truth attribution obligations are missing")
@@ -587,14 +724,29 @@ def read_attribution_foundation(
     try:
         artifact_id = UUID(str(payload["lineage"]["media_artifact_id"]))
         artifact_sha256 = str(payload["render_target"]["content_sha256"])
-        visuals = tuple(RuntimeVisualTruth.model_validate(item) for item in payload["visuals"])
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError("Runtime truth attribution foundation is incomplete") from exc
-    if obligations != _build_attribution_obligations(
-        artifact_id=artifact_id,
-        artifact_sha256=artifact_sha256,
-        visuals=visuals,
-    ):
+    try:
+        if schema_version == 3:
+            expected = _build_attribution_obligations(
+                artifact_id=artifact_id,
+                artifact_sha256=artifact_sha256,
+                visuals=tuple(
+                    RuntimeVisualTruth.model_validate(item) for item in payload["visuals"]
+                ),
+            )
+        else:
+            expected = _build_beat_attribution_obligations(
+                artifact_id=artifact_id,
+                artifact_sha256=artifact_sha256,
+                visual_beats=tuple(
+                    RuntimeBeatVisualTruth.model_validate(item)
+                    for item in payload["visual_beats"]
+                ),
+            )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("Runtime truth attribution foundation is incomplete") from exc
+    if obligations != expected:
         raise ValueError("Runtime truth attribution obligations do not match visuals")
     return obligations, AttributionDeliveryState.UNKNOWN
 
@@ -637,39 +789,13 @@ def build_production_runtime_truth_snapshot(
     result_subtitle_artifacts = tuple(
         _read(v2_result, "runtime_subtitle_artifacts", ()) or ()
     )
+    result_visual_beats = tuple(
+        _read(v2_result, "runtime_visual_beats", ()) or ()
+    )
 
-    visuals: list[RuntimeVisualTruth] = []
     scenes: list[RuntimeSceneTruth] = []
-    for visual_index, raw_scene in enumerate(result_scenes):
+    for raw_scene in result_scenes:
         scene = _as_dict(raw_scene)
-        origin = str(scene.get("visual_origin") or "TEMPLATE")
-        visual = RuntimeVisualTruth(
-            scene_index=scene["sequence_index"],
-            origin=origin,
-            visual_mode=str(scene.get("visual_mode") or "LOCAL_TEMPLATE_ONLY"),
-            kind=scene.get("asset_kind"),
-            template_id=scene.get("template_id"),
-            provider=scene.get("asset_provider"),
-            provider_asset_id=scene.get("asset_id"),
-            license_status=scene["asset_license_status"],
-            source_url=sanitize_runtime_reference(scene.get("asset_source_url")),
-            source_page_url=sanitize_runtime_reference(scene.get("asset_source_page_url")),
-            license_name=scene.get("asset_license_name"),
-            license_url=sanitize_runtime_reference(scene.get("asset_license_url")),
-            attribution=scene.get("asset_attribution"),
-            allowed_attribution_channels=tuple(
-                scene.get("asset_allowed_attribution_channels") or ()
-            ),
-            query=scene.get("asset_query"),
-            storage_reference=sanitize_runtime_reference(scene.get("asset_storage_reference")),
-            content_sha256=scene.get("visual_content_sha256"),
-            mime_type=scene.get("visual_mime_type"),
-            width=scene.get("visual_width"),
-            height=scene.get("visual_height"),
-            duration_ms=scene.get("visual_duration_ms"),
-            provider_metadata=_sanitize_json_metadata(scene.get("asset_provider_metadata") or {}),
-        )
-        visuals.append(visual)
         scenes.append(
             RuntimeSceneTruth(
                 sequence_index=scene["sequence_index"],
@@ -685,10 +811,52 @@ def build_production_runtime_truth_snapshot(
                 end_ms=scene["end_ms"],
                 duration_ms=scene["duration_ms"],
                 scene_content_sha256=scene["content_sha256"],
-                visual_origin=origin,
-                visual_index=visual_index,
+                visual_origin=scene.get("visual_origin"),
+                visual_index=scene.get("visual_index"),
             )
         )
+
+    visual_beats = tuple(
+        RuntimeBeatVisualTruth(
+            parent_scene_index=data["parent_scene_index"],
+            materialized_beat_index=data["materialized_beat_index"],
+            source_editorial_beat_index=data["source_editorial_beat_index"],
+            source_statement_references=tuple(
+                data.get("source_statement_references") or ()
+            ),
+            semantic_role=data["semantic_role"],
+            start_offset_ms=data["start_offset_ms"],
+            end_offset_ms=data["end_offset_ms"],
+            duration_ms=data["duration_ms"],
+            template_id=data["template_id"],
+            camera_motion_intent=data["camera_motion_intent"],
+            transition_intent=data["transition_intent"],
+            asset_action=data["asset_action"],
+            reuse_from_beat_index=data.get("reuse_from_beat_index"),
+            visual_origin=data["visual_origin"],
+            asset_kind=data.get("asset_kind"),
+            query=data.get("query"),
+            provider=data.get("provider"),
+            provider_asset_id=data.get("provider_asset_id"),
+            source_url=sanitize_runtime_reference(data.get("source_url")),
+            source_page_url=sanitize_runtime_reference(data.get("source_page_url")),
+            license_status=data["license_status"],
+            license_name=data.get("license_name"),
+            license_url=sanitize_runtime_reference(data.get("license_url")),
+            attribution=data.get("attribution"),
+            allowed_attribution_channels=tuple(
+                data.get("allowed_attribution_channels") or ()
+            ),
+            provider_metadata=_sanitize_json_metadata(
+                data.get("provider_metadata") or {}
+            ),
+            provider_asset_content_sha256=data.get(
+                "provider_asset_content_sha256"
+            ),
+            rendered_beat_clip_sha256=data["rendered_beat_clip_sha256"],
+        )
+        for data in (_as_dict(item) for item in result_visual_beats)
+    )
 
     narration = tuple(
         RuntimeNarrationTruth(
@@ -783,7 +951,7 @@ def build_production_runtime_truth_snapshot(
         scenes=tuple(scenes),
         narration=narration,
         subtitles=subtitle_truth,
-        visuals=tuple(visuals),
+        visual_beats=visual_beats,
         branding=branding,
         audio_mix=_sanitize_json_metadata(
             _read(v2_result, "runtime_audio_mix", {}) or {}
@@ -815,10 +983,10 @@ def build_production_runtime_truth_snapshot(
                 _read(v2_result, "subtitle_semantics_version")
             ),
         ),
-        attribution_obligations=_build_attribution_obligations(
+        attribution_obligations=_build_beat_attribution_obligations(
             artifact_id=media_artifact_id,
             artifact_sha256=artifact_sha256,
-            visuals=visuals,
+            visual_beats=visual_beats,
         ),
         attribution_delivery_state=AttributionDeliveryState.UNKNOWN,
     )
@@ -826,6 +994,7 @@ def build_production_runtime_truth_snapshot(
 
 __all__ = [
     "ProductionRuntimeTruthSnapshot",
+    "RuntimeBeatVisualTruth",
     "RUNTIME_TRUTH_SCHEMA_VERSION",
     "build_production_runtime_truth_snapshot",
     "read_attribution_foundation",

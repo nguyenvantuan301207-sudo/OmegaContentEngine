@@ -214,10 +214,11 @@ def create_attribution_obligation(
 def canonicalize_attribution_obligations(
     obligations: list[AttributionObligation] | tuple[AttributionObligation, ...],
 ) -> tuple[AttributionObligation, ...]:
-    """Return deterministic scene/provider/asset/text obligation order."""
+    """Return unique obligations in deterministic canonical order."""
+    unique = {item.obligation_id: item for item in obligations}
     return tuple(
         sorted(
-            obligations,
+            unique.values(),
             key=lambda item: (
                 item.scene_index,
                 item.provider or "",

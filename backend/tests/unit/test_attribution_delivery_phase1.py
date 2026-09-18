@@ -120,6 +120,69 @@ def test_canonical_order_does_not_depend_on_input_order():
     assert canonicalize_attribution_obligations([one, two]) == (one, two)
 
 
+def test_canonicalization_is_idempotent_and_deduplicates_exact_identity_only():
+    artifact_id = uuid4()
+    one = _obligation(artifact_id=artifact_id, provider_asset_id="one")
+    two = _obligation(artifact_id=artifact_id, provider_asset_id="two")
+
+    canonical = canonicalize_attribution_obligations([two, one, one])
+    assert canonical == canonicalize_attribution_obligations(canonical)
+    assert canonical == canonicalize_attribution_obligations([one, two, one])
+    assert len(canonical) == 2
+    assert {item.obligation_id for item in canonical} == {
+        one.obligation_id,
+        two.obligation_id,
+    }
+
+
+def test_canonicalization_never_collapses_distinct_policy_facts():
+    artifact_id = uuid4()
+    common = {
+        "artifact_id": artifact_id,
+        "artifact_sha256": ARTIFACT_HASH,
+        "scene_index": 1,
+        "provider": "provider-a",
+        "provider_asset_id": "asset-1",
+        "visual_content_sha256": VISUAL_HASH,
+        "attribution_text": "Photo by Alice",
+    }
+    obligations = [
+        create_attribution_obligation(
+            **common,
+            source_reference="https://example.test/license-a",
+            allowed_channels=(AttributionDeliveryChannel.PUBLISH_METADATA,),
+        ),
+        create_attribution_obligation(
+            **{**common, "provider_asset_id": "asset-2"},
+            source_reference="https://example.test/license-a",
+            allowed_channels=(AttributionDeliveryChannel.PUBLISH_METADATA,),
+        ),
+        create_attribution_obligation(
+            **{**common, "scene_index": 2},
+            source_reference="https://example.test/license-a",
+            allowed_channels=(AttributionDeliveryChannel.PUBLISH_METADATA,),
+        ),
+        create_attribution_obligation(
+            **common,
+            source_reference="https://example.test/license-b",
+            allowed_channels=(AttributionDeliveryChannel.PUBLISH_METADATA,),
+        ),
+        create_attribution_obligation(
+            **common,
+            source_reference="https://example.test/license-a",
+            allowed_channels=(AttributionDeliveryChannel.EXPORT_SIDECAR,),
+        ),
+        create_attribution_obligation(
+            **{**common, "attribution_text": "Photo by Bob"},
+            source_reference="https://example.test/license-a",
+            allowed_channels=(AttributionDeliveryChannel.PUBLISH_METADATA,),
+        ),
+    ]
+    canonical = canonicalize_attribution_obligations(obligations)
+    assert len(canonical) == len(obligations)
+    assert len({item.obligation_id for item in canonical}) == len(obligations)
+
+
 def test_display_dedupe_preserves_all_underlying_obligation_ids():
     artifact_id = uuid4()
     one = _obligation(artifact_id=artifact_id, scene_index=1, provider_asset_id="one")

@@ -20,12 +20,16 @@ from omega.application.audio_mix_policy import (
     build_background_music_plan,
     build_sfx_event_plan,
 )
+from omega.application.beat_asset_executor import BeatAssetExecutor
+from omega.application.beat_clip_assembler import BeatClipAssembler
+from omega.application.beat_visual_renderer import BeatVisualRenderer
 from omega.application.brand_asset_resolver import (
     BrandAssetResolutionError,
     BrandAssetResolver,
     BrandMediaKind,
     ResolvedBrandAsset,
 )
+from omega.application.canonical_beat_preparation import CanonicalBeatPreparationService
 from omega.application.ffmpeg_renderer import (
     FINAL_MASTER_SAMPLE_RATE_HZ,
     FFmpegRenderer,
@@ -49,7 +53,7 @@ from omega.application.subtitle_engine import (
 )
 from omega.application.template_payload_resolver import TemplatePayloadResolver
 from omega.application.visual_asset_binding import BoundBrollAsset
-from omega.application.visual_asset_engine import VisualAssetEngine, VisualAssetRequest
+from omega.application.visual_asset_engine import VisualAssetEngine
 from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import VisualAssetKind, VisualDirector
 from omega.application.visual_template_renderer import VisualTemplateRenderer
@@ -157,7 +161,7 @@ class VerticalSliceError(Exception):
 
 KARAOKE_SUBTITLE_VERSION = "v1"
 SUBTITLE_SEMANTICS_VERSION = 3
-CANONICAL_RENDER_SEMANTICS_VERSION = 2
+CANONICAL_RENDER_SEMANTICS_VERSION = 3
 FINAL_MASTER_TARGET_I = -16.0
 FINAL_MASTER_TARGET_TP = -1.5
 FINAL_MASTER_TARGET_LRA = 7.0
@@ -211,7 +215,11 @@ def _validate_cached_subtitle_semantics(
     fallback_policy: SubtitleFallbackPolicy,
 ) -> bool:
     """Validate cached subtitle provenance against current render semantics."""
-    if manifest.get("runtime_truth_schema_version") != RUNTIME_TRUTH_SCHEMA_VERSION:
+    runtime_truth_version = manifest.get("runtime_truth_schema_version")
+    if (
+        type(runtime_truth_version) is not int
+        or runtime_truth_version != RUNTIME_TRUTH_SCHEMA_VERSION
+    ):
         return False
     if not _has_current_subtitle_semantics_version(manifest):
         return False
@@ -443,7 +451,8 @@ class VerticalSliceSceneResult(BaseModel):
     narration_text: str | None = None
     original_strategy: str
     effective_strategy: str
-    template_id: str
+    template_id: str | None
+    execution_mode: str = "LEGACY_SINGLE_SCENE"
     asset_kind: str | None
     asset_provider: str | None
     asset_id: str | None
@@ -459,11 +468,11 @@ class VerticalSliceSceneResult(BaseModel):
     subtitle_text_truncated: bool | None = None
     text_fitting: tuple[dict[str, Any], ...] = ()
     text_truncated: bool = False
-    visual_origin: str = "TEMPLATE"
+    visual_origin: str | None = "TEMPLATE"
     visual_mode: str = "LOCAL_TEMPLATE_ONLY"
     asset_source_url: str | None = None
     asset_source_page_url: str | None = None
-    asset_license_status: LicenseStatus
+    asset_license_status: LicenseStatus | None
     asset_license_name: str | None = None
     asset_license_url: str | None = None
     asset_attribution: str | None = None
@@ -475,6 +484,39 @@ class VerticalSliceSceneResult(BaseModel):
     visual_height: int | None = None
     visual_duration_ms: int | None = None
     asset_provider_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class VerticalSliceRuntimeBeatVisual(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    parent_scene_index: int
+    materialized_beat_index: int
+    source_editorial_beat_index: int
+    source_statement_references: tuple[int, ...] = ()
+    semantic_role: str
+    start_offset_ms: int
+    end_offset_ms: int
+    duration_ms: int
+    template_id: str
+    camera_motion_intent: str
+    transition_intent: str
+    asset_action: str
+    reuse_from_beat_index: int | None = None
+    visual_origin: str
+    asset_kind: str | None = None
+    query: str | None = None
+    provider: str | None = None
+    provider_asset_id: str | None = None
+    source_url: str | None = None
+    source_page_url: str | None = None
+    license_status: LicenseStatus
+    license_name: str | None = None
+    license_url: str | None = None
+    attribution: str | None = None
+    allowed_attribution_channels: tuple[AttributionDeliveryChannel, ...] = ()
+    provider_metadata: dict[str, Any] = Field(default_factory=dict)
+    provider_asset_content_sha256: str | None = None
+    rendered_beat_clip_sha256: str
 
 
 @dataclass(frozen=True)
@@ -529,6 +571,7 @@ class VerticalSliceRenderResult(BaseModel):
     runtime_subtitle_cues: tuple[VerticalSliceRuntimeSubtitleCue, ...] = ()
     runtime_subtitle_artifacts: tuple[VerticalSliceRuntimeSubtitleArtifact, ...] = ()
     runtime_scenes: tuple[VerticalSliceSceneResult, ...] = ()
+    runtime_visual_beats: tuple[VerticalSliceRuntimeBeatVisual, ...] = ()
     runtime_branding: dict[str, Any] = Field(default_factory=dict)
     runtime_audio_mix: dict[str, Any] = Field(default_factory=dict)
     subtitle_style_applied: SubtitleRenderStyle | None = None
@@ -686,6 +729,10 @@ class VisualProductionV2Service:
         narration_storage: LocalMediaStorageProvider | None = None,
         brand_asset_resolver: BrandAssetResolver | None = None,
         visual_asset_mode: str = "PEXELS",
+        beat_preparation_service: Any | None = None,
+        beat_asset_executor: BeatAssetExecutor | None = None,
+        beat_visual_renderer: BeatVisualRenderer | None = None,
+        beat_clip_assembler: BeatClipAssembler | None = None,
     ):
         if visual_asset_mode not in ("PEXELS", "LOCAL_TEMPLATE_ONLY"):
             raise ValueError(f"Unsupported visual_asset_mode: {visual_asset_mode}")
@@ -705,6 +752,20 @@ class VisualProductionV2Service:
         self._narration_provider = narration_provider
         self._narration_storage = narration_storage
         self._brand_asset_resolver = brand_asset_resolver
+        self._beat_preparation_service = (
+            beat_preparation_service or CanonicalBeatPreparationService
+        )
+        self._beat_asset_executor = beat_asset_executor or BeatAssetExecutor(
+            resolver=self._orchestrator
+        )
+        self._beat_visual_renderer = beat_visual_renderer or BeatVisualRenderer(
+            payload_resolver=self._template_resolver,
+            template_renderer=self._template_renderer,
+            video_renderer=self._video_renderer,
+        )
+        self._beat_clip_assembler = beat_clip_assembler or BeatClipAssembler(
+            self._ffmpeg_renderer
+        )
         if self._narration_provider and not self._narration_storage:
             raise ValueError("narration_storage is required when narration_provider is supplied")
 
@@ -885,6 +946,349 @@ class VisualProductionV2Service:
             raise VerticalSliceError(
                 f"V2 unsupported audio codec: {policy.audio_codec}"
             )
+
+    async def _render_parent_visual(
+        self,
+        *,
+        script_dict: dict[str, Any],
+        scene: StoryboardScene,
+        duration_seconds: float,
+        canonical_visual_mode: str,
+        work_dir: Path,
+        browser: Any,
+        fps: int,
+        style_profile: ChannelStyleProfile | None,
+        narration_enabled: bool,
+    ) -> dict[str, Any]:
+        """Render one parent visual, committing irreversibly at beat acquisition."""
+        duration_ms = int(round(duration_seconds * 1000))
+        scene_out_path = work_dir / f"scene_{scene.sequence_index:03d}.mp4"
+        scene_visual_out_path = (
+            work_dir / f"scene_{scene.sequence_index:03d}_visual.mp4"
+            if narration_enabled
+            else scene_out_path
+        )
+        try:
+            prep = self._beat_preparation_service.prepare_from_script_dict(
+                script_dict=script_dict,
+                scene=scene,
+                scene_duration_ms=duration_ms,
+                visual_asset_mode=canonical_visual_mode,
+            )
+        except Exception:
+            prep = None
+
+        if (
+            prep is not None
+            and prep.eligible
+            and prep.render_plan is not None
+            and len(prep.render_plan.units) >= 2
+        ):
+            plan = prep.render_plan
+            try:
+                execution = await self._beat_asset_executor.execute_plan(
+                    render_plan=plan,
+                    provider_acquisition_allowed=(canonical_visual_mode == "PEXELS"),
+                )
+                rendered = await self._beat_visual_renderer.render_plan(
+                    render_plan=plan,
+                    asset_execution=execution,
+                    output_dir=work_dir / "beats" / f"scene_{scene.sequence_index:03d}",
+                    browser_runtime=browser,
+                    fps=fps,
+                    accent_color=style_profile.accent_color if style_profile else None,
+                    bg_color=style_profile.bg_color if style_profile else None,
+                )
+                assembly = await self._beat_clip_assembler.assemble(
+                    rendered.clips,
+                    output_path=scene_visual_out_path,
+                    fps=fps,
+                )
+            except Exception as exc:
+                raise VerticalSliceError(
+                    f"Committed multi-beat render failed for scene "
+                    f"{scene.sequence_index}: {self._sanitize_error(exc)}"
+                ) from exc
+            if assembly.parent_scene_index != scene.sequence_index:
+                raise VerticalSliceError("Multi-beat assembly scene mismatch")
+            if assembly.expected_duration_ms != duration_ms:
+                raise VerticalSliceError("Multi-beat assembly duration mismatch")
+
+            beat_truth: list[VerticalSliceRuntimeBeatVisual] = []
+            for unit, asset, metadata in zip(
+                plan.units, execution.assets, rendered.beat_metadata, strict=True
+            ):
+                provider_asset = asset.resolved_asset
+                beat_truth.append(
+                    VerticalSliceRuntimeBeatVisual(
+                        parent_scene_index=scene.sequence_index,
+                        materialized_beat_index=unit.materialized_index,
+                        source_editorial_beat_index=unit.source_beat_index,
+                        source_statement_references=tuple(
+                            unit.scene_view.source_statement_references
+                        ),
+                        semantic_role=str(unit.direction_view.metadata["semantic_role"]),
+                        start_offset_ms=unit.start_ms,
+                        end_offset_ms=unit.end_ms,
+                        duration_ms=unit.duration_ms,
+                        template_id=metadata.template_id.value,
+                        camera_motion_intent=unit.camera_motion_intent.value,
+                        transition_intent=unit.transition_intent.value,
+                        asset_action=asset.action.value,
+                        reuse_from_beat_index=asset.reuse_from_beat_index,
+                        visual_origin="PROVIDER" if provider_asset else "TEMPLATE",
+                        asset_kind=(
+                            asset.required_kind.value if asset.required_kind else None
+                        ),
+                        query=unit.asset_decision.query_hint,
+                        provider=provider_asset.provider if provider_asset else None,
+                        provider_asset_id=(
+                            provider_asset.asset_id if provider_asset else None
+                        ),
+                        source_url=(
+                            _safe_external_reference(provider_asset.source_url)
+                            if provider_asset else None
+                        ),
+                        source_page_url=(
+                            _safe_external_reference(provider_asset.source_page_url)
+                            if provider_asset else None
+                        ),
+                        license_status=(
+                            provider_asset.license_status
+                            if provider_asset else LicenseStatus.GENERATED
+                        ),
+                        license_name=(
+                            provider_asset.license_name if provider_asset else None
+                        ),
+                        license_url=(
+                            _safe_external_reference(provider_asset.license_url)
+                            if provider_asset else None
+                        ),
+                        attribution=(
+                            provider_asset.attribution_text if provider_asset else None
+                        ),
+                        allowed_attribution_channels=(
+                            tuple(
+                                sorted(
+                                    set(provider_asset.allowed_attribution_channels),
+                                    key=str,
+                                )
+                            )
+                            if provider_asset else ()
+                        ),
+                        provider_metadata=(
+                            _safe_provider_metadata(provider_asset.metadata)
+                            if provider_asset else {}
+                        ),
+                        provider_asset_content_sha256=(
+                            provider_asset.content_sha256 if provider_asset else None
+                        ),
+                        rendered_beat_clip_sha256=metadata.video_sha256,
+                    )
+                )
+            return {
+                "execution_mode": "MULTI_BEAT",
+                "scene_out_path": scene_out_path,
+                "scene_visual_out_path": scene_visual_out_path,
+                "visual_sha256": assembly.content_sha256
+                or self._compute_streaming_sha(scene_visual_out_path),
+                "runtime_beats": tuple(beat_truth),
+                "template_id": None,
+                "resolved_asset": None,
+                "asset_kind": None,
+                "asset_provider": None,
+                "asset_id": None,
+                "asset_query": None,
+                "visual_origin": None,
+                "visual_content_sha256": None,
+                "visual_mime_type": None,
+                "visual_width": None,
+                "visual_height": None,
+                "visual_duration_ms": duration_ms,
+                "text_fitting": (),
+                "text_truncated": False,
+            }
+
+        if scene.visual_strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
+            self._ensure_meaningful_query(scene)
+        direction = self._visual_director.resolve(scene)
+        if canonical_visual_mode == "LOCAL_TEMPLATE_ONLY" and direction.asset_requirements:
+            raise VerticalSliceError(
+                "LOCAL_TEMPLATE_ONLY scene produced an external asset requirement"
+            )
+        payload = self._template_resolver.resolve(scene, direction)
+        assets: tuple[Any, ...] = ()
+        broll_asset: BoundBrollAsset | None = None
+        asset_kind: str | None = None
+        asset_query: str | None = None
+        resolved_asset = None
+        if direction.asset_requirements:
+            if self._orchestrator is None:
+                raise VerticalSliceError("Asset resolution requires an asset orchestrator")
+            requirement = direction.asset_requirements[0]
+            asset_kind = requirement.kind.value
+            request = self._visual_asset_engine.build_request(
+                scene_index=scene.sequence_index, requirement=requirement
+            )
+            if request is None:
+                raise VerticalSliceError("Could not build required visual asset request")
+            asset_query = request.query
+            try:
+                resolved_asset = await self._orchestrator.resolve(request)
+                if requirement.kind == VisualAssetKind.IMAGE:
+                    assets = (VisualAssetMaterializer.materialize(resolved_asset),)
+                elif requirement.kind == VisualAssetKind.BROLL:
+                    broll_asset = VisualAssetMaterializer.materialize_broll(resolved_asset)
+                    assets = (broll_asset,)
+                else:
+                    raise VerticalSliceError(
+                        f"Unsupported asset requirement kind: {requirement.kind}"
+                    )
+            except Exception as exc:
+                raise VerticalSliceError(
+                    f"Asset orchestrator failed for scene {scene.sequence_index}: "
+                    f"{self._sanitize_error(exc)}"
+                ) from exc
+        try:
+            document = self._template_renderer.render(
+                payload,
+                assets=assets,
+                accent_color=style_profile.accent_color if style_profile else None,
+                bg_color=style_profile.bg_color if style_profile else None,
+            )
+            render_result = await self._video_renderer.render_clip(
+                document=document,
+                motion_profile=direction.motion_profile,
+                duration_seconds=duration_seconds,
+                output_path=scene_visual_out_path,
+                browser_runtime=browser,
+                fps=fps,
+                broll_asset=broll_asset,
+            )
+        except Exception as exc:
+            raise VerticalSliceError(
+                f"Scene video render failed for scene {scene.sequence_index}: "
+                f"{self._sanitize_error(exc)}"
+            ) from exc
+        origin = "PROVIDER" if resolved_asset else "TEMPLATE"
+        beat = VerticalSliceRuntimeBeatVisual(
+            parent_scene_index=scene.sequence_index,
+            materialized_beat_index=0,
+            source_editorial_beat_index=0,
+            source_statement_references=tuple(scene.source_statement_references),
+            semantic_role="LEGACY_PARENT_SCENE",
+            start_offset_ms=0,
+            end_offset_ms=duration_ms,
+            duration_ms=duration_ms,
+            template_id=document.template_id.value,
+            camera_motion_intent="LEGACY",
+            transition_intent="HARD_CUT",
+            asset_action="ACQUIRE_IF_NEEDED" if resolved_asset else "LOCAL_TEMPLATE",
+            visual_origin=origin,
+            asset_kind=asset_kind,
+            query=asset_query,
+            provider=resolved_asset.provider if resolved_asset else None,
+            provider_asset_id=resolved_asset.asset_id if resolved_asset else None,
+            source_url=(
+                _safe_external_reference(resolved_asset.source_url)
+                if resolved_asset else None
+            ),
+            source_page_url=(
+                _safe_external_reference(resolved_asset.source_page_url)
+                if resolved_asset else None
+            ),
+            license_status=(
+                resolved_asset.license_status if resolved_asset else LicenseStatus.GENERATED
+            ),
+            license_name=resolved_asset.license_name if resolved_asset else None,
+            license_url=(
+                _safe_external_reference(resolved_asset.license_url)
+                if resolved_asset else None
+            ),
+            attribution=resolved_asset.attribution_text if resolved_asset else None,
+            allowed_attribution_channels=(
+                tuple(sorted(set(resolved_asset.allowed_attribution_channels), key=str))
+                if resolved_asset else ()
+            ),
+            provider_metadata=(
+                _safe_provider_metadata(resolved_asset.metadata) if resolved_asset else {}
+            ),
+            provider_asset_content_sha256=(
+                resolved_asset.content_sha256 if resolved_asset else None
+            ),
+            rendered_beat_clip_sha256=render_result.video_sha256,
+        )
+        return {
+            "execution_mode": "LEGACY_SINGLE_SCENE",
+            "scene_out_path": scene_out_path,
+            "scene_visual_out_path": scene_visual_out_path,
+            "visual_sha256": render_result.video_sha256,
+            "runtime_beats": (beat,),
+            "template_id": document.template_id.value,
+            "resolved_asset": resolved_asset,
+            "asset_kind": asset_kind,
+            "asset_provider": resolved_asset.provider if resolved_asset else None,
+            "asset_id": resolved_asset.asset_id if resolved_asset else None,
+            "asset_query": asset_query,
+            "visual_origin": origin,
+            "visual_content_sha256": (
+                resolved_asset.content_sha256 if resolved_asset else render_result.video_sha256
+            ),
+            "visual_mime_type": resolved_asset.mime_type if resolved_asset else "video/mp4",
+            "visual_width": resolved_asset.width if resolved_asset else render_result.width,
+            "visual_height": resolved_asset.height if resolved_asset else render_result.height,
+            "visual_duration_ms": (
+                int(round(resolved_asset.duration_seconds * 1000))
+                if resolved_asset and resolved_asset.duration_seconds is not None
+                else duration_ms
+            ),
+            "text_fitting": tuple(item.model_dump() for item in document.text_fitting),
+            "text_truncated": any(item.text_truncated for item in document.text_fitting),
+        }
+
+    async def _finalize_narrated_parent_scene(
+        self,
+        *,
+        scene_index: int,
+        scene_visual_path: Path,
+        scene_output_path: Path,
+        audio_path: Path,
+        ass_path: Path | None,
+        subtitle_enabled: bool,
+        work_dir: Path,
+    ) -> str:
+        """Burn parent subtitles once, then mux parent narration once."""
+        mux_video_input = scene_visual_path
+        if subtitle_enabled and ass_path is not None:
+            subtitled_path = work_dir / f"scene_{scene_index:03d}_subtitled.mp4"
+            try:
+                await self._ffmpeg_renderer.burn_ass_subtitles(
+                    video_path=scene_visual_path,
+                    ass_path=ass_path,
+                    output_path=subtitled_path,
+                )
+            except Exception as exc:
+                raise VerticalSliceError(
+                    f"ASS burn failed for scene {scene_index}: {self._sanitize_error(exc)}"
+                ) from exc
+            if not subtitled_path.exists() or subtitled_path.stat().st_size <= 0:
+                raise VerticalSliceError(
+                    f"Subtitle burned output missing or empty for scene {scene_index}"
+                )
+            mux_video_input = subtitled_path
+        try:
+            await self._ffmpeg_renderer.mux_video_audio(
+                video_path=mux_video_input,
+                audio_path=audio_path,
+                output_path=scene_output_path,
+            )
+        except Exception as exc:
+            raise VerticalSliceError(
+                f"Mux failed for scene {scene_index}: {self._sanitize_error(exc)}"
+            ) from exc
+        if not scene_output_path.exists() or scene_output_path.stat().st_size <= 0:
+            raise VerticalSliceError(f"Mux output missing or empty for scene {scene_index}")
+        return self._compute_streaming_sha(scene_output_path)
 
     async def _render_canonical_production_core(
         self,
@@ -1248,6 +1652,10 @@ class VisualProductionV2Service:
                     runtime_scenes=tuple(
                         VerticalSliceSceneResult(**s) for s in manifest_data.get("scenes", [])
                     ),
+                    runtime_visual_beats=tuple(
+                        VerticalSliceRuntimeBeatVisual(**item)
+                        for item in manifest_data.get("runtime_visual_beats", [])
+                    ),
                     runtime_branding=manifest_data.get("runtime_branding", {}),
                     runtime_audio_mix=manifest_data.get("runtime_audio_mix", {}),
                     subtitle_style_applied=(
@@ -1349,6 +1757,7 @@ class VisualProductionV2Service:
             runtime_narration_segments = []
             runtime_subtitle_cues = []
             runtime_subtitle_artifacts = []
+            runtime_visual_beats: list[VerticalSliceRuntimeBeatVisual] = []
 
 
             indices = set()
@@ -1573,134 +1982,46 @@ class VisualProductionV2Service:
                             except Exception as e:
                                 raise VerticalSliceError(f"Subtitle generation failed: {self._sanitize_error(e)}") from e
 
-                    # Meaningful query fallback for IMAGE and BROLL
-                    if effective_strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
-                        self._ensure_meaningful_query(effective_scene)
-
-                    direction = self._visual_director.resolve(effective_scene)
-                    if (
-                        canonical_visual_mode == "LOCAL_TEMPLATE_ONLY"
-                        and direction.asset_requirements
-                    ):
-                        raise VerticalSliceError(
-                            "LOCAL_TEMPLATE_ONLY scene produced an external asset requirement"
-                        )
-                    payload = self._template_resolver.resolve(effective_scene, direction)
-
-                    assets: tuple[Any, ...] = ()
-                    broll_asset: BoundBrollAsset | None = None
-                    asset_kind_str: str | None = None
-                    asset_provider_str: str | None = None
-                    asset_id_str: str | None = None
-                    asset_query_str: str | None = None
-                    resolved_asset = None
-
-                    if direction.asset_requirements:
-                        if self._orchestrator is None:
-                            raise VerticalSliceError(
-                                "Asset resolution requires an asset orchestrator"
-                            )
-                        req_spec = direction.asset_requirements[0]
-                        asset_kind_str = req_spec.kind.value
-                        asset_request: VisualAssetRequest = self._visual_asset_engine.build_request(
-                            scene_index=effective_scene.sequence_index,
-                            requirement=req_spec,
-                        )
-                        if asset_request is None:
-                            raise VerticalSliceError("Could not build required visual asset request")
-                        asset_query_str = asset_request.query
-
-                        try:
-                            resolved_asset = await self._orchestrator.resolve(asset_request)
-                        except Exception as e:
-                            raise VerticalSliceError(f"Asset orchestrator failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
-
-                        asset_provider_str = resolved_asset.provider
-                        asset_id_str = resolved_asset.asset_id
-
-                        if req_spec.kind == VisualAssetKind.IMAGE:
-                            try:
-                                bound_img = VisualAssetMaterializer.materialize(resolved_asset)
-                            except Exception as e:
-                                raise VerticalSliceError(f"Image materializer failed: {self._sanitize_error(e)}") from e
-                            assets = (bound_img,)
-                            image_scenes += 1
-                        elif req_spec.kind == VisualAssetKind.BROLL:
-                            try:
-                                bound_broll = VisualAssetMaterializer.materialize_broll(resolved_asset)
-                            except Exception as e:
-                                raise VerticalSliceError(f"Broll materializer failed: {self._sanitize_error(e)}") from e
-                            assets = (bound_broll,)
-                            broll_asset = bound_broll
-                            broll_scenes += 1
-                        else:
-                            raise VerticalSliceError(f"Unsupported asset requirement kind: {req_spec.kind}")
+                    visual = await self._render_parent_visual(
+                        script_dict=script_dict,
+                        scene=effective_scene,
+                        duration_seconds=actual_scene_duration_seconds,
+                        canonical_visual_mode=canonical_visual_mode,
+                        work_dir=work_dir,
+                        browser=browser,
+                        fps=fps,
+                        style_profile=style_profile,
+                        narration_enabled=bool(self._narration_provider),
+                    )
+                    scene_out_path = visual["scene_out_path"]
+                    scene_visual_out_path = visual["scene_visual_out_path"]
+                    final_scene_sha = visual["visual_sha256"]
+                    runtime_visual_beats.extend(visual["runtime_beats"])
+                    resolved_asset = visual["resolved_asset"]
+                    asset_kind_str = visual["asset_kind"]
+                    asset_provider_str = visual["asset_provider"]
+                    asset_id_str = visual["asset_id"]
+                    asset_query_str = visual["asset_query"]
+                    if effective_strategy == VisualStrategy.IMAGE:
+                        image_scenes += 1
+                    elif effective_strategy == VisualStrategy.BROLL:
+                        broll_scenes += 1
                     else:
                         template_scenes += 1
-
-                    try:
-                        document = self._template_renderer.render(
-                            payload,
-                            assets=assets,
-                            accent_color=style_profile.accent_color if style_profile else None,
-                            bg_color=style_profile.bg_color if style_profile else None,
-                        )
-                    except Exception as e:
-                        raise VerticalSliceError(f"Template renderer failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
-
-                    scene_out_path = work_dir / f"scene_{scene.sequence_index:03d}.mp4"
-                    scene_visual_out_path = work_dir / f"scene_{scene.sequence_index:03d}_visual.mp4" if self._narration_provider else scene_out_path
-
-                    try:
-                        render_res = await self._video_renderer.render_clip(
-                            document=document,
-                            motion_profile=direction.motion_profile,
-                            duration_seconds=actual_scene_duration_seconds,
-                            output_path=scene_visual_out_path,
-                            browser_runtime=browser,
-                            fps=fps,
-                            broll_asset=broll_asset,
-                        )
-                    except Exception as e:
-                        raise VerticalSliceError(f"Scene video render failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
-
-                    final_scene_sha = render_res.video_sha256
-                    visual_runtime_sha = (
-                        resolved_asset.content_sha256
-                        if resolved_asset is not None
-                        else render_res.video_sha256
-                    )
-
                     if self._narration_provider:
-                        mux_video_input = scene_visual_out_path
-                        if effective_subtitle_enabled and ass_path is not None:
-                            scene_subtitled_visual_path = work_dir / f"scene_{scene.sequence_index:03d}_subtitled.mp4"
-                            try:
-                                await self._ffmpeg_renderer.burn_ass_subtitles(
-                                    video_path=scene_visual_out_path,
-                                    ass_path=ass_path,
-                                    output_path=scene_subtitled_visual_path,
-                                )
-                            except Exception as e:
-                                raise VerticalSliceError(f"ASS burn failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
-                            if not scene_subtitled_visual_path.exists() or scene_subtitled_visual_path.stat().st_size <= 0:
-                                raise VerticalSliceError(f"Subtitle burned output missing or empty for scene {scene.sequence_index}")
-                            mux_video_input = scene_subtitled_visual_path
-
-                        try:
-                            await self._ffmpeg_renderer.mux_video_audio(
-                                video_path=mux_video_input,
-                                audio_path=audio_path,
-                                output_path=scene_out_path,
+                        if audio_path is None:
+                            raise VerticalSliceError(
+                                f"Narration audio missing for scene {scene.sequence_index}"
                             )
-                        except Exception as e:
-                            raise VerticalSliceError(f"Mux failed for scene {scene.sequence_index}: {self._sanitize_error(e)}") from e
-
-                        if not scene_out_path.exists() or scene_out_path.stat().st_size <= 0:
-                            raise VerticalSliceError(f"Mux output missing or empty for scene {scene.sequence_index}")
-
-                        final_scene_sha = self._compute_streaming_sha(scene_out_path)
-
+                        final_scene_sha = await self._finalize_narrated_parent_scene(
+                            scene_index=scene.sequence_index,
+                            scene_visual_path=scene_visual_out_path,
+                            scene_output_path=scene_out_path,
+                            audio_path=audio_path,
+                            ass_path=ass_path,
+                            subtitle_enabled=effective_subtitle_enabled,
+                            work_dir=work_dir,
+                        )
                     ordered_scene_paths.append(scene_out_path)
                     total_duration += actual_scene_duration_seconds
 
@@ -1725,7 +2046,8 @@ class VisualProductionV2Service:
                             narration_text=scene.narration_excerpt,
                             original_strategy=original_strategy.value,
                             effective_strategy=effective_strategy.value,
-                            template_id=document.template_id.value,
+                            template_id=visual["template_id"],
+                            execution_mode=visual["execution_mode"],
                             asset_kind=asset_kind_str,
                             asset_provider=asset_provider_str,
                             asset_id=asset_id_str,
@@ -1739,15 +2061,9 @@ class VisualProductionV2Service:
                             audio_duration_seconds=audio_duration_sec,
                             subtitle_cue_count=scene_subtitle_cues if effective_subtitle_enabled else None,
                             subtitle_text_truncated=scene_subtitle_text_truncated if effective_subtitle_enabled else None,
-                            text_fitting=tuple(
-                                decision.model_dump() for decision in document.text_fitting
-                            ),
-                            text_truncated=any(
-                                decision.text_truncated for decision in document.text_fitting
-                            ),
-                            visual_origin=(
-                                "PROVIDER" if resolved_asset is not None else "TEMPLATE"
-                            ),
+                            text_fitting=visual["text_fitting"],
+                            text_truncated=visual["text_truncated"],
+                            visual_origin=visual["visual_origin"],
                             visual_mode=canonical_visual_mode,
                             asset_source_url=(
                                 _safe_external_reference(resolved_asset.source_url)
@@ -1762,7 +2078,11 @@ class VisualProductionV2Service:
                             asset_license_status=(
                                 resolved_asset.license_status
                                 if resolved_asset is not None
-                                else LicenseStatus.GENERATED
+                                else (
+                                    LicenseStatus.GENERATED
+                                    if visual["execution_mode"] == "LEGACY_SINGLE_SCENE"
+                                    else None
+                                )
                             ),
                             asset_license_name=(
                                 resolved_asset.license_name
@@ -1789,30 +2109,11 @@ class VisualProductionV2Service:
                                 if resolved_asset is not None
                                 else ()
                             ),
-                            visual_content_sha256=(
-                                visual_runtime_sha
-                            ),
-                            visual_mime_type=(
-                                resolved_asset.mime_type
-                                if resolved_asset is not None
-                                else "video/mp4"
-                            ),
-                            visual_width=(
-                                resolved_asset.width
-                                if resolved_asset is not None
-                                else render_res.width
-                            ),
-                            visual_height=(
-                                resolved_asset.height
-                                if resolved_asset is not None
-                                else render_res.height
-                            ),
-                            visual_duration_ms=(
-                                int(round(resolved_asset.duration_seconds * 1000))
-                                if resolved_asset is not None
-                                and resolved_asset.duration_seconds is not None
-                                else actual_duration_ms
-                            ),
+                            visual_content_sha256=visual["visual_content_sha256"],
+                            visual_mime_type=visual["visual_mime_type"],
+                            visual_width=visual["visual_width"],
+                            visual_height=visual["visual_height"],
+                            visual_duration_ms=visual["visual_duration_ms"],
                             asset_provider_metadata=(
                                 _safe_provider_metadata(resolved_asset.metadata)
                                 if resolved_asset is not None
@@ -2231,6 +2532,9 @@ class VisualProductionV2Service:
                 ),
                 "runtime_branding": runtime_branding,
                 "runtime_audio_mix": runtime_audio_mix,
+                "runtime_visual_beats": [
+                    item.model_dump(mode="json") for item in runtime_visual_beats
+                ],
                 "scenes": [s.model_dump(mode="json") for s in scene_results],
             }
 
@@ -2268,6 +2572,7 @@ class VisualProductionV2Service:
             runtime_subtitle_cues=tuple(runtime_subtitle_cues),
             runtime_subtitle_artifacts=tuple(runtime_subtitle_artifacts),
             runtime_scenes=tuple(scene_results),
+            runtime_visual_beats=tuple(runtime_visual_beats),
             runtime_branding=runtime_branding,
             runtime_audio_mix=runtime_audio_mix,
             subtitle_style_applied=(
@@ -2330,6 +2635,11 @@ class VisualProductionV2Service:
 
         if manifest.get("scene_artifacts_version") != "v1":
             raise VerticalSliceError("Scene preview unavailable for legacy run")
+
+        if manifest.get("canonical_render_semantics_version", 0) >= 3:
+            raise VerticalSliceError(
+                "Scene regeneration is unavailable for multi-beat render semantics"
+            )
 
         if manifest.get("narration_enabled") or manifest.get("karaoke_subtitles_enabled") or manifest.get("subtitle_enabled") or manifest.get("audio_mix_enabled"):
             raise VerticalSliceError("V1 regeneration unsupported for audio/subtitle enabled base runs")

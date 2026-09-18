@@ -113,6 +113,36 @@ def _runtime_result(mode="STANDARD", *, provider=False):
         },
     }
     off = mode == "OFF"
+    runtime_beat = {
+        "parent_scene_index": 1,
+        "materialized_beat_index": 0,
+        "source_editorial_beat_index": 0,
+        "source_statement_references": (2, 4),
+        "semantic_role": "LEGACY_PARENT_SCENE",
+        "start_offset_ms": 0,
+        "end_offset_ms": 1000,
+        "duration_ms": 1000,
+        "template_id": "EXPLAINER",
+        "camera_motion_intent": "LEGACY",
+        "transition_intent": "HARD_CUT",
+        "asset_action": "ACQUIRE_IF_NEEDED" if provider else "LOCAL_TEMPLATE",
+        "reuse_from_beat_index": None,
+        "visual_origin": "PROVIDER" if provider else "TEMPLATE",
+        "asset_kind": "IMAGE" if provider else None,
+        "query": "safe query" if provider else None,
+        "provider": "PEXELS" if provider else None,
+        "provider_asset_id": "pexels-7" if provider else None,
+        "source_url": "https://cdn.example/asset.jpg?token=secret" if provider else None,
+        "source_page_url": "https://example/item/7#fragment" if provider else None,
+        "license_status": "LICENSED" if provider else "GENERATED",
+        "license_name": "Pexels License" if provider else None,
+        "license_url": "https://example/license?signature=x" if provider else None,
+        "attribution": "Example Creator" if provider else None,
+        "allowed_attribution_channels": (),
+        "provider_metadata": visual["asset_provider_metadata"] if provider else {},
+        "provider_asset_content_sha256": "b" * 64 if provider else None,
+        "rendered_beat_clip_sha256": "e" * 64,
+    }
     cues = () if off else (
         {"scene_index": 1, "cue_order": 1, "start_ms": 0, "end_ms": 1000, "text": "Exact runtime narration"},
     )
@@ -121,6 +151,7 @@ def _runtime_result(mode="STANDARD", *, provider=False):
     )
     return SimpleNamespace(
         runtime_scenes=(visual,),
+        runtime_visual_beats=(runtime_beat,),
         runtime_narration_segments=(
             {
                 "scene_index": 1,
@@ -203,23 +234,23 @@ def test_snapshot_is_deterministic_strict_json_and_deeply_immutable():
     assert snapshot.schema_version == RUNTIME_TRUTH_SCHEMA_VERSION
     assert snapshot.canonical_json() == snapshot.canonical_json()
     assert json.loads(snapshot.canonical_json())["artifact"]["version"] == 1
-    assert snapshot.visuals[0].license_status.value == "GENERATED"
+    assert snapshot.visual_beats[0].license_status.value == "GENERATED"
     with pytest.raises((TypeError, AttributeError)):
         snapshot.audio_mix["events"][0]["gain_db"] = 0
     with pytest.raises(ValidationError):
         snapshot.schema_version = 2
 
 
-def test_schema_v2_visual_license_status_is_required_and_validated():
+def test_schema_v4_beat_visual_license_status_is_required_and_validated():
     contract = _contract()
     result = _runtime_result()
-    del result.runtime_scenes[0]["asset_license_status"]
+    del result.runtime_visual_beats[0]["license_status"]
     result.content_request_id = contract.lineage.content_request_id
     result.script_version_id = contract.lineage.script_version_id
     result.mission_execution_id = contract.lineage.mission_execution_id
     result.mission_id = contract.lineage.mission_id
 
-    with pytest.raises(KeyError, match="asset_license_status"):
+    with pytest.raises(KeyError, match="license_status"):
         build_production_runtime_truth_snapshot(
             contract=contract,
             render_plan_id=uuid4(),
@@ -239,7 +270,7 @@ def test_schema_v2_visual_license_status_is_required_and_validated():
             },
         )
 
-    result.runtime_scenes[0]["asset_license_status"] = "NOT_A_STATUS"
+    result.runtime_visual_beats[0]["license_status"] = "NOT_A_STATUS"
     with pytest.raises(ValidationError, match="license_status"):
         build_production_runtime_truth_snapshot(
             contract=contract,
@@ -319,8 +350,8 @@ def test_off_subtitle_truth_is_physically_empty():
 
 def test_provider_references_are_sanitized_and_secret_metadata_removed():
     snapshot = _snapshot(provider=True)
-    visual = snapshot.visuals[0]
-    assert visual.origin == "PROVIDER"
+    visual = snapshot.visual_beats[0]
+    assert visual.visual_origin == "PROVIDER"
     assert visual.source_url == "https://cdn.example/asset.jpg"
     assert visual.source_page_url == "https://example/item/7"
     assert visual.license_url == "https://example/license"

@@ -1751,6 +1751,7 @@ async def test_idempotency_v1_edge_cases(tmp_path: Path, lineage_data):
 @pytest.mark.asyncio
 async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
     orch = make_mock_orchestrator(tmp_path)
+    orch.resolve = AsyncMock(wraps=orch.resolve)
     m_exec = lineage_data["mission_execution"]
     req = lineage_data["content_request"]
     session = make_mock_session(m_exec=m_exec, req=req)
@@ -1830,6 +1831,32 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
 
     scene1_base_sha = base_manifest["scenes"][0]["content_sha256"]
     scene2_base_sha = base_manifest["scenes"][1]["content_sha256"]
+    provider_calls_before_rejection = orch.resolve.await_count
+    render_calls_before_rejection = list(render_calls)
+
+    # Current render-semantics-v3 scenes fail closed instead of being collapsed
+    # through the legacy single-template regeneration path.
+    with pytest.raises(
+        VerticalSliceError,
+        match="unavailable for multi-beat render semantics",
+    ):
+        await svc.regenerate_scene(
+            session,
+            m_exec.id,
+            req.id,
+            base_fingerprint,
+            scene_index=2,
+            visual_strategy_override=VisualStrategy.IMAGE,
+            asset_query_override="regenerated query test",
+        )
+    assert orch.resolve.await_count == provider_calls_before_rejection
+    assert render_calls == render_calls_before_rejection
+
+    # Preserve coverage of the historical v1 regeneration behavior by making
+    # this fixture explicitly represent a render-semantics-v2 base artifact.
+    base_manifest["canonical_render_semantics_version"] = 2
+    with open(base_manifest_path, "w", encoding="utf-8") as f:
+        json.dump(base_manifest, f, indent=2)
 
     # 2. Regenerate Scene 2 with IMAGE and new query
     render_calls.clear()

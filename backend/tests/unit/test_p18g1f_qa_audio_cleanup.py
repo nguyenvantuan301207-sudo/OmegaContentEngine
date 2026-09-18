@@ -348,7 +348,7 @@ def _cache_compatible(manifest: dict) -> bool:
 
 
 def test_current_semantic_authorities_and_cache_compatibility():
-    assert CANONICAL_RENDER_SEMANTICS_VERSION == 2
+    assert CANONICAL_RENDER_SEMANTICS_VERSION == 3
     assert SUBTITLE_SEMANTICS_VERSION == 3
     assert FINAL_MASTER_SAMPLE_RATE_HZ == 48_000
     assert _cache_compatible(_current_manifest())
