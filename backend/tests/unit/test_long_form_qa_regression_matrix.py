@@ -10,13 +10,15 @@ from omega.domain.production import ProductionQARuleCode, ProductionQAStatus
 
 def _build_long_form_fixture():
     engine = StoryboardEngine()
+    hook_text = "Welcome to this video where we discuss very interesting things about everything in the world today."
+    cta_text = "Thank you for watching please subscribe to the channel and leave a comment below today."
 
     script_version_like = SimpleNamespace(
         id="long-form-script",
         title="Long Form Canary Fixture",
         estimated_duration_seconds=60.0,
-        hook_text="Welcome to this video where we discuss very interesting things about everything in the world today.",
-        cta_text="Thank you for watching please subscribe to the channel and leave a comment below today.",
+        hook_text="",
+        cta_text="",
         closing_text="",
         sections=[
             SimpleNamespace(
@@ -98,7 +100,7 @@ def _build_long_form_fixture():
                     SimpleNamespace(
                         statement_order=6,
                         statement_text="Thank you for watching please subscribe to the channel and leave a comment below today.",
-                        statement_type="NARRATION",
+                        statement_type="CTA",
                         citations=[],
                     )
                 ]
@@ -108,8 +110,8 @@ def _build_long_form_fixture():
 
     script_dict = ScriptStoryboardAdapter.to_script_dict(script_version_like)
     script_dict["id"] = script_version_like.id
-    script_dict["hook_text"] = script_version_like.hook_text
-    script_dict["cta_text"] = script_version_like.cta_text
+    script_dict["hook_text"] = hook_text
+    script_dict["cta_text"] = cta_text
     script_dict["closing_text"] = script_version_like.closing_text
 
     plan = engine.generate_storyboard(script_dict)

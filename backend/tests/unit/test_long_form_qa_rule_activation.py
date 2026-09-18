@@ -243,7 +243,15 @@ def test_guardian_mapping():
 
 
 def test_guardian_mapped_count():
-    assert len(PROD_RULE_SEVERITY_RISK_MAP) == 28
+    mapped_rule_codes = set(PROD_RULE_SEVERITY_RISK_MAP)
+    authoritative_rule_codes = {code.value for code in ProductionQARuleCode}
+
+    assert len(mapped_rule_codes) == len(PROD_RULE_SEVERITY_RISK_MAP) == 29
+    assert mapped_rule_codes <= authoritative_rule_codes
+    assert (
+        ProductionQARuleCode.MISSING_REQUIRED_VISUAL_ATTRIBUTION.value
+        in mapped_rule_codes
+    )
 
 
 def test_visual_repetition_empty_strategy_breaks_chain():

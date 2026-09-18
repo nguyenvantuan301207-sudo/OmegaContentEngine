@@ -94,7 +94,7 @@ def test_long_form_fixture_contract():
                     SimpleNamespace(
                         statement_order=6,
                         statement_text="Thank you for watching please subscribe to the channel and leave a comment below today.",
-                        statement_type="NARRATION",
+                        statement_type="CTA",
                         citations=[],
                     )
                 ]
