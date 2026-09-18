@@ -773,6 +773,123 @@ class ContentSelectionDecision(Base):
     )
 
 
+class ContentCampaign(Base):
+    """Canonical bounded multi-content campaign planning authority."""
+
+    __tablename__ = "content_campaigns"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    channel_dna_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    objective: Mapped[str | None] = mapped_column(Text, nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="READY", index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    items: Mapped[list[ContentCampaignItem]] = relationship(
+        "ContentCampaignItem",
+        back_populates="campaign",
+        order_by="ContentCampaignItem.position.asc()",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "channel_id", "idempotency_key", name="uq_content_campaigns_channel_idempotency"
+        ),
+        CheckConstraint("status = 'READY'", name="ck_content_campaigns_status"),
+        CheckConstraint(
+            "item_count >= 1 AND item_count <= 50", name="ck_content_campaigns_item_count_range"
+        ),
+        CheckConstraint("priority >= 1", name="ck_content_campaigns_priority_positive"),
+    )
+
+
+class ContentCampaignItem(Base):
+    """Ordered item within a content campaign binding to a finalized selection run."""
+
+    __tablename__ = "content_campaign_items"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_campaigns.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    selection_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_selection_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    selection_decision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_selection_decisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    topic_candidate_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("topic_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    target_content_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    planned_release_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    campaign: Mapped[ContentCampaign] = relationship(
+        "ContentCampaign", back_populates="items"
+    )
+    selection_run: Mapped[ContentSelectionRun] = relationship(
+        "ContentSelectionRun"
+    )
+    selection_decision: Mapped[ContentSelectionDecision] = relationship(
+        "ContentSelectionDecision"
+    )
+    topic_candidate: Mapped[TopicCandidate] = relationship(
+        "TopicCandidate"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id", "position", name="uq_content_campaign_items_campaign_position"
+        ),
+        UniqueConstraint(
+            "selection_run_id", name="uq_content_campaign_items_selection_run"
+        ),
+        UniqueConstraint(
+            "campaign_id", "topic_candidate_id", name="uq_content_campaign_items_campaign_candidate"
+        ),
+        CheckConstraint(
+            "position >= 1 AND position <= 50", name="ck_content_campaign_items_position_positive"
+        ),
+        CheckConstraint(
+            "target_content_type IN ('YOUTUBE_LONGFORM', 'YOUTUBE_SHORT')",
+            name="ck_content_campaign_items_content_type",
+        ),
+    )
+
+
 class ResearchRequest(Base):
     """ResearchRequest database model representing a research execution request."""
 
