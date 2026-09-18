@@ -643,6 +643,136 @@ class TopicAngle(Base):
 # ── OMEGA-005 Research Engine Models ──
 
 
+class ContentSelectionRun(Base):
+    """Immutable ranking execution with a separately finalized winner."""
+
+    __tablename__ = "content_selection_runs"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    channel_dna_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    mission_execution_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mission_executions.id", ondelete="RESTRICT"),
+        nullable=True,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="READY", index=True)
+    policy_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    policy_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_set_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    recommended_candidate_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("topic_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    selected_candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("topic_candidates.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    selection_mode: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    selected_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    selection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    considered_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    selected_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    decisions: Mapped[list[ContentSelectionDecision]] = relationship(
+        "ContentSelectionDecision",
+        back_populates="selection_run",
+        order_by="ContentSelectionDecision.rank.asc()",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "channel_id", "idempotency_key", name="uq_content_selection_runs_channel_idempotency"
+        ),
+        CheckConstraint("status IN ('READY', 'SELECTED')", name="ck_content_selection_runs_status"),
+        CheckConstraint(
+            "selection_mode IS NULL OR selection_mode IN ('POLICY', 'OVERRIDE')",
+            name="ck_content_selection_runs_mode",
+        ),
+        CheckConstraint("considered_count > 0", name="ck_content_selection_runs_count_positive"),
+        CheckConstraint(
+            "(status = 'READY' AND selected_candidate_id IS NULL AND selection_mode IS NULL "
+            "AND selected_by IS NULL AND selection_reason IS NULL AND selected_at IS NULL) OR "
+            "(status = 'SELECTED' AND selected_candidate_id IS NOT NULL "
+            "AND selection_mode IS NOT NULL AND selected_by IS NOT NULL "
+            "AND selection_reason IS NOT NULL AND selected_at IS NOT NULL)",
+            name="ck_content_selection_runs_finalization_fields",
+        ),
+    )
+
+
+class ContentSelectionDecision(Base):
+    """Immutable per-candidate evidence and score snapshot for one selection run."""
+
+    __tablename__ = "content_selection_decisions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    selection_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_selection_runs.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    candidate_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("topic_candidates.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    rank: Mapped[int] = mapped_column(Integer, nullable=False)
+    final_score: Mapped[float] = mapped_column(Float, nullable=False)
+    score_breakdown: Mapped[dict] = mapped_column(JSON, nullable=False)
+    reasons: Mapped[list] = mapped_column(JSON, nullable=False)
+    duplicate_status: Mapped[str] = mapped_column(String(50), nullable=False)
+    similar_memory_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("topic_memory.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    similarity_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    candidate_title_snapshot: Mapped[str] = mapped_column(String(300), nullable=False)
+    topic_fingerprint_snapshot: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    evidence_snapshot: Mapped[dict] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    selection_run: Mapped[ContentSelectionRun] = relationship(
+        "ContentSelectionRun", back_populates="decisions"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "selection_run_id", "candidate_id", name="uq_selection_decisions_run_candidate"
+        ),
+        UniqueConstraint("selection_run_id", "rank", name="uq_selection_decisions_run_rank"),
+        CheckConstraint("rank > 0", name="ck_selection_decisions_rank_positive"),
+        CheckConstraint(
+            "final_score >= 0 AND final_score <= 100",
+            name="ck_selection_decisions_score_range",
+        ),
+    )
+
+
 class ResearchRequest(Base):
     """ResearchRequest database model representing a research execution request."""
 

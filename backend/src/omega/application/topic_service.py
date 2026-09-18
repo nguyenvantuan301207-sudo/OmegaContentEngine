@@ -54,6 +54,10 @@ from omega.logging import get_logger
 logger = get_logger(service="omega-topic-service")
 
 
+class TopicSelectionConflictError(ValueError):
+    """Raised when a candidate cannot be newly claimed for selection."""
+
+
 async def _reload_candidate(session: AsyncSession, candidate_id: UUID) -> TopicCandidate:
     """Reload candidate with preloaded angles to avoid expired attribute access."""
     res = await session.execute(
@@ -388,6 +392,75 @@ async def _resolve_dna_context(
     return ctx
 
 
+def evaluate_candidate_inputs(
+    candidate: TopicCandidate,
+    channel_context: ChannelContext,
+    memory_records: list[TopicMemory],
+    profile: TopicScoringProfile = DEFAULT_SCORING_PROFILE,
+    sim_profile: SimilarityProfile = DEFAULT_SIMILARITY_PROFILE,
+) -> dict:
+    """Pure selection-time evaluation using the canonical topic algorithms.
+
+    The returned values are detached operational evidence. Neither the candidate nor
+    TopicMemory is mutated, which lets selection runs snapshot a complete candidate
+    set before any explicit finalization.
+    """
+    best_status = DuplicateStatus.FRESH_TOPIC
+    best_sim = 0.0
+    matched_memory: TopicMemory | None = None
+
+    for memory in memory_records:
+        if (
+            memory.topic_fingerprint == candidate.topic_fingerprint
+            and memory.times_discovered <= 1
+            and memory.times_selected == 0
+            and memory.times_produced == 0
+        ):
+            continue
+
+        memory_angles = [
+            {"angle": angle.angle, "normalized_angle": angle.normalized_angle}
+            for angle in memory.angles
+        ]
+        candidate_angles = [
+            {"angle": angle.angle, "normalized_angle": angle.normalized_angle}
+            for angle in candidate.angles
+        ]
+        duplicate_status, similarity = classify_topic_similarity(
+            candidate_norm_title=candidate.normalized_title,
+            candidate_entities=candidate.entities,
+            candidate_keywords=candidate.keywords,
+            candidate_fingerprint=candidate.topic_fingerprint,
+            candidate_angles=candidate_angles,
+            memory_norm_title=memory.normalized_topic,
+            memory_entities=memory.entities,
+            memory_keywords=memory.keywords,
+            memory_fingerprint=memory.topic_fingerprint,
+            memory_angles=memory_angles,
+            profile=sim_profile,
+        )
+        if similarity > best_sim:
+            best_sim = similarity
+            best_status = duplicate_status
+            matched_memory = memory
+
+    scores = calculate_topic_scores(
+        candidate=candidate,
+        channel_context=channel_context,
+        duplicate_status=best_status,
+        similar_memory=matched_memory,
+        memory_records=memory_records,
+        profile=profile,
+    )
+    return {
+        **scores,
+        "duplicate_status": best_status,
+        "similarity_score": round(best_sim, 3) if best_sim > 0 else None,
+        "similar_memory_id": matched_memory.id if matched_memory else None,
+        "matched_memory": matched_memory,
+    }
+
+
 async def evaluate_candidate(
     session: AsyncSession,
     candidate_id: UUID,
@@ -426,75 +499,30 @@ async def evaluate_candidate(
     )
     memory_records = mem_res.scalars().all()
 
-    # 4. Find most similar TopicMemory record
-    best_status = DuplicateStatus.FRESH_TOPIC
-    best_sim = 0.0
-    matched_memory_id: UUID | None = None
-    matched_memory: TopicMemory | None = None
-
-    for mem in memory_records:
-        # Ignore self-memory if this memory record was created solely by this candidate
-        # and has never been discovered by another source or selected/produced
-        if (
-            mem.topic_fingerprint == cand.topic_fingerprint
-            and mem.times_discovered <= 1
-            and mem.times_selected == 0
-            and mem.times_produced == 0
-        ):
-            continue
-
-        mem_angles_list = [
-            {"angle": a.angle, "normalized_angle": a.normalized_angle} for a in mem.angles
-        ]
-        cand_angles_list = [
-            {"angle": a.angle, "normalized_angle": a.normalized_angle} for a in cand.angles
-        ]
-
-        status, sim = classify_topic_similarity(
-            candidate_norm_title=cand.normalized_title,
-            candidate_entities=cand.entities,
-            candidate_keywords=cand.keywords,
-            candidate_fingerprint=cand.topic_fingerprint,
-            candidate_angles=cand_angles_list,
-            memory_norm_title=mem.normalized_topic,
-            memory_entities=mem.entities,
-            memory_keywords=mem.keywords,
-            memory_fingerprint=mem.topic_fingerprint,
-            memory_angles=mem_angles_list,
-            profile=sim_profile,
-        )
-
-        if sim > best_sim:
-            best_sim = sim
-            best_status = status
-            matched_memory_id = mem.id
-            matched_memory = mem
-
-    cand.duplicate_status = best_status.value
-    cand.similarity_score = round(best_sim, 3) if best_sim > 0 else None
-    cand.similar_memory_id = matched_memory_id
-
-    # 5. Compute Explainable Scores
-    scores = calculate_topic_scores(
+    # 4-5. Compute duplicate evidence and explainable scores without mutation.
+    evaluation = evaluate_candidate_inputs(
         candidate=cand,
         channel_context=ctx,
-        duplicate_status=best_status,
-        similar_memory=matched_memory,
-        memory_records=memory_records,
+        memory_records=list(memory_records),
         profile=profile,
+        sim_profile=sim_profile,
     )
 
-    cand.audience_fit_score = scores["audience_fit_score"]
-    cand.strategic_fit_score = scores["strategic_fit_score"]
-    cand.trend_score = scores["trend_score"]
-    cand.novelty_score = scores["novelty_score"]
-    cand.content_gap_score = scores["content_gap_score"]
-    cand.historical_performance_score = scores["historical_performance_score"]
-    cand.cost_efficiency_score = scores["cost_efficiency_score"]
-    cand.revenue_potential_score = scores["revenue_potential_score"]
-    cand.final_score = scores["final_score"]
-    cand.score_breakdown = scores["score_breakdown"]
-    cand.reasons = scores["reasons"]
+    cand.duplicate_status = evaluation["duplicate_status"].value
+    cand.similarity_score = evaluation["similarity_score"]
+    cand.similar_memory_id = evaluation["similar_memory_id"]
+
+    cand.audience_fit_score = evaluation["audience_fit_score"]
+    cand.strategic_fit_score = evaluation["strategic_fit_score"]
+    cand.trend_score = evaluation["trend_score"]
+    cand.novelty_score = evaluation["novelty_score"]
+    cand.content_gap_score = evaluation["content_gap_score"]
+    cand.historical_performance_score = evaluation["historical_performance_score"]
+    cand.cost_efficiency_score = evaluation["cost_efficiency_score"]
+    cand.revenue_potential_score = evaluation["revenue_potential_score"]
+    cand.final_score = evaluation["final_score"]
+    cand.score_breakdown = evaluation["score_breakdown"]
+    cand.reasons = evaluation["reasons"]
     cand.evaluated_at = datetime.now(UTC)
 
     # 6. Status transition
@@ -507,8 +535,8 @@ async def evaluate_candidate(
         cand.status = TopicStatus.EVALUATED.value
 
     # Update memory last_evaluation_score if matched
-    if matched_memory:
-        matched_memory.last_evaluation_score = cand.final_score
+    if evaluation["matched_memory"]:
+        evaluation["matched_memory"].last_evaluation_score = cand.final_score
 
     await session.commit()
 
@@ -573,11 +601,14 @@ async def list_recommendations(
     return [_to_candidate_response(c) for c in res.scalars().all()]
 
 
-async def select_candidate(
+async def select_candidate_in_transaction(
     session: AsyncSession,
     candidate_id: UUID,
-) -> TopicCandidateResponse:
-    """Select a candidate for production, updating TopicMemory times_selected exactly once."""
+    *,
+    fail_if_already_selected: bool = False,
+    expected_channel_id: UUID | None = None,
+) -> TopicCandidate:
+    """Apply canonical selection effects without committing the caller's transaction."""
     res = await session.execute(
         select(TopicCandidate)
         .options(selectinload(TopicCandidate.angles))
@@ -588,12 +619,19 @@ async def select_candidate(
     if not cand:
         raise ValueError(f"Candidate with ID '{candidate_id}' not found.")
 
+    if expected_channel_id is not None and cand.channel_id != expected_channel_id:
+        raise TopicSelectionConflictError("Candidate does not belong to the selection channel.")
+
     if cand.status == TopicStatus.SELECTED.value:
+        if fail_if_already_selected:
+            raise TopicSelectionConflictError(
+                "Candidate was already selected by another selection authority."
+            )
         # Idempotent no-op
-        return _to_candidate_response(cand)
+        return cand
 
     if cand.status in (TopicStatus.ARCHIVED.value, TopicStatus.REJECTED.value):
-        raise ValueError(f"Cannot select candidate in '{cand.status}' state.")
+        raise TopicSelectionConflictError(f"Cannot select candidate in '{cand.status}' state.")
 
     cand.status = TopicStatus.SELECTED.value
 
@@ -632,6 +670,16 @@ async def select_candidate(
         )
         session.add(new_mem)
 
+    await session.flush()
+    return cand
+
+
+async def select_candidate(
+    session: AsyncSession,
+    candidate_id: UUID,
+) -> TopicCandidateResponse:
+    """Legacy/manual selection wrapper preserving the existing API transaction contract."""
+    await select_candidate_in_transaction(session, candidate_id)
     await session.commit()
     loaded_cand = await _reload_candidate(session, candidate_id)
     logger.info("Candidate selected for production", candidate_id=str(candidate_id))

@@ -13,7 +13,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.api.dependencies import get_db
-from omega.application import topic_service
+from omega.application import content_selection_service, topic_service
+from omega.domain.content_selection import (
+    ContentSelectionFinalize,
+    ContentSelectionRunCreate,
+    ContentSelectionRunResponse,
+)
 from omega.domain.topic import (
     TopicCandidateBatchImport,
     TopicCandidateCreate,
@@ -25,6 +30,73 @@ from omega.domain.topic import (
 )
 
 router = APIRouter(prefix="/api/v1/channels/{channel_id}/topics", tags=["Topics"])
+
+
+@router.post(
+    "/selection-runs",
+    response_model=ContentSelectionRunResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_content_selection_run(
+    channel_id: UUID,
+    request: ContentSelectionRunCreate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ContentSelectionRunResponse:
+    """Execute and persist a deterministic ranking without selecting a candidate."""
+    try:
+        return await content_selection_service.create_selection_run(db, channel_id, request)
+    except content_selection_service.ContentSelectionConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/selection-runs", response_model=list[ContentSelectionRunResponse])
+async def list_content_selection_runs(
+    channel_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> list[ContentSelectionRunResponse]:
+    """List recent canonical selection runs for a channel."""
+    return await content_selection_service.list_selection_runs(
+        db, channel_id, limit=limit, offset=offset
+    )
+
+
+@router.get("/selection-runs/{run_id}", response_model=ContentSelectionRunResponse)
+async def get_content_selection_run(
+    channel_id: UUID,
+    run_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ContentSelectionRunResponse:
+    """Return a run and its immutable decisions ordered by rank."""
+    run = await content_selection_service.get_selection_run(db, channel_id, run_id)
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Selection run not found.")
+    return run
+
+
+@router.post(
+    "/selection-runs/{run_id}/finalize", response_model=ContentSelectionRunResponse
+)
+async def finalize_content_selection_run(
+    channel_id: UUID,
+    run_id: UUID,
+    request: ContentSelectionFinalize,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ContentSelectionRunResponse:
+    """Finalize the recommendation or an explicitly reasoned human override."""
+    try:
+        return await content_selection_service.finalize_selection_run(
+            db, channel_id, run_id, request
+        )
+    except content_selection_service.ContentSelectionNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except content_selection_service.ContentSelectionConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
 @router.post(
