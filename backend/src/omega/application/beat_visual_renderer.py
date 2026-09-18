@@ -31,26 +31,106 @@ def _ceil_div(numerator: int, denominator: int) -> int:
     return (numerator + denominator - 1) // denominator
 
 
+def quantize_parent_frame_counts(
+    intervals: Sequence[tuple[int, int]],
+    global_duration_ms: int,
+    fps: int,
+) -> tuple[int, ...]:
+    """Calculate deterministic cumulative frame-boundary allocations for parent scenes.
+
+    Derives physical parent frame allocations aligned to the authoritative global timeline:
+        start_frame_i = ceil_div(scene_start_ms * fps, 1000)
+        end_frame_i = ceil_div(scene_end_ms * fps, 1000)
+        parent_frame_count_i = end_frame_i - start_frame_i
+
+    Guarantees:
+        sum(parent_frame_counts) == ceil_div(global_duration_ms * fps, 1000) exactly.
+    """
+    if isinstance(fps, bool) or not isinstance(fps, int) or fps <= 0:
+        raise BeatVisualRenderError(f"fps must be a positive integer, got {fps!r}")
+    if not intervals:
+        raise BeatVisualRenderError("Cannot quantize frame counts for empty intervals")
+    if isinstance(global_duration_ms, bool) or not isinstance(global_duration_ms, int) or global_duration_ms <= 0:
+        raise BeatVisualRenderError(
+            f"global_duration_ms must be a positive integer, got {global_duration_ms!r}"
+        )
+
+    first_start, _ = intervals[0]
+    if first_start != 0:
+        raise BeatVisualRenderError(
+            f"First scene interval must start at 0 ms, got {first_start} ms"
+        )
+
+    for idx, (start_ms, end_ms) in enumerate(intervals):
+        if end_ms <= start_ms:
+            raise BeatVisualRenderError(
+                f"Scene interval {idx} has non-positive duration: start={start_ms} ms, end={end_ms} ms"
+            )
+        if idx > 0:
+            prev_end = intervals[idx - 1][1]
+            if start_ms != prev_end:
+                raise BeatVisualRenderError(
+                    f"Non-contiguous scene intervals at index {idx}: "
+                    f"starts at {start_ms} ms, previous ended at {prev_end} ms"
+                )
+
+    last_end = intervals[-1][1]
+    if last_end != global_duration_ms:
+        raise BeatVisualRenderError(
+            f"Final scene end_ms ({last_end}) does not match global_duration_ms ({global_duration_ms})"
+        )
+
+    parent_frames: list[int] = []
+    for idx, (start_ms, end_ms) in enumerate(intervals):
+        start_frame = _ceil_div(start_ms * fps, 1000)
+        end_frame = _ceil_div(end_ms * fps, 1000)
+        count = end_frame - start_frame
+        if count <= 0:
+            raise BeatVisualRenderError(
+                f"Scene interval {idx} quantized to non-positive frame count: {count}"
+            )
+        parent_frames.append(count)
+
+    expected_total = _ceil_div(global_duration_ms * fps, 1000)
+    if sum(parent_frames) != expected_total:
+        raise BeatVisualRenderError(
+            f"Sum of parent frames ({sum(parent_frames)}) != expected global total ({expected_total})"
+        )
+
+    return tuple(parent_frames)
+
+
 def quantize_beat_frame_counts(
     units: Sequence[BeatRenderUnit],
     total_duration_ms: int,
     fps: int,
+    *,
+    timeline_start_ms: int = 0,
 ) -> tuple[int, ...]:
     """Calculate deterministic cumulative frame-boundary allocations for beat units.
 
-    Derives physical frame boundaries cumulatively using exact integer ceil division:
-        cumulative_end_frame = ceil_div(unit.end_ms * fps, 1000)
-        beat_frames = cumulative_end_frame - previous_end_frame
+    When timeline_start_ms is provided (for parent scenes in a global timeline),
+    boundaries are quantized against the global absolute timeline:
+        absolute_end_frame = ceil_div((timeline_start_ms + unit.end_ms) * fps, 1000)
+        beat_frames = absolute_end_frame - previous_absolute_frame
 
     Guarantees:
-        sum(beat_frames) == ceil_div(total_duration_ms * fps, 1000) exactly.
+        sum(beat_frames) == ceil_div((timeline_start_ms + total_duration_ms) * fps, 1000)
+                           - ceil_div(timeline_start_ms * fps, 1000) exactly.
     """
-    if not isinstance(fps, int) or fps <= 0:
+    if isinstance(fps, bool) or not isinstance(fps, int) or fps <= 0:
         raise BeatVisualRenderError(f"fps must be a positive integer, got {fps!r}")
+    if isinstance(timeline_start_ms, bool) or not isinstance(timeline_start_ms, int) or timeline_start_ms < 0:
+        raise BeatVisualRenderError(
+            f"timeline_start_ms must be a non-negative integer, got {timeline_start_ms!r}"
+        )
     if not units:
         raise BeatVisualRenderError("Cannot quantize frame counts for empty units")
 
-    expected_total_frames = _ceil_div(total_duration_ms * fps, 1000)
+    expected_total_frames = (
+        _ceil_div((timeline_start_ms + total_duration_ms) * fps, 1000)
+        - _ceil_div(timeline_start_ms * fps, 1000)
+    )
 
     # Validate units ordering, contiguity, and positive durations
     for idx, unit in enumerate(units):
@@ -86,10 +166,10 @@ def quantize_beat_frame_counts(
         )
 
     frame_counts: list[int] = []
-    prev_end_frame = 0
+    prev_end_frame = _ceil_div(timeline_start_ms * fps, 1000)
 
     for unit in units:
-        cum_end_frame = _ceil_div(unit.end_ms * fps, 1000)
+        cum_end_frame = _ceil_div((timeline_start_ms + unit.end_ms) * fps, 1000)
         frames = cum_end_frame - prev_end_frame
         if frames <= 0:
             raise BeatVisualRenderError(
@@ -155,6 +235,7 @@ class BeatVisualRenderer:
         fps: int = 24,
         accent_color: str | None = None,
         bg_color: str | None = None,
+        timeline_start_ms: int = 0,
     ) -> BeatVisualRenderResult:
         """Render all units in a BeatRenderPlan into physical MP4 clips."""
         if render_plan.parent_scene_index != asset_execution.parent_scene_index:
@@ -178,6 +259,7 @@ class BeatVisualRenderer:
             render_plan.units,
             render_plan.total_duration_ms,
             fps,
+            timeline_start_ms=timeline_start_ms,
         )
 
         output_dir.mkdir(parents=True, exist_ok=True)

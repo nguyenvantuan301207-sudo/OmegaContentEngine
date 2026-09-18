@@ -680,7 +680,7 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
     # Mock video renderer
     mock_video_renderer = MagicMock()
 
-    async def fake_render_clip(document, motion_profile, duration_seconds, output_path, browser_runtime, fps, broll_asset=None):
+    async def fake_render_clip(document, motion_profile, duration_seconds, output_path, browser_runtime, fps, broll_asset=None, frame_count_override=None, **kwargs):
         output_path.write_bytes(VALID_MP4_HEADER + b"render_content")
         return VisualV2VideoRenderResult(
             output_path=output_path,
@@ -701,7 +701,7 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
     # Mock FFmpegRenderer concat
     mock_ffmpeg_renderer = MagicMock()
 
-    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None):
+    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None, exact_video_frame_count=None, **kwargs):
         Path(output_path).write_bytes(VALID_MP4_HEADER + b"render_content")
 
     mock_ffmpeg_renderer.concatenate_clips = AsyncMock(side_effect=fake_concat)
@@ -1113,11 +1113,11 @@ async def test_narration_success_flow(tmp_path: Path, lineage_data):
         )
     svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
 
-    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None):
+    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None, exact_video_frame_count=None, **kwargs):
         Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat")
     mock_ffmpeg.concatenate_clips.side_effect = fake_concat
 
-    async def fake_mux(video_path, audio_path, output_path):
+    async def fake_mux(video_path, audio_path, output_path, *args, **kwargs):
         Path(output_path).write_bytes(VALID_MP4_HEADER + b"muxed_content")
     mock_ffmpeg.mux_video_audio.side_effect = fake_mux
 
@@ -1673,7 +1673,7 @@ async def test_idempotency_v1_edge_cases(tmp_path: Path, lineage_data):
         return mock_browser_ctx
 
     mock_video_renderer = MagicMock()
-    async def fake_render_clip(document, motion_profile, duration_seconds, output_path, browser_runtime, fps, broll_asset=None):
+    async def fake_render_clip(document, motion_profile, duration_seconds, output_path, browser_runtime, fps, broll_asset=None, frame_count_override=None, **kwargs):
         output_path.write_bytes(VALID_MP4_HEADER + b"render_content")
         return VisualV2VideoRenderResult(
             output_path=output_path, scene_index=document.scene_index, template_id=document.template_id,
@@ -1683,7 +1683,7 @@ async def test_idempotency_v1_edge_cases(tmp_path: Path, lineage_data):
     mock_video_renderer.render_clip = AsyncMock(side_effect=fake_render_clip)
 
     mock_ffmpeg_renderer = MagicMock()
-    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None):
+    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None, exact_video_frame_count=None, **kwargs):
         Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat")
     mock_ffmpeg_renderer.concatenate_clips = AsyncMock(side_effect=fake_concat)
 
@@ -1776,7 +1776,7 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
     mock_video_renderer = MagicMock()
 
     render_calls = []
-    async def fake_render_clip(document, motion_profile, duration_seconds, output_path, browser_runtime, fps, broll_asset=None):
+    async def fake_render_clip(document, motion_profile, duration_seconds, output_path, browser_runtime, fps, broll_asset=None, frame_count_override=None, **kwargs):
         render_calls.append(document.scene_index)
         content = f"render_content_seq_{document.scene_index}_{len(render_calls)}".encode()
         output_path.write_bytes(VALID_MP4_HEADER + content)
@@ -1791,7 +1791,7 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
 
     mock_ffmpeg_renderer = MagicMock()
     concat_calls = []
-    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None):
+    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None, exact_video_frame_count=None, **kwargs):
         concat_calls.append(len(clip_paths))
         Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat_" + str(len(clip_paths)).encode('utf-8'))
     mock_ffmpeg_renderer.concatenate_clips = AsyncMock(side_effect=fake_concat)

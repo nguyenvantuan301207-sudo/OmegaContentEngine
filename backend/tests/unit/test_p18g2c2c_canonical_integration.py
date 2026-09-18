@@ -237,7 +237,7 @@ async def test_parent_subtitle_burn_and_narration_mux_each_run_exactly_once(tmp_
     async def burn_ass_subtitles(*, video_path, ass_path, output_path):
         Path(output_path).write_bytes(Path(video_path).read_bytes() + b"-subtitles")
 
-    async def mux_video_audio(*, video_path, audio_path, output_path):
+    async def mux_video_audio(*, video_path, audio_path, output_path, **kwargs):
         Path(output_path).write_bytes(
             Path(video_path).read_bytes() + Path(audio_path).read_bytes()
         )
@@ -353,7 +353,7 @@ async def test_pre_provider_ineligibility_and_one_beat_plan_use_legacy(tmp_path,
 
 
 def test_g2c2c_version_boundaries_are_exact():
-    assert CANONICAL_RENDER_SEMANTICS_VERSION == 4
+    assert CANONICAL_RENDER_SEMANTICS_VERSION == 5
     assert SUBTITLE_SEMANTICS_VERSION == 3
 
 

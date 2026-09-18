@@ -22,7 +22,10 @@ from omega.application.audio_mix_policy import (
 )
 from omega.application.beat_asset_executor import BeatAssetExecutor
 from omega.application.beat_clip_assembler import BeatClipAssembler
-from omega.application.beat_visual_renderer import BeatVisualRenderer
+from omega.application.beat_visual_renderer import (
+    BeatVisualRenderer,
+    quantize_parent_frame_counts,
+)
 from omega.application.brand_asset_resolver import (
     BrandAssetResolutionError,
     BrandAssetResolver,
@@ -161,7 +164,7 @@ class VerticalSliceError(Exception):
 
 KARAOKE_SUBTITLE_VERSION = "v1"
 SUBTITLE_SEMANTICS_VERSION = 3
-CANONICAL_RENDER_SEMANTICS_VERSION = 4
+CANONICAL_RENDER_SEMANTICS_VERSION = 5
 FINAL_MASTER_TARGET_I = -16.0
 FINAL_MASTER_TARGET_TP = -1.5
 FINAL_MASTER_TARGET_LRA = 7.0
@@ -959,6 +962,8 @@ class VisualProductionV2Service:
         fps: int,
         style_profile: ChannelStyleProfile | None,
         narration_enabled: bool,
+        timeline_start_ms: int = 0,
+        frame_count_override: int | None = None,
     ) -> dict[str, Any]:
         """Render one parent visual, committing irreversibly at beat acquisition."""
         duration_ms = int(round(duration_seconds * 1000))
@@ -998,6 +1003,7 @@ class VisualProductionV2Service:
                     fps=fps,
                     accent_color=style_profile.accent_color if style_profile else None,
                     bg_color=style_profile.bg_color if style_profile else None,
+                    timeline_start_ms=timeline_start_ms,
                 )
                 assembly = await self._beat_clip_assembler.assemble(
                     rendered.clips,
@@ -1164,6 +1170,7 @@ class VisualProductionV2Service:
                 browser_runtime=browser,
                 fps=fps,
                 broll_asset=broll_asset,
+                frame_count_override=frame_count_override,
             )
         except Exception as exc:
             raise VerticalSliceError(
@@ -1281,6 +1288,7 @@ class VisualProductionV2Service:
                 video_path=mux_video_input,
                 audio_path=audio_path,
                 output_path=scene_output_path,
+                preserve_video_duration=True,
             )
         except Exception as exc:
             raise VerticalSliceError(
@@ -1892,6 +1900,33 @@ class VisualProductionV2Service:
                 subtitle_decision.effective_mode != SubtitleMode.OFF
             )
 
+            if self._narration_provider:
+                parent_intervals = [
+                    (
+                        prepared_narration[s.sequence_index]["start_ms"],
+                        prepared_narration[s.sequence_index]["end_ms"],
+                    )
+                    for s in sorted_scenes
+                ]
+                global_logical_duration_ms = runtime_cursor_ms
+            else:
+                parent_intervals = []
+                curr_ms = 0
+                for s in sorted_scenes:
+                    dur_ms = max(1, int(round(s.estimated_duration_seconds * 1000)))
+                    parent_intervals.append((curr_ms, curr_ms + dur_ms))
+                    curr_ms += dur_ms
+                global_logical_duration_ms = curr_ms
+
+            parent_frame_budgets = quantize_parent_frame_counts(
+                parent_intervals, global_logical_duration_ms, fps
+            )
+            scene_frame_budget_map = {
+                s.sequence_index: fb
+                for s, fb in zip(sorted_scenes, parent_frame_budgets, strict=True)
+            }
+            global_canonical_frame_budget = sum(parent_frame_budgets)
+
             async with self._browser_runtime_factory() as browser:
                 for scene in sorted_scenes:
                     original_strategy = scene.visual_strategy
@@ -1982,6 +2017,13 @@ class VisualProductionV2Service:
                             except Exception as e:
                                 raise VerticalSliceError(f"Subtitle generation failed: {self._sanitize_error(e)}") from e
 
+                    scene_timeline_start_ms = (
+                        prepared_narration[scene.sequence_index]["start_ms"]
+                        if self._narration_provider
+                        else parent_intervals[sorted_scenes.index(scene)][0]
+                    )
+                    scene_frame_budget = scene_frame_budget_map[scene.sequence_index]
+
                     visual = await self._render_parent_visual(
                         script_dict=script_dict,
                         scene=effective_scene,
@@ -1992,6 +2034,8 @@ class VisualProductionV2Service:
                         fps=fps,
                         style_profile=style_profile,
                         narration_enabled=bool(self._narration_provider),
+                        timeline_start_ms=scene_timeline_start_ms,
+                        frame_count_override=scene_frame_budget,
                     )
                     scene_out_path = visual["scene_out_path"]
                     scene_visual_out_path = visual["scene_visual_out_path"]
@@ -2221,6 +2265,7 @@ class VisualProductionV2Service:
                     output_path=generated_content_mp4,
                     srt_path=None,
                     target_fps=fps,
+                    exact_video_frame_count=global_canonical_frame_budget,
                 )
             except Exception as e:
                 raise VerticalSliceError(f"Generated content concatenation failed: {self._sanitize_error(e)}") from e

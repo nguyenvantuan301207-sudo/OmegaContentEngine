@@ -136,12 +136,26 @@ class FFmpegRenderer:
         srt_path: Path | str | None = None,
         target_fps: int | None = None,
         timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
+        *,
+        exact_video_frame_count: int | None = None,
     ) -> None:
-        """Concatenate clips, optionally normalizing the final MP4 to explicit CFR."""
+        """Concatenate clips, optionally normalizing the final MP4 to explicit CFR or exact frame budget."""
         out_p = Path(output_path)
         out_p.parent.mkdir(parents=True, exist_ok=True)
-        if target_fps is not None and not 1 <= target_fps <= 60:
-            raise ValueError("target_fps must be between 1 and 60")
+        if target_fps is not None and (
+            isinstance(target_fps, bool)
+            or not isinstance(target_fps, int)
+            or not 1 <= target_fps <= 60
+        ):
+            raise ValueError("target_fps must be an integer between 1 and 60")
+        if exact_video_frame_count is not None and (
+            isinstance(exact_video_frame_count, bool)
+            or not isinstance(exact_video_frame_count, int)
+            or exact_video_frame_count <= 0
+        ):
+            raise ValueError(
+                f"exact_video_frame_count must be a positive integer, got {exact_video_frame_count!r}"
+            )
 
         # Write concat manifest
         manifest_path = out_p.parent / f"concat_{out_p.stem}.txt"
@@ -149,10 +163,10 @@ class FFmpegRenderer:
         manifest_path.write_text(manifest_content, encoding="utf-8")
 
         has_srt = bool(srt_path and Path(srt_path).is_file() and Path(srt_path).stat().st_size > 0)
-        if has_srt or target_fps is not None:
+        if has_srt or target_fps is not None or exact_video_frame_count is not None:
             filters: list[str] = []
-            if target_fps is not None:
-                filters.append(f"fps={target_fps}")
+            effective_fps = target_fps if target_fps is not None else 24
+            filters.append(f"fps={effective_fps}")
             if has_srt:
                 assert srt_path is not None
                 clean_srt = str(Path(srt_path).resolve().as_posix()).replace(":", r"\:")
@@ -178,7 +192,8 @@ class FFmpegRenderer:
                 "yuv420p",
                 "-fps_mode",
                 "cfr",
-                *( ["-r", str(target_fps)] if target_fps is not None else [] ),
+                *( ["-r", str(effective_fps)] if effective_fps is not None else [] ),
+                *( ["-frames:v", str(exact_video_frame_count)] if exact_video_frame_count is not None else [] ),
                 "-c:a",
                 "aac",
                 "-b:a",
@@ -366,8 +381,15 @@ class FFmpegRenderer:
         audio_path: Path | str,
         output_path: Path | str,
         timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
+        *,
+        preserve_video_duration: bool = False,
     ) -> None:
-        """Mux a video stream and an audio stream into an MP4 file."""
+        """Mux a video stream and an audio stream into an MP4 file.
+
+        When preserve_video_duration is True, -shortest is omitted to guarantee
+        that all video frames from the input video stream are preserved exactly
+        without being truncated by a slightly shorter audio stream.
+        """
         out_p = Path(output_path)
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
@@ -381,9 +403,10 @@ class FFmpegRenderer:
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "192k",
-            "-shortest",
-            str(out_p),
         ]
+        if not preserve_video_duration:
+            cmd.append("-shortest")
+        cmd.append(str(out_p))
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,

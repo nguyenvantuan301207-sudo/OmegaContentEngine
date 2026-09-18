@@ -135,6 +135,35 @@ async def test_mux_video_audio_command_construction():
 
 
 @pytest.mark.asyncio
+async def test_mux_video_audio_preserve_video_duration_omits_shortest():
+    renderer = FFmpegRenderer()
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        await renderer.mux_video_audio(
+            video_path="input.mp4",
+            audio_path="input.wav",
+            output_path="out.mp4",
+            preserve_video_duration=True,
+        )
+
+        mock_exec.assert_called_once()
+        cmd = mock_exec.call_args[0]
+
+        assert cmd[0] == "ffmpeg"
+        assert "-y" in cmd
+        assert "-c:v" in cmd
+        assert cmd[cmd.index("-c:v") + 1] == "copy"
+        assert "-c:a" in cmd
+        assert cmd[cmd.index("-c:a") + 1] == "aac"
+        assert "-shortest" not in cmd
+        assert cmd[-1].endswith("out.mp4")
+
+
+@pytest.mark.asyncio
 async def test_burn_ass_subtitles_command_construction(tmp_path):
     renderer = FFmpegRenderer()
     mock_proc = AsyncMock()
@@ -751,4 +780,105 @@ async def test_mix_master_audio_zero_byte_output(tmp_path):
             output_path=out_vid,
             target_duration_ms=5000,
             background_music_path=in_bgm,
+        )
+
+
+@pytest.mark.asyncio
+async def test_concatenate_clips_command_construction_legacy(tmp_path):
+    renderer = FFmpegRenderer()
+    in1 = tmp_path / "c1.mp4"
+    in2 = tmp_path / "c2.mp4"
+    out_p = tmp_path / "out.mp4"
+    in1.write_bytes(b"c1")
+    in2.write_bytes(b"c2")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        await renderer.concatenate_clips(
+            clip_paths=[in1, in2],
+            output_path=out_p,
+            target_fps=24,
+        )
+        mock_exec.assert_called_once()
+        cmd = mock_exec.call_args[0]
+        assert cmd[0] == "ffmpeg"
+        assert "-y" in cmd
+        assert "-vf" in cmd
+        assert cmd[cmd.index("-vf") + 1] == "fps=24"
+        assert "-c:v" in cmd
+        assert cmd[cmd.index("-c:v") + 1] == "libx264"
+        assert "-fps_mode" in cmd
+        assert cmd[cmd.index("-fps_mode") + 1] == "cfr"
+        assert "-r" in cmd
+        assert cmd[cmd.index("-r") + 1] == "24"
+        assert "-frames:v" not in cmd
+
+
+@pytest.mark.asyncio
+async def test_concatenate_clips_command_construction_exact_frames(tmp_path):
+    renderer = FFmpegRenderer()
+    in1 = tmp_path / "c1.mp4"
+    in2 = tmp_path / "c2.mp4"
+    out_p = tmp_path / "out.mp4"
+    in1.write_bytes(b"c1")
+    in2.write_bytes(b"c2")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
+        await renderer.concatenate_clips(
+            clip_paths=[in1, in2],
+            output_path=out_p,
+            target_fps=24,
+            exact_video_frame_count=980,
+        )
+        mock_exec.assert_called_once()
+        cmd = mock_exec.call_args[0]
+        assert cmd[0] == "ffmpeg"
+        assert "-frames:v" in cmd
+        assert cmd[cmd.index("-frames:v") + 1] == "980"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_count",
+    [0, -1, -980, 980.5, "980", True, False],
+    ids=["zero", "negative_one", "negative_large", "float", "string", "bool_true", "bool_false"],
+)
+async def test_concatenate_clips_rejects_invalid_exact_video_frame_count(tmp_path, invalid_count):
+    renderer = FFmpegRenderer()
+    in1 = tmp_path / "c1.mp4"
+    out_p = tmp_path / "out.mp4"
+    in1.write_bytes(b"c1")
+
+    with pytest.raises(ValueError, match="exact_video_frame_count must be a positive integer"):
+        await renderer.concatenate_clips(
+            clip_paths=[in1],
+            output_path=out_p,
+            exact_video_frame_count=invalid_count,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "invalid_fps",
+    [0, -1, 61, 24.5, "24", True, False],
+    ids=["zero", "negative", "above_max", "float", "string", "bool_true", "bool_false"],
+)
+async def test_concatenate_clips_rejects_invalid_target_fps(tmp_path, invalid_fps):
+    renderer = FFmpegRenderer()
+    in1 = tmp_path / "c1.mp4"
+    out_p = tmp_path / "out.mp4"
+    in1.write_bytes(b"c1")
+
+    with pytest.raises(ValueError, match="target_fps must be an integer between 1 and 60"):
+        await renderer.concatenate_clips(
+            clip_paths=[in1],
+            output_path=out_p,
+            target_fps=invalid_fps,
         )

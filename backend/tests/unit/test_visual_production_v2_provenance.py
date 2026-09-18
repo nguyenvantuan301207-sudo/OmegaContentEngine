@@ -49,7 +49,7 @@ def mock_storage(tmp_path):
 def base_service_kwargs(tmp_path, mock_storage):
     ffmpeg_renderer = AsyncMock()
 
-    async def mock_mux_video_audio(video_path, audio_path, output_path):
+    async def mock_mux_video_audio(video_path, audio_path, output_path, *args, **kwargs):
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_bytes(
