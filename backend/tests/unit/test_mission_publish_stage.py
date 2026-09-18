@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
@@ -314,7 +315,7 @@ async def test_internal_readiness_rejects_stale_intent_artifact_checksum(
             channel_id=channel_id, mission_execution_id=execution_id
         ),
         (PlatformAccount, account_id): SimpleNamespace(
-            channel_id=channel_id, status="ACTIVE"
+            channel_id=channel_id, platform="YOUTUBE", status="ACTIVE"
         ),
     }
     session = SimpleNamespace(get=AsyncMock(side_effect=lambda model, key: records.get((model, key))))
@@ -384,7 +385,7 @@ async def test_real_internal_readiness_happy_path_is_provider_free(monkeypatch, 
             channel_id=channel_id, mission_execution_id=execution_id
         ),
         (PlatformAccount, account_id): SimpleNamespace(
-            channel_id=channel_id, status="ACTIVE"
+            channel_id=channel_id, platform="YOUTUBE", status="ACTIVE"
         ),
     }
     session = SimpleNamespace(get=AsyncMock(side_effect=lambda model, key: records.get((model, key))))
@@ -465,7 +466,7 @@ async def test_internal_readiness_missing_production_request_fails_closed(
             state=PublishIntentState.APPROVED.value,
         ),
         (PlatformAccount, account_id): SimpleNamespace(
-            channel_id=channel_id, status="ACTIVE"
+            channel_id=channel_id, platform="YOUTUBE", status="ACTIVE"
         ),
     }
     session = SimpleNamespace(get=AsyncMock(side_effect=lambda model, key: records.get((model, key))))
@@ -634,6 +635,8 @@ class ReconciliationSession:
             return ScalarResult(next(self.results))
         values = statement.compile().params
         record = self.records[statement.table.name]
+        if statement.table.name == "upload_sessions" and "greatest_1" in values:
+            record.bytes_uploaded = max(record.bytes_uploaded, values["greatest_1"])
         for key in (
             "state",
             "provider_video_id",
@@ -679,12 +682,13 @@ def _reconciliation_records():
         session_uri="https://upload.youtube.test/session/one",
         total_bytes=1000,
         bytes_uploaded=100,
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
     )
     return SimpleNamespace(task=task, intent=intent, attempt=attempt, upload=upload)
 
 
 def _install_reconciliation(monkeypatch, data, result, events):
-    permit = SimpleNamespace()
+    permit = SimpleNamespace(is_valid_for=MagicMock(return_value=True))
     preflight = AsyncMock(return_value=(SimpleNamespace(), permit))
     adapter = SimpleNamespace(reconcile_upload_session=AsyncMock(return_value=result))
     enqueue = AsyncMock(side_effect=lambda *_args, **_kwargs: events.append("enqueue"))
