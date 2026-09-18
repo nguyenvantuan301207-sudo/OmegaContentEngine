@@ -56,6 +56,7 @@ class VisualV2VideoRenderer:
         timeout_seconds: int = 120,
         broll_asset: BoundBrollAsset | None = None,
         camera_motion_intent: BeatMotionIntent | None = None,
+        frame_count_override: int | None = None,
     ) -> VisualV2VideoRenderResult:
         if (
             camera_motion_intent is not None
@@ -89,7 +90,17 @@ class VisualV2VideoRenderer:
         except Exception as e:
             raise VisualV2VideoRenderError(f"Failed to create output directory: {e}") from e
 
-        frame_count = max(1, math.ceil(duration_seconds * fps))
+        if frame_count_override is not None:
+            if not isinstance(frame_count_override, int) or frame_count_override < 1:
+                raise VisualV2VideoRenderError(
+                    f"frame_count_override must be an integer >= 1, got {frame_count_override!r}"
+                )
+            frame_count = frame_count_override
+            physical_duration_seconds = frame_count / fps
+        else:
+            frame_count = max(1, math.ceil(duration_seconds * fps))
+            physical_duration_seconds = duration_seconds
+
         is_broll = document.template_id == VisualTemplateId.BROLL_EXPLAINER
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -162,6 +173,7 @@ class VisualV2VideoRenderer:
 
             if is_broll:
                 assert broll_asset is not None
+                broll_trim_duration = physical_duration_seconds
                 if camera_motion_intent is not None and camera_motion_intent != BeatMotionIntent.STATIC:
                     cam_profile = resolve_camera_motion_profile(camera_motion_intent)
                     zoompan_filter = build_broll_zoompan_filter(
@@ -172,7 +184,7 @@ class VisualV2VideoRenderer:
                         f"scale=1920:1080:force_original_aspect_ratio=increase,"
                         f"crop=1920:1080,"
                         f"fps={fps},"
-                        f"trim=duration={duration_seconds},"
+                        f"trim=duration={broll_trim_duration},"
                         f"setpts=PTS-STARTPTS,"
                         f"{zoompan_filter}[bg];"
                         f"[1:v]format=rgba,"
@@ -185,7 +197,7 @@ class VisualV2VideoRenderer:
                         f"scale=1920:1080:force_original_aspect_ratio=increase,"
                         f"crop=1920:1080,"
                         f"fps={fps},"
-                        f"trim=duration={duration_seconds},"
+                        f"trim=duration={broll_trim_duration},"
                         f"setpts=PTS-STARTPTS[bg];"
                         f"[1:v]format=rgba,"
                         f"setpts=PTS-STARTPTS[overlay];"
@@ -203,7 +215,7 @@ class VisualV2VideoRenderer:
                     "-c:v", "libx264",
                     "-pix_fmt", "yuv420p",
                     "-r", str(fps),
-                    "-t", str(duration_seconds),
+                    "-t", str(broll_trim_duration),
                     "-preset", "veryfast",
                     "-crf", "23",
                     "-movflags", "+faststart",

@@ -71,8 +71,10 @@ def test_current_render_and_subtitle_semantics_are_cache_compatible():
 @pytest.mark.parametrize(
     ("render_version", "runtime_version", "compatible"),
     [
-        pytest.param(3, 4, True, id="render3-runtime4"),
+        pytest.param(4, 4, True, id="render4-runtime4"),
+        pytest.param(3, 4, False, id="render3-runtime4"),
         pytest.param(2, 4, False, id="render2-runtime4"),
+        pytest.param(4, 3, False, id="render4-runtime3"),
         pytest.param(3, 3, False, id="render3-runtime3"),
         pytest.param(2, 3, False, id="render2-runtime3"),
     ],
@@ -89,7 +91,7 @@ def test_render_and_runtime_truth_version_pair_is_exact(
 
 @pytest.mark.parametrize(
     "version",
-    [pytest.param(None, id="missing"), 0, 1, "2", 2.0, True],
+    [pytest.param(None, id="missing"), 0, 1, 2, 3, "4", 4.0, True],
 )
 def test_wrong_or_malformed_render_semantics_version_is_rejected(version):
     manifest = _current_standard_manifest()

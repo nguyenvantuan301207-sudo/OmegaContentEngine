@@ -6,13 +6,14 @@ using deterministic camera motion execution and asset bindings.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from omega.application.beat_asset_executor import BeatAssetExecutionResult
 from omega.application.beat_clip_assembler import RenderedBeatClip
-from omega.application.beat_render_adapter import BeatRenderPlan
+from omega.application.beat_render_adapter import BeatRenderPlan, BeatRenderUnit
 from omega.application.editorial_beat import BeatMotionIntent, BeatTransitionIntent
 from omega.application.template_payload_resolver import TemplatePayloadResolver
 from omega.application.visual_direction import VisualTemplateId
@@ -23,6 +24,86 @@ from omega.infrastructure.visual_v2_video_renderer import VisualV2VideoRenderer
 
 class BeatVisualRenderError(ValueError):
     """Raised when beat visual render validation or execution fails."""
+
+
+def _ceil_div(numerator: int, denominator: int) -> int:
+    """Exact integer ceiling division for non-negative numerator and positive denominator."""
+    return (numerator + denominator - 1) // denominator
+
+
+def quantize_beat_frame_counts(
+    units: Sequence[BeatRenderUnit],
+    total_duration_ms: int,
+    fps: int,
+) -> tuple[int, ...]:
+    """Calculate deterministic cumulative frame-boundary allocations for beat units.
+
+    Derives physical frame boundaries cumulatively using exact integer ceil division:
+        cumulative_end_frame = ceil_div(unit.end_ms * fps, 1000)
+        beat_frames = cumulative_end_frame - previous_end_frame
+
+    Guarantees:
+        sum(beat_frames) == ceil_div(total_duration_ms * fps, 1000) exactly.
+    """
+    if not isinstance(fps, int) or fps <= 0:
+        raise BeatVisualRenderError(f"fps must be a positive integer, got {fps!r}")
+    if not units:
+        raise BeatVisualRenderError("Cannot quantize frame counts for empty units")
+
+    expected_total_frames = _ceil_div(total_duration_ms * fps, 1000)
+
+    # Validate units ordering, contiguity, and positive durations
+    for idx, unit in enumerate(units):
+        if unit.materialized_index != idx:
+            raise BeatVisualRenderError(
+                f"Units must be ordered by materialized index: expected {idx}, got {unit.materialized_index}"
+            )
+        if unit.duration_ms <= 0:
+            raise BeatVisualRenderError(
+                f"Beat unit {unit.materialized_index} has non-positive duration: {unit.duration_ms} ms"
+            )
+        if unit.end_ms - unit.start_ms != unit.duration_ms:
+            raise BeatVisualRenderError(
+                f"Beat unit {unit.materialized_index} duration inconsistency: "
+                f"end_ms ({unit.end_ms}) - start_ms ({unit.start_ms}) != duration_ms ({unit.duration_ms})"
+            )
+        if idx == 0:
+            if unit.start_ms != 0:
+                raise BeatVisualRenderError(
+                    f"First beat unit must start at 0 ms, got {unit.start_ms} ms"
+                )
+        else:
+            prev_unit = units[idx - 1]
+            if unit.start_ms != prev_unit.end_ms:
+                raise BeatVisualRenderError(
+                    f"Non-contiguous beat boundaries at unit {unit.materialized_index}: "
+                    f"starts at {unit.start_ms} ms, previous ended at {prev_unit.end_ms} ms"
+                )
+
+    if units[-1].end_ms != total_duration_ms:
+        raise BeatVisualRenderError(
+            f"Final beat end_ms ({units[-1].end_ms}) does not match total_duration_ms ({total_duration_ms})"
+        )
+
+    frame_counts: list[int] = []
+    prev_end_frame = 0
+
+    for unit in units:
+        cum_end_frame = _ceil_div(unit.end_ms * fps, 1000)
+        frames = cum_end_frame - prev_end_frame
+        if frames <= 0:
+            raise BeatVisualRenderError(
+                f"Beat unit {unit.materialized_index} quantized to non-positive frame count: {frames}"
+            )
+        frame_counts.append(frames)
+        prev_end_frame = cum_end_frame
+
+    if sum(frame_counts) != expected_total_frames:
+        raise BeatVisualRenderError(
+            f"Cumulative frame sum ({sum(frame_counts)}) does not match expected total ({expected_total_frames})"
+        )
+
+    return tuple(frame_counts)
 
 
 class BeatClipMetadata(BaseModel):
@@ -41,12 +122,12 @@ class BeatVisualRenderResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    parent_scene_index: int = Field(ge=1, description="1-indexed parent scene index")
+    parent_scene_index: int = Field(ge=0, description="0-indexed parent scene index")
     clips: tuple[RenderedBeatClip, ...] = Field(
-        default_factory=tuple, description="Rendered beat clips ready for assembly"
+        description="Physical beat clips rendered in order"
     )
     beat_metadata: tuple[BeatClipMetadata, ...] = Field(
-        default_factory=tuple, description="Per-beat physical render metadata"
+        description="Per-beat rendering metadata"
     )
 
 
@@ -92,12 +173,21 @@ class BeatVisualRenderer:
         if len(set(executed_indices)) != len(executed_indices):
             raise BeatVisualRenderError("Duplicate beat indices found in executed assets")
 
+        # Quantize cumulative physical frame boundaries for all units
+        beat_frame_counts = quantize_beat_frame_counts(
+            render_plan.units,
+            render_plan.total_duration_ms,
+            fps,
+        )
+
         output_dir.mkdir(parents=True, exist_ok=True)
 
         rendered_clips: list[RenderedBeatClip] = []
         clip_metadata: list[BeatClipMetadata] = []
 
-        for unit, executed in zip(render_plan.units, asset_execution.assets, strict=True):
+        for unit, executed, frame_count in zip(
+            render_plan.units, asset_execution.assets, beat_frame_counts, strict=True
+        ):
             if unit.materialized_index != executed.beat_index:
                 raise BeatVisualRenderError(
                     f"Beat index mismatch: unit={unit.materialized_index} executed={executed.beat_index}"
@@ -188,6 +278,7 @@ class BeatVisualRenderer:
                 fps=fps,
                 broll_asset=broll_asset,
                 camera_motion_intent=unit.camera_motion_intent,
+                frame_count_override=frame_count,
             )
 
             # 5. Validate output MP4

@@ -353,7 +353,7 @@ async def test_pre_provider_ineligibility_and_one_beat_plan_use_legacy(tmp_path,
 
 
 def test_g2c2c_version_boundaries_are_exact():
-    assert CANONICAL_RENDER_SEMANTICS_VERSION == 3
+    assert CANONICAL_RENDER_SEMANTICS_VERSION == 4
     assert SUBTITLE_SEMANTICS_VERSION == 3
 
 
