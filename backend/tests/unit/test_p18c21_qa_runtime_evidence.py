@@ -27,25 +27,34 @@ def _scene(scene_index: int = 1):
 def _visual(origin: str, scene_index: int = 1):
     if origin == "TEMPLATE":
         return SimpleNamespace(
-            scene_index=scene_index,
-            origin=origin,
+            parent_scene_index=scene_index,
+            visual_origin=origin,
             template_id="kinetic_text",
             provider=None,
+            provider_asset_id=None,
+            provider_asset_content_sha256=None,
+            rendered_beat_clip_sha256="b" * 64,
+            license_status="GENERATED",
         )
     return SimpleNamespace(
-        scene_index=scene_index,
-        origin=origin,
-        template_id=None,
+        parent_scene_index=scene_index,
+        visual_origin=origin,
+        template_id="provider_broll",
         provider="pexels",
         provider_asset_id="asset-1",
+        provider_asset_content_sha256="c" * 64,
+        rendered_beat_clip_sha256="d" * 64,
+        license_status="LICENSED",
     )
 
 
-def _snapshot(*, subtitles, scenes=None, visuals=None):
+def _snapshot(*, subtitles, scenes=None, visual_beats=None):
     return SimpleNamespace(
         subtitles=subtitles,
         scenes=tuple(scenes if scenes is not None else [_scene()]),
-        visuals=tuple(visuals if visuals is not None else [_visual("TEMPLATE")]),
+        visual_beats=tuple(
+            visual_beats if visual_beats is not None else [_visual("TEMPLATE")]
+        ),
     )
 
 
@@ -121,7 +130,7 @@ def test_runtime_visual_satisfies_same_scene_requirement_without_prepared_asset(
     rules = _evaluate(
         snapshot=_snapshot(
             subtitles=_subtitle_truth("OFF", rendered=False),
-            visuals=[_visual(origin)],
+            visual_beats=[_visual(origin)],
         ),
         requirements=[
             {"id": "requirement-1", "scene_index": 1, "required": True}
@@ -150,7 +159,7 @@ def test_runtime_missing_visual_blocks_despite_prepared_visual():
         snapshot=_snapshot(
             subtitles=_subtitle_truth("OFF", rendered=False),
             scenes=[],
-            visuals=[],
+            visual_beats=[],
         ),
         requirements=[
             {"id": "requirement-1", "scene_index": 1, "required": True}

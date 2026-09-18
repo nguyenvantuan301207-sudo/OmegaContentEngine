@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from omega.application.media_storage import compute_sha256
-from omega.application.production_runtime_truth import ProductionRuntimeTruthSnapshot
+from omega.application.production_runtime_truth import (
+    ProductionRuntimeTruthSnapshot,
+    RuntimeBeatVisualTruth,
+)
 from omega.domain.production import (
     LicenseStatus,
     NarrationQuality,
@@ -99,32 +103,58 @@ def _runtime_contentful_visual_scene_indexes(
         and int(_runtime_value(scene, "duration_ms", 0)) > 0
     }
     contentful: set[int] = set()
-    for visual in snapshot.visuals:
-        scene_index = int(_runtime_value(visual, "scene_index", 0))
+    for visual in _runtime_visual_beats(snapshot):
+        scene_index = int(visual.parent_scene_index)
         scene = rendered_scenes.get(scene_index)
         if scene is None:
             continue
-        origin = str(_runtime_value(visual, "origin", "")).upper()
-        template_rendered = origin == "TEMPLATE" and bool(
-            _runtime_value(visual, "template_id")
-            or _runtime_value(scene, "template_id")
+        template_rendered = visual.visual_origin == "TEMPLATE" and bool(
+            visual.template_id and visual.rendered_beat_clip_sha256
         )
         provider_rendered = (
-            origin == "PROVIDER"
-            and bool(_runtime_value(visual, "provider"))
-            and any(
-                _runtime_value(visual, field)
-                for field in (
-                    "provider_asset_id",
-                    "storage_reference",
-                    "content_sha256",
-                    "source_url",
-                )
-            )
+            visual.visual_origin == "PROVIDER"
+            and bool(visual.provider)
+            and bool(visual.provider_asset_id)
+            and bool(visual.provider_asset_content_sha256)
+            and bool(visual.rendered_beat_clip_sha256)
         )
         if template_rendered or provider_rendered:
             contentful.add(scene_index)
     return contentful
+
+
+def _runtime_visual_beats(
+    snapshot: ProductionRuntimeTruthSnapshot,
+) -> tuple[RuntimeBeatVisualTruth, ...]:
+    """Return schema-4 physical visual truth without legacy singleton fallback."""
+    return tuple(snapshot.visual_beats)
+
+
+def _runtime_provider_visual_beats(
+    snapshot: ProductionRuntimeTruthSnapshot,
+) -> tuple[RuntimeBeatVisualTruth, ...]:
+    """Return only physical provider beats from schema-4 runtime truth."""
+    return tuple(
+        beat
+        for beat in _runtime_visual_beats(snapshot)
+        if beat.visual_origin == "PROVIDER"
+    )
+
+
+def _runtime_unique_provider_visual_beats(
+    beats: Iterable[RuntimeBeatVisualTruth],
+) -> tuple[RuntimeBeatVisualTruth, ...]:
+    """Deduplicate provider reuse by physical provider authority per parent scene."""
+    unique: dict[tuple[int, str, str, str], RuntimeBeatVisualTruth] = {}
+    for beat in beats:
+        authority = (
+            beat.parent_scene_index,
+            beat.provider or "",
+            beat.provider_asset_id or "",
+            beat.provider_asset_content_sha256 or "",
+        )
+        unique.setdefault(authority, beat)
+    return tuple(unique.values())
 
 
 class ProductionQAEngine:
@@ -213,11 +243,20 @@ class ProductionQAEngine:
 
         # ── 4. BLOCKED_ASSET_RIGHTS (BLOCKING) ──
         rights_evidence = (
-            runtime_truth_snapshot.visuals
+            _runtime_provider_visual_beats(runtime_truth_snapshot)
             if runtime_truth_snapshot is not None
             else assets_data
         )
-        for asset in rights_evidence:
+        blocked_evidence = (
+            _runtime_unique_provider_visual_beats(
+                asset
+                for asset in rights_evidence
+                if asset.license_status == LicenseStatus.BLOCKED
+            )
+            if runtime_truth_snapshot is not None
+            else rights_evidence
+        )
+        for asset in blocked_evidence:
             if (
                 str(_runtime_value(asset, "license_status", "")).upper()
                 == LicenseStatus.BLOCKED.value
@@ -226,7 +265,7 @@ class ProductionQAEngine:
                     _runtime_value(asset, "provider_asset_id")
                     or _runtime_value(asset, "template_id")
                     or _runtime_value(asset, "id")
-                    or f"scene {_runtime_value(asset, 'scene_index', 'unknown')}"
+                    or f"scene {_runtime_value(asset, 'parent_scene_index', 'unknown')}"
                 )
                 findings.append(
                     ProductionQAFinding(
@@ -246,12 +285,22 @@ class ProductionQAEngine:
             for requirement in requirements_data
             if requirement.get("required", True)
         }
-        for asset in rights_evidence:
+        unknown_evidence = (
+            _runtime_unique_provider_visual_beats(
+                asset
+                for asset in rights_evidence
+                if asset.license_status == LicenseStatus.UNKNOWN
+                and asset.parent_scene_index in required_visual_scene_indexes
+            )
+            if runtime_truth_snapshot is not None
+            else rights_evidence
+        )
+        for asset in unknown_evidence:
             if runtime_truth_snapshot is not None:
                 unknown_required = (
                     str(_runtime_value(asset, "license_status", "")).upper()
                     == LicenseStatus.UNKNOWN.value
-                    and int(_runtime_value(asset, "scene_index", 0))
+                    and int(_runtime_value(asset, "parent_scene_index", 0))
                     in required_visual_scene_indexes
                 )
             else:
@@ -264,7 +313,7 @@ class ProductionQAEngine:
                     _runtime_value(asset, "provider_asset_id")
                     or _runtime_value(asset, "template_id")
                     or _runtime_value(asset, "id")
-                    or f"scene {_runtime_value(asset, 'scene_index', 'unknown')}"
+                    or f"scene {_runtime_value(asset, 'parent_scene_index', 'unknown')}"
                 )
                 findings.append(
                     ProductionQAFinding(
@@ -280,7 +329,12 @@ class ProductionQAEngine:
 
         # ── 5a. MISSING_REQUIRED_VISUAL_ATTRIBUTION (BLOCKING) ──
         if runtime_truth_snapshot is not None:
-            for visual in runtime_truth_snapshot.visuals:
+            for visual in _runtime_unique_provider_visual_beats(
+                visual
+                for visual in rights_evidence
+                if visual.license_status == LicenseStatus.ATTRIBUTION_REQUIRED
+                and not str(visual.attribution or "").strip()
+            ):
                 if (
                     str(_runtime_value(visual, "license_status", "")).upper()
                     == LicenseStatus.ATTRIBUTION_REQUIRED.value
@@ -288,8 +342,7 @@ class ProductionQAEngine:
                 ):
                     visual_identifier = (
                         _runtime_value(visual, "provider_asset_id")
-                        or _runtime_value(visual, "template_id")
-                        or f"scene {_runtime_value(visual, 'scene_index', 'unknown')}"
+                        or f"scene {_runtime_value(visual, 'parent_scene_index', 'unknown')}"
                     )
                     findings.append(
                         ProductionQAFinding(

@@ -34,21 +34,22 @@ def _snapshot(
             template_id=None,
         ),
     ) if contentful else ()
-    visuals = (
+    visual_beats = (
         SimpleNamespace(
-            scene_index=1,
-            origin="PROVIDER",
-            template_id=None,
+            parent_scene_index=1,
+            visual_origin="PROVIDER",
+            template_id="provider_broll",
             provider="pexels",
             provider_asset_id="runtime-visual",
-            content_sha256="b" * 64,
+            provider_asset_content_sha256="b" * 64,
+            rendered_beat_clip_sha256="c" * 64,
             license_status=license_status,
             attribution=attribution,
         ),
     ) if contentful else ()
     return SimpleNamespace(
         scenes=scenes,
-        visuals=visuals,
+        visual_beats=visual_beats,
         subtitles=SimpleNamespace(
             effective_mode="STANDARD",
             burn_applied=subtitle_rendered,

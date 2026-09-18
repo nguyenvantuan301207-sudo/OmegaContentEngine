@@ -19,12 +19,13 @@ def _snapshot(
         template_id="kinetic_text",
     )
     visual = SimpleNamespace(
-        scene_index=scene_index,
-        origin=origin,
-        template_id="kinetic_text" if origin == "TEMPLATE" else None,
+        parent_scene_index=scene_index,
+        visual_origin=origin,
+        template_id="kinetic_text",
         provider="pexels" if origin == "PROVIDER" else None,
         provider_asset_id="asset-1" if origin == "PROVIDER" else None,
-        content_sha256="b" * 64,
+        provider_asset_content_sha256=("b" * 64 if origin == "PROVIDER" else None),
+        rendered_beat_clip_sha256="c" * 64,
         license_status=license_status,
     )
     return SimpleNamespace(
@@ -35,7 +36,7 @@ def _snapshot(
             artifacts=(),
         ),
         scenes=(scene,),
-        visuals=(visual,),
+        visual_beats=(visual,),
     )
 
 

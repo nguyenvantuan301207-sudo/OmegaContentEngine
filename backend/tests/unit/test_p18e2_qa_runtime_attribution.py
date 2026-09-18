@@ -34,14 +34,15 @@ def _snapshot(
                 template_id="kinetic_text",
             ),
         ),
-        visuals=(
+        visual_beats=(
             SimpleNamespace(
-                scene_index=scene_index,
-                origin="PROVIDER",
-                template_id=None,
+                parent_scene_index=scene_index,
+                visual_origin="PROVIDER",
+                template_id="provider_broll",
                 provider="test-provider",
                 provider_asset_id="asset-1",
-                content_sha256="b" * 64,
+                provider_asset_content_sha256="b" * 64,
+                rendered_beat_clip_sha256="c" * 64,
                 license_status=license_status,
                 attribution=attribution,
             ),
