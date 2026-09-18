@@ -26,6 +26,17 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+def _sanitize_error(error: Exception) -> str:
+    """Preserve the durable-dispatch broker error redaction contract."""
+    message = str(error).split("\n", 1)[0]
+    if any(
+        marker in message.lower()
+        for marker in ("://", "password", "secret", "token", "key=")
+    ):
+        return f"{type(error).__name__}: broker publication failed (details redacted)"
+    return sanitize_error(error)
+
+
 def _validate_args(args: Any) -> list[Any]:
     if not isinstance(args, list):
         raise ValueError("durable dispatch args must be a JSON array")
@@ -274,7 +285,7 @@ class DurableDispatchService:
             return "STALE_CLAIM"
         intent.state = DEAD_LETTER if intent.attempt >= intent.max_attempts else RETRY
         intent.next_attempt_at = None if intent.state == DEAD_LETTER else _utcnow() + timedelta(seconds=30)
-        intent.last_error = sanitize_error(error)
+        intent.last_error = _sanitize_error(error)
         intent.claimed_at = None
         intent.claim_token = None
         session.commit()
