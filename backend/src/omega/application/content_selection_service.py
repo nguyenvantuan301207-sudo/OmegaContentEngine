@@ -14,6 +14,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from omega.application import topic_service
+from omega.application.historical_performance_provider import (
+    LearningHistoricalPerformanceProvider,
+)
+from omega.application.signal_providers import FixedHistoricalPerformanceProvider
 from omega.domain.channel import ChannelState, Platform
 from omega.domain.channel_context import ChannelContext
 from omega.domain.channel_dna import ChannelDNA
@@ -24,8 +28,21 @@ from omega.domain.content_selection import (
     ContentSelectionRunResponse,
     ContentSelectionStatus,
 )
+from omega.domain.historical_performance import (
+    HISTORICAL_PERFORMANCE_POLICY_NAME,
+    HISTORICAL_PERFORMANCE_POLICY_VERSION,
+    HistoricalPerformanceSignal,
+    HistoricalPerformanceStatus,
+    compute_historical_performance_policy_checksum,
+)
 from omega.domain.topic import TopicStatus
-from omega.domain.topic_scoring import DEFAULT_SCORING_PROFILE, DEFAULT_SIMILARITY_PROFILE
+from omega.domain.topic_scoring import (
+    DEFAULT_SCORING_PROFILE,
+    DEFAULT_SIMILARITY_PROFILE,
+    REASON_HISTORICAL_PERFORMANCE_APPLIED,
+    REASON_HISTORICAL_PERFORMANCE_INSUFFICIENT_CORPUS,
+    REASON_HISTORICAL_PERFORMANCE_INSUFFICIENT_RELEVANT_HISTORY,
+)
 from omega.infrastructure.models import (
     Channel,
     ChannelDNARevision,
@@ -37,7 +54,7 @@ from omega.infrastructure.models import (
 )
 
 CONTENT_SELECTION_POLICY_NAME = "OMEGA_CONTENT_SELECTION"
-CONTENT_SELECTION_POLICY_VERSION = 1
+CONTENT_SELECTION_POLICY_VERSION = 2
 ELIGIBLE_CANDIDATE_STATES = (
     TopicStatus.DISCOVERED.value,
     TopicStatus.EVALUATED.value,
@@ -65,16 +82,23 @@ def policy_checksum() -> str:
     A scoring implementation change that is not represented by profile data must bump
     CONTENT_SELECTION_POLICY_VERSION. Runtime IDs and timestamps are excluded.
     """
+    hist_checksum = compute_historical_performance_policy_checksum()
     return _canonical_checksum(
         {
             "policy_name": CONTENT_SELECTION_POLICY_NAME,
             "policy_version": CONTENT_SELECTION_POLICY_VERSION,
+            "historical_performance_policy": {
+                "name": HISTORICAL_PERFORMANCE_POLICY_NAME,
+                "version": HISTORICAL_PERFORMANCE_POLICY_VERSION,
+                "policy_checksum": hist_checksum,
+            },
             "topic_scoring_profile": DEFAULT_SCORING_PROFILE.model_dump(mode="json"),
             "similarity_profile": DEFAULT_SIMILARITY_PROFILE.model_dump(mode="json"),
             "eligible_candidate_states": sorted(ELIGIBLE_CANDIDATE_STATES),
             "ranking": {"primary": "FINAL_SCORE_DESC", "tie_break": RANKING_TIE_BREAK},
         }
     )
+
 
 
 def candidate_set_checksum(
@@ -299,13 +323,30 @@ async def create_selection_run(
         .all()
     )
 
-    evaluated: list[tuple[TopicCandidate, dict]] = [
-        (
-            candidate,
-            topic_service.evaluate_candidate_inputs(candidate, context, memory_records),
+    hist_provider = await LearningHistoricalPerformanceProvider.build(session, channel_id)
+
+    evaluated: list[tuple[TopicCandidate, dict, HistoricalPerformanceSignal]] = []
+    for candidate in candidates:
+        signal = hist_provider.evaluate(
+            topic_title=candidate.title,
+            keywords=list(candidate.keywords),
         )
-        for candidate in candidates
-    ]
+        perf_prov = FixedHistoricalPerformanceProvider(score=signal.score)
+        evaluation = topic_service.evaluate_candidate_inputs(
+            candidate=candidate,
+            channel_context=context,
+            memory_records=memory_records,
+            perf_provider=perf_prov,
+        )
+        if signal.status == HistoricalPerformanceStatus.APPLIED:
+            evaluation["reasons"].append(REASON_HISTORICAL_PERFORMANCE_APPLIED)
+        elif signal.status == HistoricalPerformanceStatus.INSUFFICIENT_CORPUS:
+            evaluation["reasons"].append(REASON_HISTORICAL_PERFORMANCE_INSUFFICIENT_CORPUS)
+        elif signal.status == HistoricalPerformanceStatus.INSUFFICIENT_RELEVANT_HISTORY:
+            evaluation["reasons"].append(REASON_HISTORICAL_PERFORMANCE_INSUFFICIENT_RELEVANT_HISTORY)
+        evaluation["reasons"] = list(dict.fromkeys(evaluation["reasons"]))
+        evaluated.append((candidate, evaluation, signal))
+
     evaluated.sort(key=lambda item: (-item[1]["final_score"], str(item[0].id)))
 
     run_id = uuid.uuid4()
@@ -328,7 +369,7 @@ async def create_selection_run(
     similarity_checksum = _canonical_checksum(
         DEFAULT_SIMILARITY_PROFILE.model_dump(mode="json")
     )
-    for rank, (candidate, evaluation) in enumerate(evaluated, start=1):
+    for rank, (candidate, evaluation, signal) in enumerate(evaluated, start=1):
         run.decisions.append(
             ContentSelectionDecision(
                 id=uuid.uuid4(),
@@ -345,7 +386,7 @@ async def create_selection_run(
                 topic_fingerprint_snapshot=candidate.topic_fingerprint,
                 candidate_snapshot=_candidate_snapshot(candidate),
                 evidence_snapshot={
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "channel_dna_revision_id": str(revision.id),
                     "matched_topic_memory_id": (
                         str(evaluation["similar_memory_id"])
@@ -361,14 +402,30 @@ async def create_selection_run(
                     },
                     "similarity_profile_checksum": similarity_checksum,
                     "trend_evidence_authority": "NULL_PROVIDER",
-                    "historical_performance_evidence_authority": "NULL_PROVIDER",
+                    "historical_performance_evidence_authority": "OMEGA_LEARNING_HISTORICAL_PERFORMANCE",
+                    "historical_performance_policy_name": HISTORICAL_PERFORMANCE_POLICY_NAME,
+                    "historical_performance_policy_version": HISTORICAL_PERFORMANCE_POLICY_VERSION,
+                    "historical_performance_policy_checksum": signal.policy_checksum,
+                    "historical_performance_status": signal.status.value,
+                    "historical_performance_score": signal.score,
+                    "historical_performance_corpus_checksum": signal.corpus_checksum,
+                    "historical_performance_corpus_count": signal.performance_record_count,
+                    "historical_performance_pinned_snapshot_count": signal.pinned_snapshot_count,
+                    "historical_performance_match_count": signal.match_count,
+                    "analytics_evidence_authority": "ANALYTICS_WINDOW",
+                    "analytics_evidence_ids": signal.analytics_evidence_ids,
+                    "learning_evidence_ids": signal.learning_evidence_ids,
+                    "source_publish_intent_ids": signal.source_publish_intent_ids,
+                    "metric_names_used": signal.metric_names_used,
+                    "matched_evidence": signal.matched_evidence,
+                    "active_knowledge_authority": "NOT_APPLIED_V1",
+                    "active_learning_knowledge_ids": [],
                     "cost_evidence_authority": "DEFAULT_PROVIDER",
                     "revenue_evidence_authority": "DEFAULT_PROVIDER",
-                    "analytics_evidence_ids": [],
-                    "learning_evidence_ids": [],
                 },
             )
         )
+
 
     try:
         session.add(run)

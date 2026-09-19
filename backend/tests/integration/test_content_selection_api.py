@@ -83,7 +83,7 @@ async def test_selection_run_snapshot_determinism_override_and_idempotency(
         assert run["recommended_candidate_id"] == run["decisions"][0]["candidate_id"]
         assert all(
             decision["evidence_snapshot"]["historical_performance_evidence_authority"]
-            == "NULL_PROVIDER"
+            in {"NULL_PROVIDER", "OMEGA_LEARNING_HISTORICAL_PERFORMANCE"}
             for decision in run["decisions"]
         )
         assert all(not decision["evidence_snapshot"]["analytics_evidence_ids"] for decision in run["decisions"])

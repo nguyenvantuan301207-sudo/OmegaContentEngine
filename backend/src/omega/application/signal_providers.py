@@ -46,6 +46,21 @@ class NullPerformanceProvider:
         return 50.0
 
 
+class FixedHistoricalPerformanceProvider:
+    """Deterministic fixed performance provider carrying a precomputed signal score."""
+
+    def __init__(self, score: float = 50.0) -> None:
+        self._score = float(score)
+
+    def get_performance_score(
+        self, topic_title: str, keywords: list[str], manual_score: float | None = None
+    ) -> float:
+        if manual_score is not None:
+            return float(manual_score)
+        return self._score
+
+
+
 class ProductionCostProvider(Protocol):
     """Protocol for cost efficiency / production feasibility scoring."""
 

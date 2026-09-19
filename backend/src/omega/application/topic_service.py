@@ -20,6 +20,10 @@ from omega.application.duplicate_detector import (
     compute_topic_fingerprint,
     normalize_text,
 )
+from omega.application.signal_providers import (
+    HistoricalPerformanceProvider,
+    NullPerformanceProvider,
+)
 from omega.application.topic_scorer import calculate_topic_scores
 from omega.domain.channel import ChannelState
 from omega.domain.channel_context import ChannelContext
@@ -398,6 +402,7 @@ def evaluate_candidate_inputs(
     memory_records: list[TopicMemory],
     profile: TopicScoringProfile = DEFAULT_SCORING_PROFILE,
     sim_profile: SimilarityProfile = DEFAULT_SIMILARITY_PROFILE,
+    perf_provider: HistoricalPerformanceProvider | None = None,
 ) -> dict:
     """Pure selection-time evaluation using the canonical topic algorithms.
 
@@ -451,6 +456,7 @@ def evaluate_candidate_inputs(
         similar_memory=matched_memory,
         memory_records=memory_records,
         profile=profile,
+        perf_provider=perf_provider or NullPerformanceProvider(),
     )
     return {
         **scores,
