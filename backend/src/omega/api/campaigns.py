@@ -5,14 +5,21 @@ from __future__ import annotations
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.api.dependencies import get_db
-from omega.application import content_campaign_service
+from omega.application import (
+    content_campaign_execution_service,
+    content_campaign_service,
+)
 from omega.domain.content_campaign import (
     ContentCampaignCreate,
     ContentCampaignResponse,
+)
+from omega.domain.content_campaign_execution import (
+    ContentCampaignExecutionCreate,
+    ContentCampaignExecutionResponse,
 )
 
 router = APIRouter(prefix="/api/v1/channels/{channel_id}/campaigns", tags=["Campaigns"])
@@ -90,4 +97,74 @@ async def get_content_campaign(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Campaign lineage integrity violation: {exc}",
+        ) from exc
+
+
+@router.post(
+    "/{campaign_id}/materialize",
+    response_model=ContentCampaignExecutionResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def materialize_campaign(
+    channel_id: UUID,
+    campaign_id: UUID,
+    request: ContentCampaignExecutionCreate,
+    response: Response,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ContentCampaignExecutionResponse:
+    """Materialize an immutable content campaign into bounded OMEGA Missions."""
+    try:
+        exec_resp, created = await content_campaign_execution_service.materialize_campaign(
+            db, channel_id=channel_id, campaign_id=campaign_id, payload=request
+        )
+        if not created:
+            response.status_code = status.HTTP_200_OK
+        return exec_resp
+    except (
+        content_campaign_execution_service.ContentCampaignNotFoundError,
+        content_campaign_service.ContentCampaignNotFoundError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except (
+        content_campaign_execution_service.ContentCampaignExecutionValidationError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    except content_campaign_execution_service.ContentCampaignExecutionIntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Campaign execution lineage integrity violation: {exc}",
+        ) from exc
+
+
+@router.get(
+    "/{campaign_id}/execution",
+    response_model=ContentCampaignExecutionResponse,
+)
+async def get_campaign_execution(
+    channel_id: UUID,
+    campaign_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ContentCampaignExecutionResponse:
+    """Retrieve and validate historical campaign execution lineage."""
+    try:
+        return await content_campaign_execution_service.get_campaign_execution(
+            db, channel_id=channel_id, campaign_id=campaign_id
+        )
+    except (
+        content_campaign_execution_service.ContentCampaignNotFoundError,
+        content_campaign_service.ContentCampaignNotFoundError,
+        content_campaign_execution_service.ContentCampaignExecutionNotFoundError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except content_campaign_execution_service.ContentCampaignExecutionIntegrityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Campaign execution lineage integrity violation: {exc}",
         ) from exc

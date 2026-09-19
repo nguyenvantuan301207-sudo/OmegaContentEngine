@@ -890,6 +890,124 @@ class ContentCampaignItem(Base):
     )
 
 
+class ContentCampaignExecution(Base):
+    """Canonical materialization of a ContentCampaign into OMEGA Missions."""
+
+    __tablename__ = "content_campaign_executions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_campaigns.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channels.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    channel_dna_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="MATERIALIZED", index=True
+    )
+    fanout_policy_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    fanout_policy_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    fanout_policy_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    materialized_by: Mapped[str] = mapped_column(String(100), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    campaign: Mapped[ContentCampaign] = relationship("ContentCampaign")
+    channel: Mapped[Channel] = relationship("Channel")
+    channel_dna_revision: Mapped[ChannelDNARevision] = relationship("ChannelDNARevision")
+    items: Mapped[list[ContentCampaignItemExecution]] = relationship(
+        "ContentCampaignItemExecution",
+        back_populates="campaign_execution",
+        order_by="ContentCampaignItemExecution.position.asc()",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_id", name="uq_content_campaign_executions_campaign_id"
+        ),
+        CheckConstraint("status = 'MATERIALIZED'", name="ck_content_campaign_executions_status"),
+        CheckConstraint(
+            "item_count >= 1 AND item_count <= 50",
+            name="ck_content_campaign_executions_item_count_range",
+        ),
+    )
+
+
+class ContentCampaignItemExecution(Base):
+    """Binding between a ContentCampaignItem and its materialized Mission and MissionExecution."""
+
+    __tablename__ = "content_campaign_item_executions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    campaign_execution_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_campaign_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    campaign_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_campaign_items.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    position: Mapped[int] = mapped_column(Integer, nullable=False)
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("missions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    mission_execution_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("mission_executions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    campaign_execution: Mapped[ContentCampaignExecution] = relationship(
+        "ContentCampaignExecution", back_populates="items"
+    )
+    campaign_item: Mapped[ContentCampaignItem] = relationship("ContentCampaignItem")
+    mission: Mapped[Mission] = relationship("Mission")
+    mission_execution: Mapped[MissionExecution] = relationship("MissionExecution")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "campaign_item_id", name="uq_content_campaign_item_executions_item_id"
+        ),
+        UniqueConstraint(
+            "mission_id", name="uq_content_campaign_item_executions_mission_id"
+        ),
+        UniqueConstraint(
+            "mission_execution_id",
+            name="uq_content_campaign_item_executions_mission_execution_id",
+        ),
+        UniqueConstraint(
+            "campaign_execution_id",
+            "position",
+            name="uq_content_campaign_item_executions_exec_pos",
+        ),
+        CheckConstraint(
+            "position >= 1 AND position <= 50",
+            name="ck_content_campaign_item_executions_position_positive",
+        ),
+    )
+
+
 class ResearchRequest(Base):
     """ResearchRequest database model representing a research execution request."""
 

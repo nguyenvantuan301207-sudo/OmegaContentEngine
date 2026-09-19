@@ -225,8 +225,10 @@ def _enrich_canonical_content_seed(plan, mission_metadata: dict | None) -> None:
             }
 
 
-async def create_mission(session: AsyncSession, mission_in: MissionCreate) -> MissionResponse:
-    """Create a new mission in DRAFT state with optional channel association."""
+async def _create_mission_in_transaction(
+    session: AsyncSession, mission_in: MissionCreate
+) -> Mission:
+    """Internal helper to create a Mission and initial DecisionLog within an existing transaction without committing."""
     # 1. Channel validation
     if mission_in.channel_id is not None:
         chan_res = await session.execute(select(Channel).where(Channel.id == mission_in.channel_id))
@@ -260,6 +262,13 @@ async def create_mission(session: AsyncSession, mission_in: MissionCreate) -> Mi
             actor=Actor.USER.value,
         )
     )
+    await session.flush()
+    return mission
+
+
+async def create_mission(session: AsyncSession, mission_in: MissionCreate) -> MissionResponse:
+    """Create a new mission in DRAFT state."""
+    mission = await _create_mission_in_transaction(session, mission_in)
     await session.commit()
     logger.info("Mission created", mission_id=str(mission.id), title=mission.title)
     return MissionResponse.model_validate(mission)
@@ -332,18 +341,44 @@ async def update_mission(
     return MissionResponse.model_validate(mission)
 
 
-async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
-    """Plan a mission: generate task DAG, freeze ChannelDNARevision, create planned MissionExecution, transition DRAFT -> READY."""
-    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
-    mission = res.scalar_one_or_none()
-    if not mission:
-        return None
+async def _plan_mission_in_transaction(
+    session: AsyncSession,
+    mission: Mission,
+    *,
+    channel_dna_revision_id: UUID | None = None,
+    trigger_type: MissionTriggerType = MissionTriggerType.MANUAL,
+) -> tuple[Mission, MissionExecution]:
+    """Plan a mission in an existing transaction without committing.
 
+    When channel_dna_revision_id is explicitly supplied:
+    - Mission must have channel_id;
+    - ChannelDNARevision must exist;
+    - revision.channel_id must equal Mission.channel_id;
+    - revision ID must be used EXACTLY;
+    - no current/latest/active DNA lookup may replace it.
+    If any condition fails:
+    fail closed before MissionExecution/DAG persistence completes.
+    """
     validate_mission_transition(MissionState(mission.state), MissionState.READY)
 
-    # 1. Resolve Channel and latest ChannelDNARevision if linked to a channel
-    channel_dna_revision_id = None
-    if mission.channel_id is not None:
+    # 1. Resolve Channel and ChannelDNARevision
+    resolved_dna_revision_id = None
+    if channel_dna_revision_id is not None:
+        if mission.channel_id is None:
+            raise ValueError("Explicit channel DNA revision specified but mission has no channel_id.")
+        rev_res = await session.execute(
+            select(ChannelDNARevision).where(ChannelDNARevision.id == channel_dna_revision_id)
+        )
+        rev = rev_res.scalar_one_or_none()
+        if not rev:
+            raise ValueError(f"Explicit ChannelDNARevision '{channel_dna_revision_id}' does not exist.")
+        if rev.channel_id != mission.channel_id:
+            raise ValueError(
+                f"ChannelDNARevision '{channel_dna_revision_id}' belongs to channel '{rev.channel_id}', "
+                f"not mission channel '{mission.channel_id}'."
+            )
+        resolved_dna_revision_id = channel_dna_revision_id
+    elif mission.channel_id is not None:
         chan_res = await session.execute(select(Channel).where(Channel.id == mission.channel_id))
         channel = chan_res.scalar_one_or_none()
         if not channel:
@@ -358,15 +393,15 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
         )
         latest_rev = rev_res.scalars().first()
         if latest_rev:
-            channel_dna_revision_id = latest_rev.id
+            resolved_dna_revision_id = latest_rev.id
 
     # 2. Create the MissionExecution for this planned run, pinning the DNA revision
     execution = MissionExecution(
         id=uuid4(),
         mission_id=mission.id,
-        channel_dna_revision_id=channel_dna_revision_id,
+        channel_dna_revision_id=resolved_dna_revision_id,
         state=ExecutionState.PLANNED.value,
-        trigger_type=MissionTriggerType.MANUAL.value,
+        trigger_type=trigger_type.value,
     )
     session.add(execution)
     await session.flush()
@@ -422,17 +457,27 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
             execution_id=execution.id,
             decision_type=DecisionType.MISSION_PLAN.value,
             decision="Generate and validate 7-stage DAG",
-            reason=f"StaticMissionPlanner generated {len(plan.tasks)} tasks and {len(plan.dependencies)} dependencies (pinned DNA rev: {channel_dna_revision_id})",
+            reason=f"StaticMissionPlanner generated {len(plan.tasks)} tasks and {len(plan.dependencies)} dependencies (pinned DNA rev: {resolved_dna_revision_id})",
             actor=Actor.PLANNER.value,
         )
     )
+    await session.flush()
 
+    return mission, execution
+
+
+async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
+    """Plan a mission: generate task DAG, freeze ChannelDNARevision, create planned MissionExecution, transition DRAFT -> READY."""
+    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
+    mission = res.scalar_one_or_none()
+    if not mission:
+        return None
+
+    await _plan_mission_in_transaction(session, mission)
     await session.commit()
     logger.info(
         "Mission planned successfully",
         mission_id=str(mission.id),
-        tasks_count=len(plan.tasks),
-        channel_dna_revision_id=str(channel_dna_revision_id) if channel_dna_revision_id else None,
     )
     return MissionResponse.model_validate(mission)
 
