@@ -31,6 +31,7 @@ from omega.domain.network import (
     NetworkAction,
     NetworkEgressPermit,
     NetworkPreflightRequest,
+    RouteType,
     ServiceCategory,
 )
 from omega.infrastructure.models import (
@@ -46,6 +47,8 @@ from omega.infrastructure.models import (
     CredentialVault,
     MediaArtifact,
     Mission,
+    NetworkProfile,
+    NetworkRoute,
     PlatformAccount,
     ProductionRequest,
     PublishAttempt,
@@ -513,6 +516,32 @@ async def test_revoked_credential_halts_analytics(db_session: AsyncSession, setu
 @pytest.mark.asyncio
 async def test_analytics_fresh_destination_permit(db_session: AsyncSession):
     """Preflight service returns a valid permit for official YouTube API endpoint."""
+    now = datetime.now(UTC)
+    profile = NetworkProfile(
+        id=uuid4(),
+        name=f"Analytics-Preflight-{uuid4()}",
+        is_default=True,
+        created_at=now,
+        updated_at=now,
+    )
+    db_session.add(profile)
+    await db_session.flush()
+    db_session.add(
+        NetworkRoute(
+            id=uuid4(),
+            profile_id=profile.id,
+            name="Direct YouTube API",
+            route_type=RouteType.DIRECT.value,
+            allowed_service_categories=[ServiceCategory.YOUTUBE_API.value],
+            tls_verify=True,
+            config_version=1,
+            config_checksum="analytics-preflight-test-route",
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    await db_session.commit()
+
     preflight_svc = NetworkPreflightService(lambda: db_session)
     check_resp, permit = await preflight_svc.preflight(
         NetworkPreflightRequest(
