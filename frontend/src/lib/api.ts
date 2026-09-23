@@ -432,6 +432,151 @@ export interface TopicMemory {
   metadata: Record<string, unknown>;
 }
 
+// Canonical selection and immutable campaign authorities (P19-B/C/D/E).
+export type ContentSelectionStatus = "READY" | "SELECTED";
+export type ContentSelectionMode = "POLICY" | "OVERRIDE";
+
+export interface HistoricalPerformanceEvidence extends Record<string, unknown> {
+  schema_version?: number;
+  historical_performance_evidence_authority?: string;
+  historical_performance_policy_version?: number;
+  historical_performance_policy_checksum?: string;
+  historical_performance_status?: "APPLIED" | "INSUFFICIENT_CORPUS" | "INSUFFICIENT_RELEVANT_HISTORY";
+  historical_performance_score?: number;
+  historical_performance_corpus_checksum?: string;
+  historical_performance_corpus_count?: number;
+  historical_performance_pinned_snapshot_count?: number;
+  historical_performance_match_count?: number;
+  analytics_evidence_ids?: string[];
+  learning_evidence_ids?: string[];
+  matched_evidence?: Record<string, unknown>[];
+  active_knowledge_authority?: string;
+}
+
+export interface ContentSelectionDecision {
+  id: string;
+  candidate_id: string;
+  rank: number;
+  final_score: number;
+  score_breakdown: Record<string, number>;
+  reasons: string[];
+  duplicate_status: string;
+  similar_memory_id: string | null;
+  similarity_score: number | null;
+  candidate_title_snapshot: string;
+  topic_fingerprint_snapshot: string;
+  candidate_snapshot: Record<string, unknown>;
+  evidence_snapshot: HistoricalPerformanceEvidence;
+  created_at: string;
+}
+
+export interface ContentSelectionRun {
+  id: string;
+  channel_id: string;
+  channel_dna_revision_id: string;
+  mission_execution_id: string | null;
+  status: ContentSelectionStatus;
+  policy_name: string;
+  policy_version: number;
+  policy_checksum: string;
+  candidate_set_checksum: string;
+  idempotency_key: string;
+  recommended_candidate_id: string;
+  selected_candidate_id: string | null;
+  selection_mode: ContentSelectionMode | null;
+  selected_by: string | null;
+  selection_reason: string | null;
+  considered_count: number;
+  created_at: string;
+  completed_at: string;
+  selected_at: string | null;
+  decisions: ContentSelectionDecision[];
+}
+
+export interface ContentSelectionRunCreatePayload {
+  candidate_ids: string[];
+  idempotency_key: string;
+  mission_execution_id?: string | null;
+}
+
+export interface ContentSelectionFinalizePayload {
+  selected_candidate_id?: string | null;
+  actor: string;
+  override_reason?: string | null;
+}
+
+export interface ContentCampaignItemInput {
+  selection_run_id: string;
+  target_content_type: ContentType;
+  planned_release_at: string | null;
+}
+
+export interface ContentCampaignCreatePayload {
+  title: string;
+  objective: string | null;
+  priority: number;
+  idempotency_key: string;
+  created_by: string;
+  items: ContentCampaignItemInput[];
+}
+
+export interface ContentCampaignItem {
+  id: string;
+  campaign_id: string;
+  position: number;
+  selection_run_id: string;
+  selection_decision_id: string;
+  topic_candidate_id: string;
+  candidate_title_snapshot: string;
+  selection_mode: ContentSelectionMode;
+  target_content_type: ContentType;
+  planned_release_at: string | null;
+  created_at: string;
+}
+
+export interface ContentCampaign {
+  id: string;
+  channel_id: string;
+  channel_dna_revision_id: string;
+  title: string;
+  objective: string | null;
+  priority: number;
+  status: "READY";
+  idempotency_key: string;
+  plan_checksum: string;
+  item_count: number;
+  created_by: string;
+  created_at: string;
+  items: ContentCampaignItem[];
+}
+
+export interface ContentCampaignItemExecution {
+  id: string;
+  campaign_execution_id: string;
+  campaign_item_id: string;
+  position: number;
+  mission_id: string;
+  mission_execution_id: string;
+  mission_state: string;
+  mission_execution_state: string;
+  created_at: string;
+}
+
+export interface ContentCampaignExecution {
+  id: string;
+  campaign_id: string;
+  channel_id: string;
+  channel_dna_revision_id: string;
+  status: "MATERIALIZED";
+  fanout_policy_name: string;
+  fanout_policy_version: number;
+  fanout_policy_checksum: string;
+  item_count: number;
+  materialized_by: string;
+  created_at: string;
+  items: ContentCampaignItemExecution[];
+}
+
 // ── Mission Engine Types (OMEGA-002) ──
 
 export type MissionState =
@@ -921,6 +1066,42 @@ export async function getTopicMemory(
 
 export async function getTopicMemoryRecord(channelId: string, memoryId: string): Promise<TopicMemory> {
   return apiFetch(`/api/v1/channels/${channelId}/topics/memory/${memoryId}`);
+}
+
+export function createContentSelectionRun(channelId: string, payload: ContentSelectionRunCreatePayload): Promise<ContentSelectionRun> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/selection-runs`, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function listContentSelectionRuns(channelId: string, limit = 50, offset = 0): Promise<ContentSelectionRun[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/selection-runs?limit=${limit}&offset=${offset}`);
+}
+
+export function getContentSelectionRun(channelId: string, runId: string): Promise<ContentSelectionRun> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/selection-runs/${runId}`);
+}
+
+export function finalizeContentSelectionRun(channelId: string, runId: string, payload: ContentSelectionFinalizePayload): Promise<ContentSelectionRun> {
+  return apiFetch(`/api/v1/channels/${channelId}/topics/selection-runs/${runId}/finalize`, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function createContentCampaign(channelId: string, payload: ContentCampaignCreatePayload): Promise<ContentCampaign> {
+  return apiFetch(`/api/v1/channels/${channelId}/campaigns`, { method: "POST", body: JSON.stringify(payload) });
+}
+
+export function listContentCampaigns(channelId: string, limit = 50, offset = 0): Promise<ContentCampaign[]> {
+  return apiFetch(`/api/v1/channels/${channelId}/campaigns?limit=${limit}&offset=${offset}`);
+}
+
+export function getContentCampaign(channelId: string, campaignId: string): Promise<ContentCampaign> {
+  return apiFetch(`/api/v1/channels/${channelId}/campaigns/${campaignId}`);
+}
+
+export function materializeContentCampaign(channelId: string, campaignId: string, actor: string): Promise<ContentCampaignExecution> {
+  return apiFetch(`/api/v1/channels/${channelId}/campaigns/${campaignId}/materialize`, { method: "POST", body: JSON.stringify({ actor }) });
+}
+
+export function getContentCampaignExecution(channelId: string, campaignId: string): Promise<ContentCampaignExecution> {
+  return apiFetch(`/api/v1/channels/${channelId}/campaigns/${campaignId}/execution`);
 }
 
 // ── Mission Engine API Functions (OMEGA-002) ──

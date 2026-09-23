@@ -49,7 +49,7 @@ test("global navigation uses unique production routes", () => {
 test("channel navigation and breadcrumbs retain route context", () => {
   const channelId = "channel-123";
   const routes = getChannelNavigation(channelId);
-  assert.equal(routes.length, 6);
+  assert.equal(routes.length, 7);
   assert.equal(routes.at(-1)?.href, `/channels/${channelId}/production`);
   assert.deepEqual(
     getBreadcrumbs(`/channels/${channelId}/research`, "Demo channel"),

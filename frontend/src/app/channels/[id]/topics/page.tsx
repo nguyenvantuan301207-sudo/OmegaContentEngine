@@ -36,13 +36,15 @@ import {
   WorkflowTabs,
   statusTone,
 } from "@/components/workflow/WorkflowPrimitives";
+import { CanonicalSelection } from "@/components/workflow/CanonicalSelection";
 
-type TopicView = "recommendations" | "candidates" | "memory";
+type TopicView = "canonical" | "recommendations" | "candidates" | "memory";
 
 function CandidateCard({
   candidate,
   busy,
   archived,
+  legacySelectAllowed,
   onEvaluate,
   onSelect,
   onReject,
@@ -51,6 +53,7 @@ function CandidateCard({
   candidate: TopicCandidate;
   busy: boolean;
   archived: boolean;
+  legacySelectAllowed: boolean;
   onEvaluate: () => void;
   onSelect: () => void;
   onReject: () => void;
@@ -116,14 +119,14 @@ function CandidateCard({
               Evaluate
             </button>
           ) : null}
-          {["EVALUATED", "RECOMMENDED"].includes(candidate.status) ? (
+          {legacySelectAllowed && ["EVALUATED", "RECOMMENDED"].includes(candidate.status) ? (
             <button
               className="btn btn-primary btn-sm"
               type="button"
               disabled={busy || archived}
               onClick={onSelect}
             >
-              Select topic
+              Legacy direct select
             </button>
           ) : null}
           {!["REJECTED", "ARCHIVED"].includes(candidate.status) ? (
@@ -168,9 +171,9 @@ export default function ChannelTopicsPage({
   params: Promise<{ id: string }>;
 }) {
   const { id: channelId } = use(params);
-  const { setSelectedChannelId } = useOperatorContext();
+  const { setSelectedChannelId, mode } = useOperatorContext();
   const [channel, setChannel] = useState<Channel | null>(null);
-  const [view, setView] = useState<TopicView>("recommendations");
+  const [view, setView] = useState<TopicView>("canonical");
   const [recommendations, setRecommendations] = useState<TopicCandidate[]>([]);
   const [candidates, setCandidates] = useState<TopicCandidate[]>([]);
   const [memories, setMemories] = useState<TopicMemory[]>([]);
@@ -358,6 +361,7 @@ export default function ChannelTopicsPage({
         active={view}
         onChange={setView}
         tabs={[
+          { id: "canonical", label: "Canonical selection" },
           {
             id: "recommendations",
             label: "Recommendations",
@@ -376,6 +380,8 @@ export default function ChannelTopicsPage({
           title="Loading topic intelligence"
           description="Retrieving candidates, recommendations, and channel memory."
         />
+      ) : view === "canonical" ? (
+        <CanonicalSelection key={channelId} channelId={channelId} candidates={candidates} archived={Boolean(isArchived)} />
       ) : view === "memory" ? (
         <PageSection
           title="Topic memory"
@@ -465,6 +471,7 @@ export default function ChannelTopicsPage({
                 candidate={candidate}
                 busy={busy}
                 archived={Boolean(isArchived)}
+                legacySelectAllowed={mode === "DEVELOPMENT"}
                 onEvaluate={() =>
                   void runAction(
                     () => evaluateTopicCandidate(channelId, candidate.id),

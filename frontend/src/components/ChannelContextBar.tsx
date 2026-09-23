@@ -14,7 +14,7 @@ import {
 } from "@/lib/channel-classification";
 
 interface Props {
-  currentTab?: "dna" | "branding" | "topics" | "research" | "content" | "production" | "schedule" | "publisher" | "analytics" | "learning";
+  currentTab?: "dna" | "branding" | "topics" | "campaigns" | "research" | "content" | "production" | "schedule" | "publisher" | "analytics" | "learning";
 }
 
 export function ChannelContextBar({ currentTab }: Props) {
@@ -115,7 +115,7 @@ export function ChannelContextBar({ currentTab }: Props) {
               onChange={(event) => {
                 const nextChannelId = event.target.value;
                 void setSelectedChannelId(nextChannelId);
-                if (currentTab && ["dna", "branding", "topics", "research", "content", "production"].includes(currentTab)) {
+                if (currentTab && ["dna", "branding", "topics", "campaigns", "research", "content", "production"].includes(currentTab)) {
                   const destination = getChannelNavigation(nextChannelId).find((item) => item.key === currentTab);
                   if (destination) router.push(destination.href);
                 }

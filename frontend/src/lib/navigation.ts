@@ -8,7 +8,7 @@ export interface NavigationItem {
 }
 
 export interface ChannelNavigationItem {
-  key: "dna" | "branding" | "topics" | "research" | "content" | "production";
+  key: "dna" | "branding" | "topics" | "campaigns" | "research" | "content" | "production";
   label: string;
   href: string;
 }
@@ -40,6 +40,7 @@ export function getChannelNavigation(channelId: string): readonly ChannelNavigat
     { key: "dna", label: "DNA", href: root },
     { key: "branding", label: "Branding", href: `${root}/branding` },
     { key: "topics", label: "Topics", href: `${root}/topics` },
+    { key: "campaigns", label: "Campaigns", href: `${root}/campaigns` },
     { key: "research", label: "Research", href: `${root}/research` },
     { key: "content", label: "Content", href: `${root}/content` },
     { key: "production", label: "Production", href: `${root}/production` },
@@ -56,7 +57,7 @@ export function getBreadcrumbs(pathname: string, channelName?: string): Breadcru
     return [{ label: "Channels", href: "/channels" }, { label: "New channel" }];
   }
 
-  const channelMatch = pathname.match(/^\/channels\/[^/]+(?:\/(branding|topics|research|content|production))?$/);
+  const channelMatch = pathname.match(/^\/channels\/[^/]+(?:\/(branding|topics|campaigns|research|content|production))?$/);
   if (channelMatch) {
     const section = channelMatch[1];
     const items: BreadcrumbItem[] = [
@@ -65,6 +66,17 @@ export function getBreadcrumbs(pathname: string, channelName?: string): Breadcru
     ];
     if (section) items.push({ label: section[0].toUpperCase() + section.slice(1) });
     return items;
+  }
+
+  const campaignMatch = pathname.match(/^(\/channels\/[^/]+\/campaigns)\/(new|[^/]+)$/);
+  if (campaignMatch) {
+    const channelRoot = campaignMatch[1].replace(/\/campaigns$/, "");
+    return [
+      { label: "Channels", href: "/channels" },
+      { label: channelName || "Channel", href: channelRoot },
+      { label: "Campaigns", href: campaignMatch[1] },
+      { label: campaignMatch[2] === "new" ? "New campaign" : "Campaign details" },
+    ];
   }
 
   if (pathname === "/missions/new") {
