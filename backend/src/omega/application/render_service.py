@@ -199,9 +199,9 @@ class ProductionRenderService:
                     GuardianCheckCreate,
                     GuardianCheckpoint,
                 )
-                from omega.infrastructure.database import AsyncSessionLocal
+                from omega.infrastructure.database import AsyncWorkerSessionLocal
 
-                guardian_engine = GuardianEngine(session_factory=AsyncSessionLocal)
+                guardian_engine = GuardianEngine(session_factory=AsyncWorkerSessionLocal)
                 pre_check = await guardian_engine.execute_check(
                     GuardianCheckCreate(
                         mission_id=mission_id,

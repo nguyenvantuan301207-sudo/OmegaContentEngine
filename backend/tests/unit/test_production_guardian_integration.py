@@ -218,6 +218,62 @@ async def test_pre_render_non_allow_fails_closed_before_render():
 
 
 @pytest.mark.asyncio
+async def test_pre_render_uses_worker_safe_guardian_session_factory():
+    service = ProductionRenderService()
+
+    session = AsyncMock()
+    session.execute.return_value = result_with_scalar(make_pre_render_job())
+
+    check = SimpleNamespace(
+        decision=SimpleNamespace(
+            action=GuardianAction.PAUSE,
+            reason="test block",
+        )
+    )
+    engine = MagicMock()
+    engine.execute_check = AsyncMock(return_value=check)
+    application_session_factory = MagicMock(name="application_session_factory")
+    worker_session_factory = MagicMock(name="worker_session_factory")
+    record_failure = AsyncMock()
+    render_backend = AsyncMock()
+
+    with (
+        patch.object(
+            service,
+            "_resolve_mission_id",
+            new=AsyncMock(return_value=uuid.uuid4()),
+        ),
+        patch.object(service, "_record_job_failure", new=record_failure),
+        patch.object(service, "_render_v2_staging", new=render_backend),
+        patch(
+            "omega.infrastructure.database.AsyncSessionLocal",
+            application_session_factory,
+        ),
+        patch(
+            "omega.infrastructure.database.AsyncWorkerSessionLocal",
+            worker_session_factory,
+        ),
+        patch(
+            "omega.application.guardian.engine.GuardianEngine",
+            return_value=engine,
+        ) as guardian_engine,
+    ):
+        result, status = await service.execute_render_job(
+            session=session,
+            channel_id=uuid.uuid4(),
+            request_id=uuid.uuid4(),
+            job_id=uuid.uuid4(),
+        )
+
+    guardian_engine.assert_called_once_with(session_factory=worker_session_factory)
+    engine.execute_check.assert_awaited_once()
+    assert result is None
+    assert status == ProductionQAStatus.BLOCKED
+    record_failure.assert_awaited_once()
+    render_backend.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_pre_render_missing_decision_fails_closed():
     service = ProductionRenderService()
 
