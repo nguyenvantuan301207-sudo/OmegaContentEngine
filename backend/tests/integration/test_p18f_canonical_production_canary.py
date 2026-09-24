@@ -24,7 +24,7 @@ from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -44,6 +44,7 @@ from omega.application.media_storage import LocalMediaStorageProvider, compute_s
 from omega.application.production_runtime_truth import (
     RUNTIME_TRUTH_SCHEMA_VERSION,
     ProductionRuntimeTruthSnapshot,
+    RuntimeBeatVisualTruth,
     read_attribution_foundation,
 )
 from omega.application.production_service import ProductionService
@@ -559,20 +560,20 @@ def _normalized_semantics(
         ],
         "visuals": [
             {
-                "scene": item.scene_index,
-                "origin": item.origin,
-                "mode": item.visual_mode,
-                "kind": item.kind,
+                "scene": item.parent_scene_index,
+                "beat": item.materialized_beat_index,
+                "source_beat": item.source_editorial_beat_index,
+                "origin": item.visual_origin,
+                "kind": item.asset_kind,
                 "template": item.template_id,
                 "provider": item.provider,
                 "provider_asset": item.provider_asset_id,
                 "license": item.license_status.value,
                 "attribution": item.attribution,
-                "content_sha256": item.content_sha256,
-                "width": item.width,
-                "height": item.height,
+                "provider_asset_sha256": item.provider_asset_content_sha256,
+                "rendered_beat_sha256": item.rendered_beat_clip_sha256,
             }
-            for item in snapshot.visuals
+            for item in snapshot.visual_beats
         ],
         "narration": [
             {
@@ -654,7 +655,7 @@ async def _exact_authority(
     )
     assert runtime_response.artifact_id == artifact.id
     assert runtime_response.render_version == artifact.version
-    assert snapshot.schema_version == RUNTIME_TRUTH_SCHEMA_VERSION == 3
+    assert snapshot.schema_version == RUNTIME_TRUTH_SCHEMA_VERSION
     assert snapshot.lineage.media_artifact_id == artifact.id
     assert snapshot.lineage.production_request_id == request_id
     assert snapshot.lineage.channel_id == channel_id
@@ -860,16 +861,22 @@ async def test_guardian_qa_preserves_persisted_requirement_scene_identity(
                     template_id="kinetic_text",
                 ),
             ),
-            visuals=(
-                SimpleNamespace(
-                    scene_index=scene_index,
-                    origin="TEMPLATE",
+            visual_beats=(
+                RuntimeBeatVisualTruth(
+                    parent_scene_index=scene_index,
+                    materialized_beat_index=0,
+                    source_editorial_beat_index=0,
+                    semantic_role="PRIMARY",
+                    start_offset_ms=0,
+                    end_offset_ms=1000,
+                    duration_ms=1000,
                     template_id="kinetic_text",
-                    provider=None,
-                    provider_asset_id=None,
-                    content_sha256="b" * 64,
+                    camera_motion_intent="STATIC",
+                    transition_intent="CUT",
+                    asset_action="GENERATE_TEMPLATE",
+                    visual_origin="TEMPLATE",
                     license_status=LicenseStatus.GENERATED,
-                    attribution=None,
+                    rendered_beat_clip_sha256="b" * 64,
                 ),
             ),
         )
@@ -885,7 +892,9 @@ async def test_guardian_qa_preserves_persisted_requirement_scene_identity(
         checkpoint=GuardianCheckpoint.POST_RENDER,
         trigger_type=CheckTriggerType.POST_RENDER,
         production_request_id=request.id,
-        diagnostic_context={"runtime_truth_snapshot": {"schema_version": 3}},
+        diagnostic_context={
+            "runtime_truth_snapshot": {"schema_version": RUNTIME_TRUTH_SCHEMA_VERSION}
+        },
     )
 
     matching_findings = await detector.evaluate(context, AsyncSessionLocal)
@@ -907,11 +916,7 @@ async def test_p18f_canonical_production_canary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Prove all ten P18-F requirements in one physical isolated canary."""
-    assert RUNTIME_TRUTH_SCHEMA_VERSION == 3
-    alembic_head = (await db_session.execute(text("SELECT version_num FROM alembic_version"))).scalar_one()
-    assert alembic_head == "018"
-    migration_dir = Path("alembic/versions")
-    assert not list(migration_dir.glob("019*"))
+    assert RUNTIME_TRUTH_SCHEMA_VERSION == 4
 
     blocked_network = _install_network_guard(monkeypatch)
     lineage = await _seed_lineage(db_session)
@@ -1130,14 +1135,14 @@ async def test_p18f_canonical_production_canary(
         assert snapshot.lineage.render_job_id == artifact.render_job_id
         attributed = [
             item
-            for item in snapshot.visuals
+            for item in snapshot.visual_beats
             if item.license_status == LicenseStatus.ATTRIBUTION_REQUIRED
         ]
         assert len(attributed) == 1
         assert attributed[0].provider == PROVIDER_NAME
         assert attributed[0].provider_asset_id == PROVIDER_ASSET_ID
         assert attributed[0].attribution == ATTRIBUTION_TEXT
-        assert attributed[0].content_sha256 == compute_sha256(image_path)
+        assert attributed[0].provider_asset_content_sha256 == compute_sha256(image_path)
         obligations, _ = read_attribution_foundation(snapshot.canonical_dict())
         assert len(obligations) == 1
         assert obligations[0].artifact_id == artifact.id
