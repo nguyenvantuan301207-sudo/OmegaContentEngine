@@ -16,7 +16,7 @@ from omega.domain.production import (
     SubtitleMode,
     VisualAssetMode,
 )
-from omega.infrastructure.models import ProductionRequest
+from omega.infrastructure.models import Channel, ProductionRequest
 
 
 def _make_dummy_request(
@@ -118,6 +118,42 @@ def test_visual_asset_mode_invalid_fails_closed():
     )
     with pytest.raises(ValueError, match="Unsupported visual_asset_mode: 'INVALID_MODE'"):
         resolve_canonical_production_contract(req)
+
+
+def test_empty_orm_channel_metadata_does_not_use_sqlalchemy_metadata(monkeypatch):
+    """An empty Channel.metadata_ must not fall through to Base.metadata."""
+    monkeypatch.setenv("OMEGA_VISUAL_ASSET_MODE", "LOCAL_TEMPLATE_ONLY")
+    req = _make_dummy_request()
+    channel = Channel(
+        id=req.channel_id,
+        name="P19-G2A regression channel",
+        slug="p19-g2a-regression-channel",
+        metadata_={},
+    )
+
+    assert channel.metadata_ == {}
+    assert type(channel.metadata).__name__ == "MetaData"
+
+    contract = resolve_canonical_production_contract(req, channel=channel)
+    provenance = contract.to_provenance_dict()
+
+    assert provenance["lineage"]["channel_id"] == str(channel.id)
+    assert provenance["policy"]["visual_asset_mode"] == "LOCAL_TEMPLATE_ONLY"
+    assert "MetaData" not in repr(provenance)
+
+
+def test_orm_channel_json_metadata_remains_authoritative():
+    req = _make_dummy_request()
+    channel = Channel(
+        id=req.channel_id,
+        name="P19-G2A metadata channel",
+        slug="p19-g2a-metadata-channel",
+        metadata_={"visual_asset_mode": "LOCAL_TEMPLATE_ONLY"},
+    )
+
+    contract = resolve_canonical_production_contract(req, channel=channel)
+
+    assert contract.policy.visual_asset_mode == VisualAssetMode.LOCAL_TEMPLATE_ONLY
 
 
 # ── 3. Narration Provider Normalization ──

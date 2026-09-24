@@ -477,7 +477,15 @@ def resolve_canonical_production_contract(
     if channel_metadata is not None:
         ch_meta = copy.deepcopy(channel_metadata)
     elif channel is not None:
-        ch_meta = copy.deepcopy(dict(_get_val(channel, "metadata_", None) or _get_val(channel, "metadata", None) or {}))
+        if isinstance(channel, dict):
+            raw_channel_metadata = (
+                channel["metadata_"] if "metadata_" in channel else channel.get("metadata")
+            )
+        elif hasattr(channel, "metadata_"):
+            raw_channel_metadata = channel.metadata_
+        else:
+            raw_channel_metadata = getattr(channel, "metadata", None)
+        ch_meta = copy.deepcopy(dict(raw_channel_metadata or {}))
 
     channel_style: ChannelStyleProfile | None = None
     if ch_meta:
