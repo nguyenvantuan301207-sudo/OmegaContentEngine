@@ -1,7 +1,12 @@
 import pytest
 
 from omega.application.scene_template_registry import TemplateInputKey
-from omega.application.storyboard_engine import StoryboardScene, VisualStrategy
+from omega.application.storyboard_engine import (
+    StoryboardEngine,
+    StoryboardScene,
+    VisualStrategy,
+    extract_trustworthy_code,
+)
 from omega.application.template_payload_resolver import (
     TemplateEdge,
     TemplatePayloadError,
@@ -465,3 +470,179 @@ def test_infographic_items(resolver, scene_base):
     )
     payload = resolver.resolve(scene_base, direction)
     assert payload.inputs[TemplateInputKey.ITEMS] == ["First thing", "Second thing", "Third thing"]
+
+
+def test_extract_trustworthy_code_positives():
+    code, lang = extract_trustworthy_code("def calculate_latency(): return 42")
+    assert code == "def calculate_latency(): return 42"
+    assert lang == "python"
+
+    code, lang = extract_trustworthy_code("function run() { return 42; }")
+    assert code == "function run() { return 42; }"
+    assert lang == "javascript"
+
+    code, lang = extract_trustworthy_code("SELECT id FROM jobs")
+    assert code == "SELECT id FROM jobs"
+    assert lang == "sql"
+
+    code, lang = extract_trustworthy_code("```python\ndef run():\n    return 42\n```")
+    assert code == "def run():\n    return 42"
+    assert lang == "python"
+
+    code, lang = extract_trustworthy_code("```\nconsole.log(1)\n```")
+    assert code == "console.log(1)"
+    assert lang is None
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Implementation details are important for resilient systems.",
+        "A command strategy can coordinate distributed workers.",
+        "The syntax of the architecture is discussed conceptually.",
+        "Here is a code snippet concept without literal source code.",
+        "A function of the system is to isolate failures.",
+        "A system class defines a category of workloads.",
+        (
+            "We will examine the core event loop mechanics, review syntax patterns, "
+            "analyze benchmark results, and construct a robust production deployment checklist."
+        ),
+        (
+            "For Common architectural bottlenecks and failure modes, this chapter "
+            "examines a concrete implementation example and its design rationale."
+        ),
+        "Now let us examine concrete production implementation patterns that maximize reliability.",
+        "We select the best approach from our choices.",
+    ],
+)
+def test_extract_trustworthy_code_negatives(prose):
+    code, lang = extract_trustworthy_code(prose)
+    assert code is None
+    assert lang is None
+
+
+def test_code_editor_resolve_javascript(resolver, scene_base):
+    scene_base.visual_strategy = VisualStrategy.CODE_DEMO
+    scene_base.narration_excerpt = "function run() { return 42; }"
+    direction = VisualDirection(
+        scene_index=1,
+        render_mode=VisualRenderMode.TEMPLATE,
+        template_id=VisualTemplateId.CODE_EDITOR,
+        asset_requirements=[],
+        motion_profile="code_type_on",
+        rationale="",
+    )
+    payload = resolver.resolve(scene_base, direction)
+    assert payload.inputs[TemplateInputKey.CODE] == "function run() { return 42; }"
+    assert payload.inputs[TemplateInputKey.LANGUAGE] == "javascript"
+
+
+def test_code_editor_resolve_sql(resolver, scene_base):
+    scene_base.visual_strategy = VisualStrategy.CODE_DEMO
+    scene_base.narration_excerpt = "SELECT id FROM jobs"
+    direction = VisualDirection(
+        scene_index=1,
+        render_mode=VisualRenderMode.TEMPLATE,
+        template_id=VisualTemplateId.CODE_EDITOR,
+        asset_requirements=[],
+        motion_profile="code_type_on",
+        rationale="",
+    )
+    payload = resolver.resolve(scene_base, direction)
+    assert payload.inputs[TemplateInputKey.CODE] == "SELECT id FROM jobs"
+    assert payload.inputs[TemplateInputKey.LANGUAGE] == "sql"
+
+
+def test_code_editor_resolve_fenced(resolver, scene_base):
+    scene_base.visual_strategy = VisualStrategy.CODE_DEMO
+    scene_base.narration_excerpt = "```python\ndef run():\n    return 42\n```"
+    direction = VisualDirection(
+        scene_index=1,
+        render_mode=VisualRenderMode.TEMPLATE,
+        template_id=VisualTemplateId.CODE_EDITOR,
+        asset_requirements=[],
+        motion_profile="code_type_on",
+        rationale="",
+    )
+    payload = resolver.resolve(scene_base, direction)
+    assert payload.inputs[TemplateInputKey.CODE] == "def run():\n    return 42"
+    assert payload.inputs[TemplateInputKey.LANGUAGE] == "python"
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Implementation details are important for resilient systems.",
+        "A command strategy can coordinate distributed workers.",
+        "The syntax of the architecture is discussed conceptually.",
+        "Here is a code snippet concept without literal source code.",
+        "A function of the system is to isolate failures.",
+        "A system class defines a category of workloads.",
+        (
+            "We will examine the core event loop mechanics, review syntax patterns, "
+            "analyze benchmark results, and construct a robust production deployment checklist."
+        ),
+    ],
+)
+def test_code_editor_resolve_fails_closed_on_prose(resolver, scene_base, prose):
+    scene_base.visual_strategy = VisualStrategy.CODE_DEMO
+    scene_base.narration_excerpt = prose
+    direction = VisualDirection(
+        scene_index=1,
+        render_mode=VisualRenderMode.TEMPLATE,
+        template_id=VisualTemplateId.CODE_EDITOR,
+        asset_requirements=[],
+        motion_profile="code_type_on",
+        rationale="",
+    )
+    with pytest.raises(TemplatePayloadError, match="Could not extract trustworthy code."):
+        resolver.resolve(scene_base, direction)
+
+
+@pytest.mark.parametrize(
+    "code_input",
+    [
+        "def calculate_latency(): return 42",
+        "function run() { return 42; }",
+        "SELECT id FROM jobs",
+        "```python\ndef run():\n    return 42\n```",
+    ],
+)
+def test_code_demo_to_code_editor_coherence_invariant(resolver, code_input):
+    """Planner-renderer contract coherence invariant:
+
+    Whenever representative StoryboardEngine input selects CODE_DEMO,
+    the resulting CODE_EDITOR payload must resolve successfully with TemplateInputKey.CODE.
+    """
+    engine = StoryboardEngine()
+    strategy = engine._select_strategy(
+        code_input,
+        word_count=len(code_input.split()),
+        is_first=False,
+        is_last=False,
+    )
+    assert strategy == VisualStrategy.CODE_DEMO
+
+    scene = StoryboardScene(
+        sequence_index=1,
+        section_id="Implementation",
+        purpose="Show implementation details.",
+        source_statement_references=[1],
+        narration_excerpt=code_input,
+        estimated_duration_seconds=5.0,
+        visual_strategy=strategy,
+        visual_brief="Code snippet demonstrating the concept.",
+    )
+    direction = VisualDirection(
+        scene_index=1,
+        render_mode=VisualRenderMode.TEMPLATE,
+        template_id=VisualTemplateId.CODE_EDITOR,
+        asset_requirements=[],
+        motion_profile="code_type_on",
+        rationale="CODE_DEMO maps to CODE_EDITOR",
+    )
+
+    payload = resolver.resolve(scene, direction)
+    assert payload.template_id == VisualTemplateId.CODE_EDITOR
+    assert TemplateInputKey.CODE in payload.inputs
+    assert len(payload.inputs[TemplateInputKey.CODE]) > 0

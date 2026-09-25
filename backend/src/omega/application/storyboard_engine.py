@@ -18,6 +18,47 @@ def extract_trustworthy_metric(text: str) -> str | None:
     return trailing_match.group(1) if trailing_match else None
 
 
+def extract_trustworthy_code(text: str) -> tuple[str | None, str | None]:
+    """Extract trustworthy code and language for CODE_DEMO strategy and CODE_EDITOR template."""
+    if not text:
+        return None, None
+
+    # 1. Fenced code block: ```[lang]\n<code>```
+    m_fence = re.search(r"```(?P<lang>[a-zA-Z0-9_-]+)?\s*\n?(?P<code>.+?)```", text, re.DOTALL)
+    if m_fence:
+        code = m_fence.group("code").strip()
+        if code:
+            lang = (m_fence.group("lang") or "").strip().lower() or None
+            return code, lang
+
+    # 2. Python function: def func(...): ...
+    m_py = re.search(r"\b(def\s+[a-zA-Z_]\w*\s*\([^)]*\)\s*:.*)", text, re.DOTALL)
+    if m_py:
+        code = m_py.group(1).strip()
+        if code:
+            return code, "python"
+
+    # 3. JavaScript function: function func(...) { ... }
+    m_js = re.search(r"\b(function(?:\s+[a-zA-Z_$]\w*)?\s*\([^)]*\)\s*\{.*?\})", text, re.DOTALL)
+    if m_js:
+        code = m_js.group(1).strip()
+        if code:
+            return code, "javascript"
+
+    # 4. SQL SELECT statement: SELECT ... FROM ...
+    m_sql = re.search(
+        r"\b(SELECT\s+(?!(?:the|a|an|our|their|these|those)\b)[\w*,\s`'\"().]+\s+FROM\s+(?!(?:the|a|an|our|their|these|those)\b)[a-zA-Z0-9_.]+.*)",
+        text,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if m_sql:
+        code = m_sql.group(1).strip()
+        if code:
+            return code, "sql"
+
+    return None, None
+
+
 class VisualStrategy(enum.StrEnum):
     TITLE_MOTION = "TITLE_MOTION"
     DIAGRAM = "DIAGRAM"
@@ -236,9 +277,7 @@ class StoryboardEngine:
         n_lower = narration.lower()
 
         # 1. CODE_DEMO
-        if re.search(r'\b(source code|code snippet|api example|command|syntax|implementation)\b', n_lower):
-            return VisualStrategy.CODE_DEMO
-        if re.search(r'\b(function|class)\b', n_lower) and not re.search(r'\b(system class|social class|working class)\b', n_lower):
+        if extract_trustworthy_code(narration)[0] is not None:
             return VisualStrategy.CODE_DEMO
 
         # 2. DIAGRAM

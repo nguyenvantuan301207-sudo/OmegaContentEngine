@@ -10,7 +10,11 @@ from omega.application.scene_template_registry import (
     SceneTemplateRegistry,
     TemplateInputKey,
 )
-from omega.application.storyboard_engine import StoryboardScene, extract_trustworthy_metric
+from omega.application.storyboard_engine import (
+    StoryboardScene,
+    extract_trustworthy_code,
+    extract_trustworthy_metric,
+)
 from omega.application.visual_direction import (
     VisualAssetRequirement,
     VisualDirection,
@@ -288,29 +292,7 @@ class TemplatePayloadResolver:
         return extract_trustworthy_metric(text)
 
     def _extract_code(self, text: str) -> tuple[str | None, str | None]:
-        m = re.search(r"```(?P<lang>\w+)?\n(?P<code>.*?)```", text, re.DOTALL)
-        if m:
-            return m.group("code").strip(), m.group("lang")
-
-        if "def " in text:
-            m2 = re.search(r"(def\s+.*?:.*)", text)
-            if m2:
-                return m2.group(1).strip(), "python"
-
-        if "function " in text:
-            m3 = re.search(r"(function\s+.*?\s*\{.*?\})", text)
-            if m3:
-                return m3.group(1).strip(), "javascript"
-
-        if "SELECT " in text.upper():
-            m4 = re.search(r"(SELECT\s+.*)", text, re.IGNORECASE)
-            if m4:
-                return m4.group(1).strip(), "sql"
-
-        if "def " in text:
-            return text.strip(), "python"
-
-        return None, None
+        return extract_trustworthy_code(text)
 
     def _extract_items(self, text: str) -> list[str]:
         if not text:

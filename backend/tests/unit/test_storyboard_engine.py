@@ -15,6 +15,9 @@ def test_storyboard_engine_longform():
     outline = provider.generate_outline("Understanding the Global Logistics Supply Chain", {}, {}, intent, hooks[0], 450)
     script = provider.generate_script("Understanding the Global Logistics Supply Chain", {}, {}, intent, hooks[0], outline, 450)
 
+    # Inject actual code into one statement so longform storyboard exercises CODE_DEMO
+    script["sections"][2]["statements"][0]["statement_text"] = "def optimize_pipeline(): return 42"
+
     engine = StoryboardEngine()
     plan = engine.generate_storyboard(script)
 
@@ -71,8 +74,14 @@ def test_storyboard_engine_routing_v2():
         assert strat == expected, f"Expected {expected} for '{narration}', got {strat}"
 
     # A. Code signal
-    check_strat("Here is a python code snippet showing the syntax.", VisualStrategy.CODE_DEMO)
-    check_strat("We define a function.", VisualStrategy.CODE_DEMO)
+    check_strat("def calculate_latency(): return 42", VisualStrategy.CODE_DEMO)
+    check_strat("function run() { return 42; }", VisualStrategy.CODE_DEMO)
+    check_strat("SELECT id FROM jobs", VisualStrategy.CODE_DEMO)
+    check_strat("```python\ndef run():\n    return 42\n```", VisualStrategy.CODE_DEMO)
+
+    # A1. Prose must NOT route to CODE_DEMO
+    check_strat("Here is a python code snippet showing the syntax.", VisualStrategy.IMAGE)
+    check_strat("We define a function.", VisualStrategy.BROLL)
 
     # B. Architecture signal
     check_strat("The system architecture defines the pipeline stages.", VisualStrategy.DIAGRAM)
@@ -160,3 +169,52 @@ def test_statistic_routing_accepts_resolver_compatible_metrics(narration):
     )
 
     assert strategy == VisualStrategy.STATISTIC
+
+
+@pytest.mark.parametrize(
+    "prose",
+    [
+        "Implementation details are important for resilient systems.",
+        "A command strategy can coordinate distributed workers.",
+        "The syntax of the architecture is discussed conceptually.",
+        "Here is a code snippet concept without literal source code.",
+        "A function of the system is to isolate failures.",
+        "A system class defines a category of workloads.",
+        (
+            "We will examine the core event loop mechanics, review syntax patterns, "
+            "analyze benchmark results, and construct a robust production deployment checklist."
+        ),
+        (
+            "For Common architectural bottlenecks and failure modes, this chapter "
+            "examines a concrete implementation example and its design rationale."
+        ),
+        "Now let us examine concrete production implementation patterns that maximize reliability.",
+    ],
+)
+def test_code_demo_routing_rejects_pure_prose(prose):
+    strategy = StoryboardEngine()._select_strategy(
+        prose,
+        word_count=len(prose.split()),
+        is_first=False,
+        is_last=False,
+    )
+    assert strategy != VisualStrategy.CODE_DEMO
+
+
+@pytest.mark.parametrize(
+    "code_sample",
+    [
+        "def calculate_latency(): return 42",
+        "function run() { return 42; }",
+        "SELECT id FROM jobs",
+        "```python\ndef run():\n    return 42\n```",
+    ],
+)
+def test_code_demo_routing_accepts_trustworthy_code(code_sample):
+    strategy = StoryboardEngine()._select_strategy(
+        code_sample,
+        word_count=len(code_sample.split()),
+        is_first=False,
+        is_last=False,
+    )
+    assert strategy == VisualStrategy.CODE_DEMO
