@@ -372,4 +372,5 @@ def test_default_multi_beat_collaborators_share_parent_authorities(tmp_path):
     assert service._beat_visual_renderer._payload_resolver is service._template_resolver
     assert service._beat_visual_renderer._template_renderer is service._template_renderer
     assert service._beat_visual_renderer._video_renderer is video_renderer
+    assert service._beat_visual_renderer._max_concurrency == 2
     assert service._beat_clip_assembler._renderer is ffmpeg_renderer

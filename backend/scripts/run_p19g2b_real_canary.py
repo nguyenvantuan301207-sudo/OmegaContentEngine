@@ -353,21 +353,6 @@ async def main():
             "text": clean_narration,
         })
 
-    # 4. Rendering with CachingBrowserRuntime for fast, authentic Playwright capture
-    class CachingBrowserRuntime:
-        def __init__(self, browser: BrowserCaptureRuntime):
-            self._browser = browser
-            self._cache: dict[str, BrowserCapturedFrame] = {}
-
-        async def capture(self, document, transparent_background: bool = False):
-            cache_key = f"{document.content_sha256}_{transparent_background}"
-            if cache_key in self._cache:
-                return self._cache[cache_key]
-
-            frame = await self._browser.capture(document, transparent_background=transparent_background)
-            self._cache[cache_key] = frame
-            return frame
-
     print("\nStarting physical video clip rendering via BeatVisualRenderer...")
     t_render_start = time.time()
     plan = BeatRenderPlan(
@@ -381,15 +366,14 @@ async def main():
     )
 
     beat_clips_dir = CANARY_DIR / "clips"
-    renderer = BeatVisualRenderer()
+    renderer = BeatVisualRenderer(max_concurrency=2)
 
-    async with BrowserCaptureRuntime() as browser:
-        caching_runtime = CachingBrowserRuntime(browser)
+    async with BrowserCaptureRuntime(max_concurrency=4) as browser:
         render_result = await renderer.render_plan(
             render_plan=plan,
             asset_execution=asset_exec,
             output_dir=beat_clips_dir,
-            browser_runtime=caching_runtime,
+            browser_runtime=browser,
             fps=24,
         )
 

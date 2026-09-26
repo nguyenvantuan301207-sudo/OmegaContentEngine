@@ -575,3 +575,93 @@ async def test_08_local_end_to_end_beat_visual_canary_and_assembly(tmp_path: Pat
     # Duration matches 6.0s within 1 frame tolerance (1/24 s = ~0.0416s)
     phys_duration = float(v["duration"])
     assert abs(phys_duration - 6.0) <= (1.0 / 24.0)
+
+
+@pytest.mark.asyncio
+async def test_09_bounded_concurrency_ordering_preserved(tmp_path: Path):
+    from omega.infrastructure.visual_v2_video_renderer import VisualV2VideoRenderResult
+
+    renderer = BeatVisualRenderer(max_concurrency=2)
+    mock_video_renderer = MagicMock()
+    mock_browser = MagicMock()
+
+    u0, e0 = _build_test_unit(
+        parent_scene_index=1,
+        materialized_index=0,
+        source_beat_index=0,
+        start_ms=0,
+        end_ms=1000,
+        template_id=VisualTemplateId.FLOW_DIAGRAM,
+        visual_strategy=VisualStrategy.DIAGRAM,
+        action=BeatAssetAction.LOCAL_TEMPLATE,
+        camera_motion=BeatMotionIntent.STATIC,
+        narration="High latency causes retry storms.",
+    )
+    u1, e1 = _build_test_unit(
+        parent_scene_index=1,
+        materialized_index=1,
+        source_beat_index=1,
+        start_ms=1000,
+        end_ms=2000,
+        template_id=VisualTemplateId.FLOW_DIAGRAM,
+        visual_strategy=VisualStrategy.DIAGRAM,
+        action=BeatAssetAction.LOCAL_TEMPLATE,
+        camera_motion=BeatMotionIntent.STATIC,
+        narration="High latency causes retry storms.",
+    )
+    u2, e2 = _build_test_unit(
+        parent_scene_index=1,
+        materialized_index=2,
+        source_beat_index=2,
+        start_ms=2000,
+        end_ms=3000,
+        template_id=VisualTemplateId.FLOW_DIAGRAM,
+        visual_strategy=VisualStrategy.DIAGRAM,
+        action=BeatAssetAction.LOCAL_TEMPLATE,
+        camera_motion=BeatMotionIntent.STATIC,
+        narration="High latency causes retry storms.",
+    )
+
+    plan = BeatRenderPlan(
+        parent_scene_index=1,
+        units=(u0, u1, u2),
+        total_duration_ms=3000,
+    )
+    asset_exec = BeatAssetExecutionResult(
+        parent_scene_index=1,
+        assets=(e0, e1, e2),
+    )
+
+    async def fake_render_clip(**kwargs):
+        out_path = kwargs["output_path"]
+        out_path.write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 100)
+        return VisualV2VideoRenderResult(
+            output_path=out_path,
+            scene_index=1,
+            template_id=VisualTemplateId.HERO_TITLE,
+            width=1920,
+            height=1080,
+            fps=24,
+            duration_seconds=1.0,
+            frame_count=24,
+            video_sha256="fake_sha",
+            source_html_sha256="fake_doc_sha",
+            motion_profile="static",
+        )
+
+    mock_video_renderer.render_clip = AsyncMock(side_effect=fake_render_clip)
+    renderer._video_renderer = mock_video_renderer
+
+    res = await renderer.render_plan(
+        render_plan=plan,
+        asset_execution=asset_exec,
+        output_dir=tmp_path,
+        browser_runtime=mock_browser,
+        fps=24,
+    )
+
+    assert len(res.clips) == 3
+    # Verify deterministic ordering by materialized_index
+    for idx, clip in enumerate(res.clips):
+        assert clip.materialized_index == idx
+        assert clip.path.name == f"scene_001_beat_{idx:03d}.mp4"

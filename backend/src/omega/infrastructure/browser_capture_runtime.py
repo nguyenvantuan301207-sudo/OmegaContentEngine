@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import hashlib
 
@@ -32,12 +33,30 @@ class BrowserCaptureError(ValueError):
 
 
 class BrowserCaptureRuntime:
-    def __init__(self):
+    def __init__(self, *, max_concurrency: int = 2):
+        self._max_concurrency = max(1, max_concurrency)
         self._playwright: Playwright | None = None
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
-        self._page: Page | None = None
+        self._page_pool: asyncio.Queue[Page] | None = None
+        self._pages: list[Page] = []
+        self._cache: dict[tuple[str, int, int, bool], BrowserCapturedFrame] = {}
         self._started = False
+
+    @property
+    def _page(self) -> Page | None:
+        if self._pages:
+            return self._pages[0]
+        return None
+
+    @_page.setter
+    def _page(self, page: Page | None) -> None:
+        self._page_pool = asyncio.Queue()
+        if page is not None:
+            self._pages = [page]
+            self._page_pool.put_nowait(page)
+        else:
+            self._pages = []
 
     async def __aenter__(self):
         try:
@@ -62,7 +81,13 @@ class BrowserCaptureRuntime:
                     await route.continue_()
 
             await self._context.route("**/*", abort_external_requests)
-            self._page = await self._context.new_page()
+            self._page_pool = asyncio.Queue()
+            self._pages = []
+            for _ in range(self._max_concurrency):
+                p = await self._context.new_page()
+                self._pages.append(p)
+                self._page_pool.put_nowait(p)
+
             self._started = True
             return self
         except Exception as e:
@@ -74,10 +99,11 @@ class BrowserCaptureRuntime:
 
     async def _cleanup(self):
         self._started = False
-        if self._page:
+        for p in self._pages:
             with contextlib.suppress(Exception):
-                await self._page.close()
-            self._page = None
+                await p.close()
+        self._pages.clear()
+        self._page_pool = None
         if self._context:
             with contextlib.suppress(Exception):
                 await self._context.close()
@@ -95,11 +121,21 @@ class BrowserCaptureRuntime:
         document: RenderedTemplateDocument,
         transparent_background: bool = False,
     ) -> BrowserCapturedFrame:
-        if not self._started or not self._page:
+        if not self._started or not self._page_pool:
             raise BrowserCaptureError("Browser runtime not started.")
 
+        cache_key = (
+            document.content_sha256,
+            document.width,
+            document.height,
+            transparent_background,
+        )
+        if cache_key in self._cache:
+            return self._cache[cache_key]
+
+        page = await self._page_pool.get()
         try:
-            await self._page.set_content(document.html)
+            await page.set_content(document.html)
             screenshot_kwargs = {
                 "type": "png",
                 "full_page": False,
@@ -108,9 +144,23 @@ class BrowserCaptureRuntime:
             if transparent_background:
                 screenshot_kwargs["omit_background"] = True
 
-            png_bytes = await self._page.screenshot(**screenshot_kwargs)
+            png_bytes = await page.screenshot(**screenshot_kwargs)
         except Exception as e:
+            # Recovery: close corrupted page and spawn fresh replacement into pool
+            with contextlib.suppress(Exception):
+                if page in self._pages:
+                    self._pages.remove(page)
+                await page.close()
+            try:
+                if self._context and self._started:
+                    replacement = await self._context.new_page()
+                    self._pages.append(replacement)
+                    self._page_pool.put_nowait(replacement)
+            except Exception:
+                pass
             raise BrowserCaptureError(f"Failed to capture document: {e}") from e
+        else:
+            self._page_pool.put_nowait(page)
 
         if not png_bytes:
             raise BrowserCaptureError("Screenshot returned empty bytes.")
@@ -133,7 +183,7 @@ class BrowserCaptureRuntime:
 
         png_sha256 = hashlib.sha256(png_bytes).hexdigest()
 
-        return BrowserCapturedFrame(
+        frame = BrowserCapturedFrame(
             scene_index=document.scene_index,
             template_id=document.template_id,
             width=width,
@@ -142,3 +192,5 @@ class BrowserCaptureRuntime:
             png_sha256=png_sha256,
             source_html_sha256=document.content_sha256,
         )
+        self._cache[cache_key] = frame
+        return frame

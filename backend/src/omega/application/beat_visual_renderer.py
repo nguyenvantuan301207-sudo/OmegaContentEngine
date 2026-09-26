@@ -6,6 +6,7 @@ using deterministic camera motion execution and asset bindings.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -220,10 +221,12 @@ class BeatVisualRenderer:
         payload_resolver: TemplatePayloadResolver | None = None,
         template_renderer: VisualTemplateRenderer | None = None,
         video_renderer: VisualV2VideoRenderer | None = None,
+        max_concurrency: int = 2,
     ):
         self._payload_resolver = payload_resolver or TemplatePayloadResolver()
         self._template_renderer = template_renderer or VisualTemplateRenderer()
         self._video_renderer = video_renderer or VisualV2VideoRenderer()
+        self._max_concurrency = max(1, max_concurrency)
 
     async def render_plan(
         self,
@@ -264,128 +267,133 @@ class BeatVisualRenderer:
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        rendered_clips: list[RenderedBeatClip] = []
-        clip_metadata: list[BeatClipMetadata] = []
+        sem = asyncio.Semaphore(self._max_concurrency)
 
-        for unit, executed, frame_count in zip(
-            render_plan.units, asset_execution.assets, beat_frame_counts, strict=True
-        ):
-            if unit.materialized_index != executed.beat_index:
-                raise BeatVisualRenderError(
-                    f"Beat index mismatch: unit={unit.materialized_index} executed={executed.beat_index}"
+        async def render_one(unit: BeatRenderUnit, executed: ExecutedBeatAsset, frame_count: int):
+            async with sem:
+                if unit.materialized_index != executed.beat_index:
+                    raise BeatVisualRenderError(
+                        f"Beat index mismatch: unit={unit.materialized_index} executed={executed.beat_index}"
+                    )
+
+                if unit.asset_decision.action != executed.action:
+                    raise BeatVisualRenderError(
+                        f"Action mismatch at beat {unit.materialized_index}: "
+                        f"plan={unit.asset_decision.action} executed={executed.action}"
+                    )
+
+                if unit.asset_decision.required_kind != executed.required_kind:
+                    raise BeatVisualRenderError(
+                        f"Kind mismatch at beat {unit.materialized_index}: "
+                        f"plan={unit.asset_decision.required_kind} executed={executed.required_kind}"
+                    )
+
+                if unit.asset_decision.reuse_from_beat_index != executed.reuse_from_beat_index:
+                    raise BeatVisualRenderError(
+                        f"Reuse origin mismatch at beat {unit.materialized_index}: "
+                        f"plan={unit.asset_decision.reuse_from_beat_index} "
+                        f"executed={executed.reuse_from_beat_index}"
+                    )
+
+                if unit.transition_intent != BeatTransitionIntent.HARD_CUT:
+                    raise BeatVisualRenderError(
+                        f"Unsupported transition intent: {unit.transition_intent}. "
+                        "Only HARD_CUT is supported in G2C2B."
+                    )
+
+                # Asset binding validation
+                is_broll = unit.direction_view.template_id == VisualTemplateId.BROLL_EXPLAINER
+                is_image = unit.direction_view.template_id == VisualTemplateId.IMAGE_EXPLAINER
+
+                if is_broll:
+                    if executed.bound_broll_asset is None:
+                        raise BeatVisualRenderError(
+                            f"Missing bound BROLL asset for BROLL beat {unit.materialized_index}"
+                        )
+                    if executed.bound_visual_asset is not None:
+                        raise BeatVisualRenderError(
+                            f"Unexpected visual asset on BROLL beat {unit.materialized_index}"
+                        )
+                    bound_assets = (executed.bound_broll_asset,)
+                    broll_asset = executed.bound_broll_asset
+                elif is_image:
+                    if executed.bound_visual_asset is None:
+                        raise BeatVisualRenderError(
+                            f"Missing bound visual asset for IMAGE beat {unit.materialized_index}"
+                        )
+                    if executed.bound_broll_asset is not None:
+                        raise BeatVisualRenderError(
+                            f"Unexpected BROLL asset on IMAGE beat {unit.materialized_index}"
+                        )
+                    bound_assets = (executed.bound_visual_asset,)
+                    broll_asset = None
+                else:
+                    if executed.bound_broll_asset is not None or executed.bound_visual_asset is not None:
+                        raise BeatVisualRenderError(
+                            f"Unexpected external assets on local template beat {unit.materialized_index}"
+                        )
+                    bound_assets = ()
+                    broll_asset = None
+
+                # 1. Resolve payload
+                payload = self._payload_resolver.resolve(unit.scene_view, unit.direction_view)
+
+                # 2. Render HTML template document
+                doc = self._template_renderer.render(
+                    payload,
+                    assets=bound_assets,
+                    accent_color=accent_color,
+                    bg_color=bg_color,
                 )
 
-            if unit.asset_decision.action != executed.action:
-                raise BeatVisualRenderError(
-                    f"Action mismatch at beat {unit.materialized_index}: "
-                    f"plan={unit.asset_decision.action} executed={executed.action}"
+                # 3. Output path
+                clip_name = f"scene_{unit.parent_scene_index:03d}_beat_{unit.materialized_index:03d}.mp4"
+                clip_path = output_dir / clip_name
+
+                # 4. Render clip
+                duration_s = unit.duration_ms / 1000.0
+                video_result = await self._video_renderer.render_clip(
+                    document=doc,
+                    motion_profile=unit.direction_view.motion_profile,
+                    duration_seconds=duration_s,
+                    output_path=clip_path,
+                    browser_runtime=browser_runtime,
+                    fps=fps,
+                    broll_asset=broll_asset,
+                    camera_motion_intent=unit.camera_motion_intent,
+                    frame_count_override=frame_count,
                 )
 
-            if unit.asset_decision.required_kind != executed.required_kind:
-                raise BeatVisualRenderError(
-                    f"Kind mismatch at beat {unit.materialized_index}: "
-                    f"plan={unit.asset_decision.required_kind} executed={executed.required_kind}"
+                # 5. Validate output MP4
+                if not clip_path.exists() or clip_path.stat().st_size <= 0:
+                    raise BeatVisualRenderError(f"Rendered beat clip {clip_path} is missing or empty")
+
+                rendered_clip = RenderedBeatClip(
+                    parent_scene_index=unit.parent_scene_index,
+                    materialized_index=unit.materialized_index,
+                    source_beat_index=unit.source_beat_index,
+                    start_ms=unit.start_ms,
+                    end_ms=unit.end_ms,
+                    duration_ms=unit.duration_ms,
+                    path=clip_path,
                 )
 
-            if unit.asset_decision.reuse_from_beat_index != executed.reuse_from_beat_index:
-                raise BeatVisualRenderError(
-                    f"Reuse origin mismatch at beat {unit.materialized_index}: "
-                    f"plan={unit.asset_decision.reuse_from_beat_index} "
-                    f"executed={executed.reuse_from_beat_index}"
-                )
-
-            if unit.transition_intent != BeatTransitionIntent.HARD_CUT:
-                raise BeatVisualRenderError(
-                    f"Unsupported transition intent: {unit.transition_intent}. "
-                    "Only HARD_CUT is supported in G2C2B."
-                )
-
-            # Asset binding validation
-            is_broll = unit.direction_view.template_id == VisualTemplateId.BROLL_EXPLAINER
-            is_image = unit.direction_view.template_id == VisualTemplateId.IMAGE_EXPLAINER
-
-            if is_broll:
-                if executed.bound_broll_asset is None:
-                    raise BeatVisualRenderError(
-                        f"Missing bound BROLL asset for BROLL beat {unit.materialized_index}"
-                    )
-                if executed.bound_visual_asset is not None:
-                    raise BeatVisualRenderError(
-                        f"Unexpected visual asset on BROLL beat {unit.materialized_index}"
-                    )
-                bound_assets = (executed.bound_broll_asset,)
-                broll_asset = executed.bound_broll_asset
-            elif is_image:
-                if executed.bound_visual_asset is None:
-                    raise BeatVisualRenderError(
-                        f"Missing bound visual asset for IMAGE beat {unit.materialized_index}"
-                    )
-                if executed.bound_broll_asset is not None:
-                    raise BeatVisualRenderError(
-                        f"Unexpected BROLL asset on IMAGE beat {unit.materialized_index}"
-                    )
-                bound_assets = (executed.bound_visual_asset,)
-                broll_asset = None
-            else:
-                if executed.bound_broll_asset is not None or executed.bound_visual_asset is not None:
-                    raise BeatVisualRenderError(
-                        f"Unexpected external assets on local template beat {unit.materialized_index}"
-                    )
-                bound_assets = ()
-                broll_asset = None
-
-            # 1. Resolve payload
-            payload = self._payload_resolver.resolve(unit.scene_view, unit.direction_view)
-
-            # 2. Render HTML template document
-            doc = self._template_renderer.render(
-                payload,
-                assets=bound_assets,
-                accent_color=accent_color,
-                bg_color=bg_color,
-            )
-
-            # 3. Output path
-            clip_name = f"scene_{unit.parent_scene_index:03d}_beat_{unit.materialized_index:03d}.mp4"
-            clip_path = output_dir / clip_name
-
-            # 4. Render clip
-            duration_s = unit.duration_ms / 1000.0
-            video_result = await self._video_renderer.render_clip(
-                document=doc,
-                motion_profile=unit.direction_view.motion_profile,
-                duration_seconds=duration_s,
-                output_path=clip_path,
-                browser_runtime=browser_runtime,
-                fps=fps,
-                broll_asset=broll_asset,
-                camera_motion_intent=unit.camera_motion_intent,
-                frame_count_override=frame_count,
-            )
-
-            # 5. Validate output MP4
-            if not clip_path.exists() or clip_path.stat().st_size <= 0:
-                raise BeatVisualRenderError(f"Rendered beat clip {clip_path} is missing or empty")
-
-            rendered_clip = RenderedBeatClip(
-                parent_scene_index=unit.parent_scene_index,
-                materialized_index=unit.materialized_index,
-                source_beat_index=unit.source_beat_index,
-                start_ms=unit.start_ms,
-                end_ms=unit.end_ms,
-                duration_ms=unit.duration_ms,
-                path=clip_path,
-            )
-            rendered_clips.append(rendered_clip)
-
-            clip_metadata.append(
-                BeatClipMetadata(
+                metadata = BeatClipMetadata(
                     beat_index=unit.materialized_index,
                     template_id=unit.direction_view.template_id,
                     camera_motion_intent=unit.camera_motion_intent,
                     video_sha256=video_result.video_sha256,
                 )
-            )
+                return rendered_clip, metadata
+
+        tasks = [
+            render_one(u, e, fc)
+            for u, e, fc in zip(render_plan.units, asset_execution.assets, beat_frame_counts, strict=True)
+        ]
+        results = await asyncio.gather(*tasks)
+
+        rendered_clips = [r[0] for r in results]
+        clip_metadata = [r[1] for r in results]
 
         return BeatVisualRenderResult(
             parent_scene_index=render_plan.parent_scene_index,

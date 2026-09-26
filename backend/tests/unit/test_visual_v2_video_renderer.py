@@ -148,8 +148,9 @@ async def test_broll_ffmpeg_command_structure(tmp_path: Path, monkeypatch):
     assert "-t" in cmd
     assert cmd[cmd.index("-t") + 1] == "2.0"
 
-    # 8. Transparent capture was requested
-    assert mock_browser.capture.call_count == 24  # 2.0s * 12 fps = 24
+    # 8. Transparent capture was requested with unique DOM state deduplication
+    assert mock_browser.capture.call_count == 15  # 15 unique DOM states out of 24 timeline frames
+    assert res.frame_count == 24
     _, kwargs = mock_browser.capture.call_args
     assert kwargs.get("transparent_background") is True
 

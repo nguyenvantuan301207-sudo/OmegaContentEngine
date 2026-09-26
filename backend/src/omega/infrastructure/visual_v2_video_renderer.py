@@ -106,6 +106,8 @@ class VisualV2VideoRenderer:
         is_broll = document.template_id == VisualTemplateId.BROLL_EXPLAINER
 
         with tempfile.TemporaryDirectory() as temp_dir:
+            # 1. Precompute all frame documents
+            frame_docs: list[RenderedTemplateDocument] = []
             for frame_index in range(frame_count):
                 time_seconds = frame_index / fps
 
@@ -147,24 +149,49 @@ class VisualV2VideoRenderer:
                         text_fitting=frame_doc.text_fitting,
                     )
 
+                frame_docs.append(frame_doc)
+
+            # 2. Identify unique frame documents
+            unique_docs_map: dict[str, RenderedTemplateDocument] = {}
+            for doc in frame_docs:
+                if doc.content_sha256 not in unique_docs_map:
+                    unique_docs_map[doc.content_sha256] = doc
+
+            # 3. Capture unique frame documents concurrently
+            async def _cap(doc: RenderedTemplateDocument):
                 try:
-                    frame = await browser_runtime.capture(
-                        frame_doc,
-                        transparent_background=is_broll,
-                    )
+                    res = await browser_runtime.capture(doc, transparent_background=is_broll)
+                    return doc.content_sha256, res
                 except BrowserCaptureError as e:
                     raise VisualV2VideoRenderError(f"BrowserCaptureError: {e}") from e
                 except Exception as e:
                     raise VisualV2VideoRenderError(f"Browser capture failed unexpectedly: {e}") from e
 
+            captured_results = await asyncio.gather(*[_cap(d) for d in unique_docs_map.values()])
+            captured_frames: dict[str, BrowserCapturedFrame] = dict(captured_results)
+
+            # 4. Write frame files (using os.link for identical consecutive frames)
+            prev_sha: str | None = None
+            prev_path: str | None = None
+            for frame_index, doc in enumerate(frame_docs):
                 frame_name = f"frame_{frame_index:05d}.png"
                 frame_path = os.path.join(temp_dir, frame_name)
+                frame = captured_frames[doc.content_sha256]
 
                 try:
-                    with open(frame_path, "wb") as f:
-                        f.write(frame.png_bytes)
+                    if prev_sha == doc.content_sha256 and prev_path is not None:
+                        try:
+                            os.link(prev_path, frame_path)
+                        except OSError:
+                            with open(frame_path, "wb") as f:
+                                f.write(frame.png_bytes)
+                    else:
+                        with open(frame_path, "wb") as f:
+                            f.write(frame.png_bytes)
                 except Exception as e:
                     raise VisualV2VideoRenderError(f"Failed to write frame {frame_index}: {e}") from e
+                prev_sha = doc.content_sha256
+                prev_path = frame_path
 
             for frame_index in range(frame_count):
                 frame_name = f"frame_{frame_index:05d}.png"
