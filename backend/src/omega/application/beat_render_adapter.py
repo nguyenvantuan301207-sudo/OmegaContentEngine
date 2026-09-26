@@ -104,6 +104,9 @@ def adapt_visual_direction_view(
     parent_scene_index: int,
 ) -> VisualDirection:
     """Adapt BeatVisualDirection into standard VisualDirection for TemplatePayloadResolver."""
+    is_section_entry = (beat_direction.beat_index == 0 and parent_scene_index == 1) or (
+        beat_direction.semantic_role.value in ("HOOK_TITLE", "CHAPTER_TRANSITION")
+    )
     return VisualDirection(
         scene_index=parent_scene_index,
         render_mode=beat_direction.render_mode,
@@ -115,8 +118,10 @@ def adapt_visual_direction_view(
             **beat_direction.metadata,
             "beat_index": beat_direction.beat_index,
             "semantic_role": beat_direction.semantic_role.value,
+            "is_section_entry": is_section_entry,
         },
     )
+
 
 
 class BeatRenderUnit(BaseModel):

@@ -64,6 +64,8 @@ class VisualV2VideoRenderer:
             and document.template_id not in (
                 VisualTemplateId.IMAGE_EXPLAINER,
                 VisualTemplateId.BROLL_EXPLAINER,
+                VisualTemplateId.STATISTIC_HERO,
+                VisualTemplateId.CODE_EDITOR,
             )
         ):
             raise VisualV2VideoRenderError(
@@ -117,15 +119,21 @@ class VisualV2VideoRenderer:
                 except VisualDomMotionError as e:
                     raise VisualV2VideoRenderError(f"VisualDomMotionError: {e}") from e
 
-                # For IMAGE_EXPLAINER, inject camera motion state into frame HTML
+                # For IMAGE_EXPLAINER, STATISTIC_HERO, and CODE_EDITOR, inject camera motion state into frame HTML
+                eligible_camera_templates = (
+                    VisualTemplateId.IMAGE_EXPLAINER,
+                    VisualTemplateId.STATISTIC_HERO,
+                    VisualTemplateId.CODE_EDITOR,
+                )
                 if (
-                    document.template_id == VisualTemplateId.IMAGE_EXPLAINER
+                    document.template_id in eligible_camera_templates
                     and camera_motion_intent is not None
                     and camera_motion_intent != BeatMotionIntent.STATIC
                 ):
                     progress = (frame_index / (frame_count - 1)) if frame_count > 1 else 1.0
+                    sampled_progress = round(progress, 2)
                     cam_profile = resolve_camera_motion_profile(camera_motion_intent)
-                    cam_state = evaluate_camera_motion(cam_profile, progress)
+                    cam_state = evaluate_camera_motion(cam_profile, sampled_progress)
                     cam_html = inject_camera_motion_style(frame_doc.html, cam_state)
                     cam_sha256 = hashlib.sha256(cam_html.encode("utf-8")).hexdigest()
                     frame_doc = RenderedTemplateDocument(

@@ -343,7 +343,44 @@ class VisualTemplateRenderer:
             title_html = f'<div id="flow-title" class="section-title">{esc_title}</div>'
             semantic_ids.append("flow-title")
 
+        edges = payload.inputs.get(TemplateInputKey.EDGES) or []
+        edge_map = {e.from_node: e for e in edges if hasattr(e, "from_node")}
+        from omega.application.mechanism_diagram import derive_relation_label
+
         num_nodes = len(nodes)
+        if num_nodes <= 2:
+            node_min_w = 420
+            node_max_w = 540
+            node_min_h = 180
+            node_pad = "48px 56px"
+            node_fs = 40
+            node_radius = 24
+            edge_gap = 40
+            svg_w, svg_h = 72, 36
+            label_fs = 20
+            label_pad = "6px 18px"
+        elif num_nodes == 3:
+            node_min_w = 320
+            node_max_w = 420
+            node_min_h = 160
+            node_pad = "40px 48px"
+            node_fs = 34
+            node_radius = 20
+            edge_gap = 32
+            svg_w, svg_h = 60, 30
+            label_fs = 18
+            label_pad = "5px 14px"
+        else:
+            node_min_w = 260
+            node_max_w = 340
+            node_min_h = 140
+            node_pad = "32px 36px"
+            node_fs = 28
+            node_radius = 18
+            edge_gap = 24
+            svg_w, svg_h = 48, 24
+            label_fs = 15
+            label_pad = "4px 10px"
 
         nodes_html = ""
         for i, node in enumerate(nodes):
@@ -354,22 +391,63 @@ class VisualTemplateRenderer:
 
             if i < num_nodes - 1:
                 edge_id = f"flow-edge-{i}"
+                next_node = nodes[i + 1]
+                edge_obj = edge_map.get(node) or (edges[i] if i < len(edges) else None)
+                rel_label = getattr(edge_obj, "label", None) if edge_obj else None
+                if not rel_label:
+                    rel_label = derive_relation_label(node, next_node)
+
+                esc_rel = html.escape(rel_label)
+                label_html = f'<div class="flow-edge-label">{esc_rel}</div>'
+
                 nodes_html += f"""
                 <div id="{edge_id}" data-motion-role="flow-edge" data-motion-index="{i}" class="flow-edge">
-                    <svg width="40" height="24" viewBox="0 0 40 24" fill="none">
-                        <path d="M0 12 H36 M28 4 L38 12 L28 20" stroke="var(--accent)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+                    <svg width="{svg_w}" height="{svg_h}" viewBox="0 0 60 30" fill="none">
+                        <path d="M0 15 H52 M40 5 L52 15 L40 25" stroke="var(--accent)" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
                     </svg>
+                    {label_html}
                 </div>
                 """
                 semantic_ids.append(edge_id)
 
         content = f"""
         <style>
-        .flow-container {{ display: flex; flex-direction: column; height: 100%; width: 100%; }}
-        .section-title {{ font-size: 32px; font-weight: 600; color: var(--accent); margin-bottom: 80px; letter-spacing: 0.05em; text-transform: uppercase; }}
-        .flow-diagram-area {{ display: flex; flex-direction: row; align-items: center; justify-content: center; flex-grow: 1; flex-wrap: wrap; gap: 20px; }}
-        .flow-node {{ background: var(--surface); border: 1px solid var(--surface-border); padding: 40px; border-radius: 16px; font-size: 36px; font-weight: 600; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.3); min-width: 200px; max-width: 300px; word-wrap: break-word; }}
-        .flow-edge {{ display: flex; align-items: center; justify-content: center; padding: 0 10px; }}
+        .flow-container {{ display: flex; flex-direction: column; height: 100%; width: 100%; justify-content: center; align-items: center; }}
+        .section-title {{ font-size: 32px; font-weight: 600; color: var(--accent); margin-bottom: 50px; letter-spacing: 0.05em; text-transform: uppercase; width: 100%; text-align: left; }}
+        .flow-diagram-area {{ display: flex; flex-direction: row; align-items: center; justify-content: center; flex-grow: 1; flex-wrap: nowrap; gap: {edge_gap}px; width: 100%; max-width: 1720px; }}
+        .flow-node {{
+            background: linear-gradient(145deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.98));
+            border: 2px solid rgba(96, 165, 250, 0.45);
+            border-radius: {node_radius}px;
+            font-size: {node_fs}px;
+            font-weight: 700;
+            text-align: center;
+            color: #F8FAFC;
+            box-shadow: 0 20px 45px rgba(0,0,0,0.6), 0 0 30px rgba(59, 130, 246, 0.18);
+            min-width: {node_min_w}px;
+            max-width: {node_max_w}px;
+            min-height: {node_min_h}px;
+            padding: {node_pad};
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            word-wrap: break-word;
+            line-height: 1.35;
+        }}
+        .flow-edge {{ display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 0 12px; flex-shrink: 0; }}
+        .flow-edge-label {{
+            font-size: {label_fs}px;
+            font-weight: 800;
+            color: #93C5FD;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            background: rgba(15, 23, 42, 0.92);
+            border: 1.5px solid rgba(96, 165, 250, 0.45);
+            padding: {label_pad};
+            border-radius: 8px;
+            white-space: nowrap;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+        }}
         </style>
         <div class="flow-container">
             {title_html}
@@ -378,6 +456,7 @@ class VisualTemplateRenderer:
             </div>
         </div>
         """
+
         return content, semantic_ids
 
     def _render_statistic_hero(self, payload: TemplatePayload) -> tuple[str, list[str]]:
@@ -554,6 +633,30 @@ class VisualTemplateRenderer:
 
         img_html = f'<img id="image-element" class="image-asset" src="{esc_src}" alt="{esc_alt}" />'
 
+        layout = payload.metadata.get("layout_variant") or "SPLIT_LEFT_VISUAL"
+        container_style_override = ""
+        if layout == "SPLIT_RIGHT_VISUAL":
+            container_style_override = ".split-container { flex-direction: row-reverse; }"
+        elif layout == "FULL_BLEED_VISUAL":
+            container_style_override = """
+            .split-container { position: relative; gap: 0; }
+            .split-media { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; }
+            .image-frame { width: 100%; height: 100%; border: none; border-radius: 0; }
+            .split-text { position: absolute; bottom: 80px; left: 80px; z-index: 2; max-width: 55%; background: rgba(11, 15, 25, 0.85); backdrop-filter: blur(16px); padding: 36px 44px; border-radius: 20px; border: 1px solid var(--surface-border); }
+            """
+        elif layout == "TEXT_OVER_VISUAL":
+            container_style_override = """
+            .split-container { position: relative; justify-content: center; align-items: center; }
+            .split-media { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 1; opacity: 0.35; }
+            .image-frame { width: 100%; height: 100%; border: none; border-radius: 0; }
+            .split-text { position: relative; z-index: 2; max-width: 75%; text-align: center; align-items: center; background: rgba(11, 15, 25, 0.7); backdrop-filter: blur(20px); padding: 48px 64px; border-radius: 24px; border: 1px solid var(--accent); }
+            """
+        elif layout == "IMAGE_WITH_CALLOUTS":
+            container_style_override = """
+            .image-frame { border: 2px solid var(--accent); box-shadow: 0 0 40px rgba(59, 130, 246, 0.3); }
+            .split-text { border-left: 4px solid var(--accent); padding-left: 32px; }
+            """
+
         content = f"""
         <style>
         .split-container {{ display: flex; height: 100%; width: 100%; gap: 60px; padding-bottom: {CANONICAL_SUBTITLE_SAFE_BOTTOM_PX}px; box-sizing: border-box; }}
@@ -564,6 +667,7 @@ class VisualTemplateRenderer:
         .split-media {{ flex: 1; display: flex; align-items: center; justify-content: center; }}
         .image-frame {{ width: 100%; height: 800px; background: linear-gradient(135deg, rgba(59, 130, 246, 0.2), rgba(99, 102, 241, 0.1)); border: 1px solid var(--accent); border-radius: 20px; box-shadow: inset 0 0 100px rgba(0,0,0,0.5), 0 20px 40px rgba(0,0,0,0.3); overflow: hidden; position: relative; }}
         .image-asset {{ width: 100%; height: 100%; object-fit: cover; display: block; }}
+        {container_style_override}
         </style>
         <div class="split-container">
             <div class="split-text">
@@ -621,6 +725,20 @@ class VisualTemplateRenderer:
             caption_html = f'<div id="broll-caption" data-motion-role="broll-caption" class="broll-caption">{esc_caption}</div>'
             semantic_ids.append("broll-caption")
 
+        layout = payload.metadata.get("layout_variant") or "TEXT_OVER_VISUAL"
+        broll_layout_override = ""
+        if layout == "BROLL_WITH_MINIMAL_LABEL":
+            broll_layout_override = """
+            .broll-title { font-size: 20px; margin-bottom: 8px; opacity: 0.85; }
+            .broll-body { font-size: 32px; max-width: 700px; background: rgba(11, 15, 25, 0.85); backdrop-filter: blur(14px); padding: 16px 24px; border-radius: 16px; border: 1px solid var(--surface-border); display: inline-block; }
+            .broll-caption { display: none; }
+            """
+        elif layout == "FULL_BLEED_VISUAL":
+            broll_layout_override = """
+            .broll-scrim { background: linear-gradient(0deg, rgba(11, 15, 25, 0.85) 0%, transparent 50%); }
+            .broll-content { max-width: 850px; margin-left: 60px; }
+            """
+
         content = f"""
         <style>
         .broll-container {{
@@ -676,7 +794,9 @@ class VisualTemplateRenderer:
             word-wrap: break-word;
             text-shadow: 0 2px 8px rgba(0,0,0,0.6);
         }}
+        {broll_layout_override}
         </style>
+
         <div class="broll-container">
             <div id="broll-scrim" data-motion-role="broll-scrim" class="broll-scrim"></div>
             <div class="broll-content">

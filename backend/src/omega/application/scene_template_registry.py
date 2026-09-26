@@ -33,6 +33,8 @@ class TemplateInputKey(enum.StrEnum):
     QUOTE = "QUOTE"
     ATTRIBUTION = "ATTRIBUTION"
     CTA_TEXT = "CTA_TEXT"
+    LAYOUT_VARIANT = "LAYOUT_VARIANT"
+
 
 
 class TemplateCapability(enum.StrEnum):
@@ -141,7 +143,12 @@ _DEFINITIONS = (
         supported_render_modes=(VisualRenderMode.HYBRID,),
         supported_aspect_ratios=(TemplateAspectRatio.LANDSCAPE_16_9,),
         required_inputs=(),
-        optional_inputs=(TemplateInputKey.TITLE, TemplateInputKey.BODY, TemplateInputKey.CAPTION),
+        optional_inputs=(
+            TemplateInputKey.TITLE,
+            TemplateInputKey.BODY,
+            TemplateInputKey.CAPTION,
+            TemplateInputKey.LAYOUT_VARIANT,
+        ),
         required_asset_kinds=(VisualAssetKind.IMAGE,),
         allowed_asset_kinds=(VisualAssetKind.IMAGE, VisualAssetKind.ICON),
         motion_profiles=("image_explainer",),
@@ -152,12 +159,18 @@ _DEFINITIONS = (
         supported_render_modes=(VisualRenderMode.BROLL,),
         supported_aspect_ratios=(TemplateAspectRatio.LANDSCAPE_16_9,),
         required_inputs=(),
-        optional_inputs=(TemplateInputKey.TITLE, TemplateInputKey.BODY, TemplateInputKey.CAPTION),
+        optional_inputs=(
+            TemplateInputKey.TITLE,
+            TemplateInputKey.BODY,
+            TemplateInputKey.CAPTION,
+            TemplateInputKey.LAYOUT_VARIANT,
+        ),
         required_asset_kinds=(VisualAssetKind.BROLL,),
         allowed_asset_kinds=(VisualAssetKind.BROLL, VisualAssetKind.ICON),
         motion_profiles=("broll_overlay",),
         capabilities=(TemplateCapability.TEXT, TemplateCapability.MOTION, TemplateCapability.VIDEO, TemplateCapability.ICON),
     ),
+
     SceneTemplateDefinition(
         template_id=VisualTemplateId.SCREENSHOT_FOCUS,
         supported_render_modes=(VisualRenderMode.SCREENSHOT,),

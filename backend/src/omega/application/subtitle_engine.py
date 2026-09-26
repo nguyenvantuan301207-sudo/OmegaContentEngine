@@ -24,19 +24,20 @@ class SubtitleRenderStyle(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     font_family: str = "Arial"
-    font_size: int = Field(default=48, ge=24, le=96)
+    font_size: int = Field(default=52, ge=24, le=96)
     min_font_size: int = Field(default=32, ge=20, le=96)
-    bold: bool = False
+    bold: bool = True
     primary_color: str = "#FFFFFF"
     outline_color: str = "#000000"
-    outline_width: float = Field(default=2.0, ge=0, le=8)
-    shadow: float = Field(default=2.0, ge=0, le=8)
+    outline_width: float = Field(default=3.0, ge=0, le=8)
+    shadow: float = Field(default=2.5, ge=0, le=8)
     background_box: bool = False
     alignment: int = Field(default=2, ge=1, le=9)
-    margin_v: int = Field(default=80, ge=0, le=400)
+    margin_v: int = Field(default=90, ge=0, le=400)
     max_lines: int = Field(default=2, ge=1, le=3)
     max_width_ratio: float = Field(default=0.82, ge=0.4, le=0.95)
     karaoke: bool = False
+
 
     @field_validator("font_family")
     @classmethod

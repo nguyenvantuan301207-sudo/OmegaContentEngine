@@ -6,6 +6,9 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from omega.application.semantic_asset_query import derive_semantic_asset_query
+
+
 
 def extract_trustworthy_metric(text: str) -> str | None:
     """Extract the numeric metric syntax accepted by statistic templates."""
@@ -251,10 +254,11 @@ class StoryboardEngine:
             visual_brief=brief,
             on_screen_text=on_screen_text,
             motion_hint=motion_hint,
-            asset_query_hint=None,
+            asset_query_hint=derive_semantic_asset_query(narration, fallback_topic=section_heading),
             importance="HIGH" if citations else "NORMAL",
             citations=citations
         )
+
 
     def _select_strategy(
         self,

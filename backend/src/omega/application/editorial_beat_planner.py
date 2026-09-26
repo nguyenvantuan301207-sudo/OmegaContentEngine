@@ -22,12 +22,53 @@ from omega.application.editorial_beat import (
     MaterializedBeatTimingPlan,
 )
 from omega.application.mechanism_diagram import resolve_mechanism_diagram_spec
+from omega.application.semantic_asset_query import derive_semantic_asset_query
 from omega.application.storyboard_engine import StoryboardScene, VisualStrategy
 
 MIN_BEAT_DURATION_MS: int = 1500
 MIN_WORDS_FOR_BEAT: int = 4
 LONG_HOOK_MIN_DURATION_SECONDS: float = 4.5
 LONG_HOOK_MIN_WORDS: int = 10
+
+
+def _decompose_semantic_sentence(sentence: str) -> list[str]:
+    """Decompose long explanatory spans (>16 words) where a real meaning change occurs.
+
+    Identifies real concept/state/example transitions:
+    - Semicolons: ';'
+    - Consequence/mechanism: ', which', ', leading to', ', resulting in', ', whereby'
+    - Contrast: ', but', ', however,'
+    - Exemplification: ', for example,', ', such as,'
+
+    Guarantees both sides have at least 5 words so neither is a stub.
+    """
+    clean = sentence.strip()
+    words = clean.split()
+    if len(words) < 16:
+        return [clean]
+
+    patterns = (
+        re.compile(r'(?<=\w);\s+'),
+        re.compile(r'(?<=\w),\s+(?=which\b)', re.IGNORECASE),
+        re.compile(r'(?<=\w),\s+(?=leading\s+to\b)', re.IGNORECASE),
+        re.compile(r'(?<=\w),\s+(?=resulting\s+in\b)', re.IGNORECASE),
+        re.compile(r'(?<=\w),\s+(?=whereby\b)', re.IGNORECASE),
+        re.compile(r'(?<=\w),\s+(?=for\s+example\b)', re.IGNORECASE),
+        re.compile(r'(?<=\w),\s+(?=such\s+as\b)', re.IGNORECASE),
+        re.compile(r'(?<=\w),\s+(?=but\b)', re.IGNORECASE),
+        re.compile(r'(?<=\w),\s+(?=while\b)', re.IGNORECASE),
+    )
+
+    for pat in patterns:
+        parts = pat.split(clean, maxsplit=1)
+        if len(parts) == 2:
+            p0 = parts[0].strip()
+            p1 = parts[1].strip()
+            if len(p0.split()) >= 5 and len(p1.split()) >= 5:
+                return [p0, p1]
+
+    return [clean]
+
 
 
 def _split_into_sentences(text: str) -> list[str]:
@@ -283,7 +324,12 @@ class EditorialBeatPlanner:
                 else:
                     merged_sents.append(s)
 
+            # Decompose long explanatory spans (>16 words) with explicit semantic clause boundaries
+            decomposed_sents: list[str] = []
             for s in merged_sents:
+                decomposed_sents.extend(_decompose_semantic_sentence(s))
+
+            for s in decomposed_sents:
                 sentence_units.append((order, s, stype))
 
         if not sentence_units:
@@ -305,6 +351,9 @@ class EditorialBeatPlanner:
                 is_hook=is_hook,
             )
 
+            # Query hint: use deterministic semantic asset query derivation
+            query_hint = derive_semantic_asset_query(span, fallback_topic=scene.section_id)
+
             beats.append(
                 EditorialBeatSpec(
                     beat_index=beat_idx,
@@ -317,9 +366,10 @@ class EditorialBeatPlanner:
                     asset_reuse_intent=reuse,
                     motion_intent=motion,
                     transition_intent=BeatTransitionIntent.HARD_CUT,
-                    asset_query_hint=scene.asset_query_hint if beat_idx == 0 else None,
+                    asset_query_hint=query_hint,
                 )
             )
+
 
         total_weight = sum(b.word_weight for b in beats)
         return EditorialBeatPlan(

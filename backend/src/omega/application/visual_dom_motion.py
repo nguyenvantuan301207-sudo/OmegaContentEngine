@@ -69,7 +69,7 @@ class VisualDomMotionRuntime:
         if duration_seconds <= 0:
             raise VisualDomMotionError("Duration must be > 0.")
 
-        time_seconds = self._clamp(time_seconds, 0.0, duration_seconds)
+        time_seconds = self._clamp(round(time_seconds, 1), 0.0, duration_seconds)
 
         if not motion_profile:
             return RenderedTemplateDocument(
@@ -170,10 +170,10 @@ class VisualDomMotionRuntime:
         if nodes == 0:
             return "".join(style)
 
-        seq_start = min(0.5, d)
-        seq_dur = max(d - seq_start, 0.01)
+        seq_start = min(0.3, d * 0.05)
+        reveal_dur = min(3.6, max(d * 0.45, 1.5))
         steps = 2 * nodes - 1
-        step_dur = seq_dur / steps
+        step_dur = reveal_dur / steps
 
         for i in range(nodes):
             node_start = seq_start + (2 * i) * step_dur

@@ -5,7 +5,10 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict
 
 from omega.application.editorial_beat import BeatSemanticRole
-from omega.application.mechanism_diagram import resolve_mechanism_diagram_spec
+from omega.application.mechanism_diagram import (
+    derive_relation_label,
+    resolve_mechanism_diagram_spec,
+)
 from omega.application.scene_template_registry import (
     SceneTemplateRegistry,
     TemplateInputKey,
@@ -15,41 +18,29 @@ from omega.application.storyboard_engine import (
     extract_trustworthy_code,
     extract_trustworthy_metric,
 )
+from omega.application.viewer_text_sanitizer import (
+    is_structural_or_internal_label,
+    sanitize_chapter_title,
+    sanitize_viewer_text,
+)
 from omega.application.visual_direction import (
     VisualAssetRequirement,
     VisualDirection,
     VisualTemplateId,
 )
 
-_INTERNAL_STRUCTURAL_EXACT = frozenset({
-    "hook",
-    "closing",
-    "cta",
-    "call to action",
-    "call-to-action",
-})
-
-_INTERNAL_STRUCTURAL_PATTERN = re.compile(
-    r"^(?:section|scene)\s*\d+$",
-    re.IGNORECASE,
-)
-
 
 def is_internal_structural_label(label: str | None) -> bool:
     """Identify internal orchestration/structural planning labels that must not leak to viewers."""
-    if not label or not label.strip():
-        return True
-    cleaned = label.strip()
-    lower = cleaned.lower()
-    if lower in _INTERNAL_STRUCTURAL_EXACT:
-        return True
-    return bool(_INTERNAL_STRUCTURAL_PATTERN.match(cleaned))
+    return is_structural_or_internal_label(label)
 
 
 class TemplateEdge(BaseModel):
     model_config = ConfigDict(frozen=True)
     from_node: str
     to_node: str
+    label: str | None = None
+
 
 
 class TemplatePayload(BaseModel):
@@ -116,8 +107,10 @@ class TemplatePayloadResolver:
             metadata={
                 "visual_strategy": scene.visual_strategy.value,
                 "importance": scene.importance,
+                **(direction.metadata if direction else {}),
             }
         )
+
 
     def _is_meaningful(self, val: Any) -> bool:
         if val is None:
@@ -149,15 +142,38 @@ class TemplatePayloadResolver:
         os_text = meaningful_str(scene.on_screen_text)
         brief = meaningful_str(scene.visual_brief) or ""
 
-        viewer_title = None if is_internal_structural_label(sec_id) else sec_id
+        dir_metadata = direction.metadata if direction else {}
+        beat_idx = dir_metadata.get("beat_index")
+        semantic_role = dir_metadata.get("semantic_role")
+        is_sec_entry_meta = dir_metadata.get("is_section_entry")
+
+        sanitized_chapter = sanitize_chapter_title(sec_id)
+
+        # Chapter display policy:
+        # Full chapter title is ONLY shown at section entry (beat 0 of section, or HOOK_TITLE/CHAPTER_TRANSITION).
+        # On subsequent beats (beat_index > 0 or is_section_entry == False), do NOT re-render the chapter title.
+        if is_sec_entry_meta is not None:
+            is_section_entry = bool(is_sec_entry_meta)
+        elif beat_idx is not None:
+            is_section_entry = (beat_idx == 0 and scene.sequence_index == 1) or (
+                semantic_role in (BeatSemanticRole.HOOK_TITLE.value, "CHAPTER_TRANSITION")
+            )
+        else:
+            # Standalone legacy scene (no beat execution): preserve sanitized chapter title
+            is_section_entry = True
+
+        viewer_title = sanitized_chapter if is_section_entry else None
+        safe_os_text = sanitize_viewer_text(os_text)
 
         if template_id == VisualTemplateId.HERO_TITLE:
             if viewer_title:
                 inputs[TemplateInputKey.TITLE] = viewer_title
-            elif sec_id and not is_internal_structural_label(sec_id):
+            elif sanitized_chapter:
+                inputs[TemplateInputKey.TITLE] = sanitized_chapter
+            elif sec_id:
                 inputs[TemplateInputKey.TITLE] = sec_id
-            if os_text and os_text.strip().lower() != narration.strip().lower():
-                inputs[TemplateInputKey.SUBTITLE] = os_text
+            if safe_os_text and safe_os_text.strip().lower() != narration.strip().lower():
+                inputs[TemplateInputKey.SUBTITLE] = safe_os_text
 
         elif template_id == VisualTemplateId.FLOW_DIAGRAM:
             if viewer_title:
@@ -166,18 +182,21 @@ class TemplatePayloadResolver:
             content = narration or os_text or brief
 
             # G2C2B0 gate: mechanism shared-authority extraction is strictly gated to G2 beats
-            dir_metadata = direction.metadata if direction else {}
             is_g2_mechanism_beat = (
-                isinstance(dir_metadata.get("beat_index"), int)
-                and dir_metadata.get("beat_index") >= 0
-                and dir_metadata.get("semantic_role") == BeatSemanticRole.MECHANISM.value
+                isinstance(beat_idx, int)
+                and beat_idx >= 0
+                and semantic_role == BeatSemanticRole.MECHANISM.value
             )
 
             mech_spec = resolve_mechanism_diagram_spec(content) if is_g2_mechanism_beat else None
             if mech_spec is not None and len(mech_spec.nodes) >= 2:
                 inputs[TemplateInputKey.NODES] = list(mech_spec.nodes)
                 inputs[TemplateInputKey.EDGES] = [
-                    TemplateEdge(from_node=e.from_node, to_node=e.to_node)
+                    TemplateEdge(
+                        from_node=e.from_node,
+                        to_node=e.to_node,
+                        label=e.label,
+                    )
                     for e in mech_spec.edges
                 ]
             else:
@@ -188,15 +207,23 @@ class TemplatePayloadResolver:
                 else:
                     raise TemplatePayloadError("Could not extract at least two trustworthy diagram nodes.")
 
+
         elif template_id == VisualTemplateId.STATISTIC_HERO:
             if viewer_title:
                 inputs[TemplateInputKey.TITLE] = viewer_title
 
-            content = narration or os_text or brief
-            metric = self._extract_metric(content)
+            metric = None
+            metric_label = None
+            for candidate in (os_text, brief, narration):
+                if candidate:
+                    m = self._extract_metric(candidate)
+                    if m:
+                        metric = m
+                        metric_label = candidate
+                        break
             if metric:
                 inputs[TemplateInputKey.METRIC] = metric
-                inputs[TemplateInputKey.METRIC_LABEL] = content
+                inputs[TemplateInputKey.METRIC_LABEL] = metric_label
             else:
                 raise TemplatePayloadError("Could not extract a trustworthy metric.")
 
@@ -204,8 +231,15 @@ class TemplatePayloadResolver:
             if viewer_title:
                 inputs[TemplateInputKey.TITLE] = viewer_title
 
-            content = narration or os_text or brief
-            code, lang = self._extract_code(content)
+            code = None
+            lang = None
+            for candidate in (brief, os_text, narration):
+                if candidate:
+                    c, l = self._extract_code(candidate)
+                    if c:
+                        code = c
+                        lang = l
+                        break
             if code:
                 inputs[TemplateInputKey.CODE] = code
                 if lang:
@@ -218,15 +252,19 @@ class TemplatePayloadResolver:
                 inputs[TemplateInputKey.TITLE] = viewer_title
             # G1A: BODY must NOT duplicate full spoken narration paragraph.
             # Only use concise on_screen_text if present and distinct from narration.
-            if os_text and os_text.strip().lower() != narration.strip().lower():
-                inputs[TemplateInputKey.BODY] = os_text
+            if safe_os_text and safe_os_text.strip().lower() != narration.strip().lower():
+                inputs[TemplateInputKey.BODY] = safe_os_text
             elif template_id == VisualTemplateId.SCREENSHOT_FOCUS and narration:
-                inputs[TemplateInputKey.BODY] = narration
+                inputs[TemplateInputKey.BODY] = sanitize_viewer_text(narration)
+
+            if dir_metadata and "layout_variant" in dir_metadata:
+                inputs[TemplateInputKey.LAYOUT_VARIANT] = dir_metadata["layout_variant"]
 
         elif template_id == VisualTemplateId.KINETIC_TEXT:
-            inputs[TemplateInputKey.BODY] = os_text or narration
+            inputs[TemplateInputKey.BODY] = safe_os_text or sanitize_viewer_text(narration)
 
         elif template_id in (VisualTemplateId.INFOGRAPHIC, VisualTemplateId.COMPARISON, VisualTemplateId.TIMELINE, VisualTemplateId.LIST, VisualTemplateId.RECAP):
+
             if viewer_title:
                 inputs[TemplateInputKey.TITLE] = viewer_title
             items = self._extract_items(narration)
@@ -287,6 +325,8 @@ class TemplatePayloadResolver:
             edges.append(TemplateEdge(from_node=nodes[i], to_node=nodes[i+1]))
 
         return nodes, edges
+
+
 
     def _extract_metric(self, text: str) -> str | None:
         return extract_trustworthy_metric(text)

@@ -71,10 +71,12 @@ def test_current_render_and_subtitle_semantics_are_cache_compatible():
 @pytest.mark.parametrize(
     ("render_version", "runtime_version", "compatible"),
     [
-        pytest.param(5, 4, True, id="render5-runtime4"),
+        pytest.param(6, 4, True, id="render6-runtime4"),
+        pytest.param(5, 4, False, id="render5-runtime4"),
         pytest.param(4, 4, False, id="render4-runtime4"),
         pytest.param(3, 4, False, id="render3-runtime4"),
         pytest.param(2, 4, False, id="render2-runtime4"),
+        pytest.param(6, 3, False, id="render6-runtime3"),
         pytest.param(5, 3, False, id="render5-runtime3"),
         pytest.param(4, 3, False, id="render4-runtime3"),
         pytest.param(3, 3, False, id="render3-runtime3"),
@@ -93,7 +95,7 @@ def test_render_and_runtime_truth_version_pair_is_exact(
 
 @pytest.mark.parametrize(
     "version",
-    [pytest.param(None, id="missing"), 0, 1, 2, 3, 4, "5", 5.0, True],
+    [pytest.param(None, id="missing"), 0, 1, 2, 3, 4, 5, "6", 6.0, True],
 )
 def test_wrong_or_malformed_render_semantics_version_is_rejected(version):
     manifest = _current_standard_manifest()
@@ -122,7 +124,7 @@ def test_wrong_or_malformed_runtime_truth_version_is_rejected(version):
 def test_physical_render_semantics_identity_is_deterministic():
     base = "identical-canonical-input"
 
-    assert "canonical-render-semantics-v5" in _canonical_render_semantics_identity()
+    assert "canonical-render-semantics-v6" in _canonical_render_semantics_identity()
     assert _fingerprint(base) == _fingerprint(base)
 
 

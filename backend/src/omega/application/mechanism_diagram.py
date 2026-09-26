@@ -18,6 +18,8 @@ class MechanismDiagramEdge(BaseModel):
 
     from_node: str = Field(description="Origin node label")
     to_node: str = Field(description="Destination node label")
+    label: str | None = Field(default=None, description="Action or relation along the edge")
+
 
 
 class MechanismDiagramSpec(BaseModel):
@@ -177,10 +179,59 @@ def _build_spec(from_raw: str, to_raw: str, *, source_text: str) -> MechanismDia
         return None
 
     nodes = (n1, n2)
-    edges = (MechanismDiagramEdge(from_node=n1, to_node=n2),)
+    edges = (MechanismDiagramEdge(from_node=n1, to_node=n2, label=None),)
 
     return MechanismDiagramSpec(
         nodes=nodes,
         edges=edges,
         source_text=source_text,
     )
+
+
+def derive_relation_label(from_node: str, to_node: str, text: str = "") -> str:
+    """Deterministically derive a concise action/relation label between two diagram nodes."""
+    fn = from_node.lower()
+    tn = to_node.lower()
+    tx = text.lower()
+
+    if "request" in fn and "queue" in tn:
+        return "enqueues"
+    if "queue" in fn and "worker" in tn:
+        return "dispatches"
+    if "worker" in fn and ("artifact" in tn or "result" in tn or "output" in tn):
+        return "produces"
+    if "source" in fn and "hash" in tn:
+        return "hashes"
+    if "hash" in fn and "truth" in tn:
+        return "binds"
+    if "truth" in fn and "state" in tn:
+        return "verifies"
+    if "data" in fn and "transform" in tn:
+        return "transforms"
+    if "event" in fn and "loop" in tn:
+        return "registers"
+    if "loop" in fn and "queue" in tn:
+        return "polls"
+
+    if "causes" in tx:
+        return "causes"
+    if "dispatch" in tx:
+        return "dispatches"
+    if "enqueue" in tx:
+        return "enqueues"
+    if "produce" in tx:
+        return "produces"
+    if "leads to" in tx:
+        return "leads to"
+    if "results in" in tx:
+        return "yields"
+    if "because" in tx:
+        return "triggers"
+    if "then" in tx:
+        return "then"
+    if "verify" in tx or "validat" in tx:
+        return "verifies"
+    if "transform" in tx or "process" in tx:
+        return "processes"
+
+    return "advances"

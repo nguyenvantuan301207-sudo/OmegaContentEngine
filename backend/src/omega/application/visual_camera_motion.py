@@ -188,6 +188,10 @@ def inject_camera_motion_style(html: str, state: CameraMotionState) -> str:
         f"  transform: translate({state.x_offset * 100:.4f}%, {state.y_offset * 100:.4f}%) scale({state.scale:.4f});\n"
         f"  transform-origin: center center;\n"
         f"}}\n"
+        f".stat-content, #code-panel {{\n"
+        f"  transform: translate({state.x_offset * 100:.4f}%, {state.y_offset * 100:.4f}%) scale({state.scale:.4f});\n"
+        f"  transform-origin: center center;\n"
+        f"}}\n"
         f"</style>"
     )
 
