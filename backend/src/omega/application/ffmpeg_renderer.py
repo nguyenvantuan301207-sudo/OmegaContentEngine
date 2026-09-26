@@ -11,6 +11,53 @@ from pathlib import Path
 DEFAULT_RENDER_TIMEOUT_SECONDS = 180
 FINAL_MASTER_SAMPLE_RATE_HZ = 48_000
 
+# Canonical generated-content final concatenation timeout policy bounds
+FINAL_CONCAT_MIN_TIMEOUT_SECONDS = 300
+FINAL_CONCAT_MAX_TIMEOUT_SECONDS = 3600
+FINAL_CONCAT_DURATION_MULTIPLIER = 2.5
+FINAL_CONCAT_PER_CLIP_BUDGET_SECONDS = 2
+
+
+def compute_final_concat_timeout(
+    *,
+    exact_video_frame_count: int | None = None,
+    target_fps: int | None = None,
+    canonical_duration_sec: float | None = None,
+    clip_count: int = 1,
+    min_timeout_seconds: int = FINAL_CONCAT_MIN_TIMEOUT_SECONDS,
+    max_timeout_seconds: int = FINAL_CONCAT_MAX_TIMEOUT_SECONDS,
+) -> int:
+    """Compute a deterministic, bounded timeout for final generated-content normalization/concat.
+
+    Workload duration is derived from exact_video_frame_count and target_fps, or
+    canonical_duration_sec. When both are available, the physical frame workload
+    takes precedence over a shorter canonical duration (effective_duration = max(frame_duration, canonical_duration_sec)).
+    The policy guarantees a bounded budget scaled to the actual re-encode duration and clip count, clamped between min and max bounds.
+    """
+    frame_duration: float | None = None
+    if exact_video_frame_count is not None and target_fps is not None and target_fps > 0:
+        frame_duration = exact_video_frame_count / target_fps
+
+    valid_canonical_duration: float | None = None
+    if canonical_duration_sec is not None and canonical_duration_sec > 0:
+        valid_canonical_duration = float(canonical_duration_sec)
+
+    if frame_duration is not None and valid_canonical_duration is not None:
+        duration = max(frame_duration, valid_canonical_duration)
+    elif frame_duration is not None:
+        duration = frame_duration
+    elif valid_canonical_duration is not None:
+        duration = valid_canonical_duration
+    else:
+        duration = 0.0
+
+    duration_budget = duration * FINAL_CONCAT_DURATION_MULTIPLIER
+    clip_budget = max(0, clip_count) * FINAL_CONCAT_PER_CLIP_BUDGET_SECONDS
+    calculated_timeout = math.ceil(duration_budget + clip_budget)
+
+    bounded_timeout = max(min_timeout_seconds, calculated_timeout)
+    return min(max_timeout_seconds, bounded_timeout)
+
 
 class FFmpegExecutionError(RuntimeError):
     """Raised when FFmpeg subprocess returns a non-zero exit code or fails."""
@@ -118,7 +165,9 @@ class FFmpegRenderer:
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
         except TimeoutError as exc:
-            proc.kill()
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
             raise FFmpegExecutionError(
                 f"FFmpeg scene render timed out after {timeout_seconds}s."
             ) from exc
@@ -221,28 +270,30 @@ class FFmpegRenderer:
                 str(out_p),
             ]
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
         try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
-        except TimeoutError as exc:
-            proc.kill()
-            raise FFmpegExecutionError(
-                f"FFmpeg concatenation timed out after {timeout_seconds}s."
-            ) from exc
-
-        # Clean up concat manifest file
-        with contextlib.suppress(OSError):
-            manifest_path.unlink(missing_ok=True)
-
-        if proc.returncode != 0:
-            err_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
-            raise FFmpegExecutionError(
-                f"FFmpeg concatenation failed (code {proc.returncode}): {err_msg}"
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            except TimeoutError as exc:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                await proc.wait()
+                raise FFmpegExecutionError(
+                    f"FFmpeg concatenation timed out after {timeout_seconds}s."
+                ) from exc
+
+            if proc.returncode != 0:
+                err_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
+                raise FFmpegExecutionError(
+                    f"FFmpeg concatenation failed (code {proc.returncode}): {err_msg}"
+                )
+        finally:
+            with contextlib.suppress(OSError):
+                manifest_path.unlink(missing_ok=True)
 
     async def concatenate_visual_clips(
         self,
@@ -292,27 +343,30 @@ class FFmpegRenderer:
             str(out_p),
         ]
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
         try:
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
-        except TimeoutError as exc:
-            proc.kill()
-            raise FFmpegExecutionError(
-                f"FFmpeg visual concatenation timed out after {timeout_seconds}s."
-            ) from exc
-
-        with contextlib.suppress(OSError):
-            manifest_path.unlink(missing_ok=True)
-
-        if proc.returncode != 0:
-            err_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
-            raise FFmpegExecutionError(
-                f"FFmpeg visual concatenation failed (code {proc.returncode}): {err_msg}"
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
+            try:
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            except TimeoutError as exc:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                await proc.wait()
+                raise FFmpegExecutionError(
+                    f"FFmpeg visual concatenation timed out after {timeout_seconds}s."
+                ) from exc
+
+            if proc.returncode != 0:
+                err_msg = stderr.decode("utf-8", errors="replace")[-500:] if stderr else "Unknown error"
+                raise FFmpegExecutionError(
+                    f"FFmpeg visual concatenation failed (code {proc.returncode}): {err_msg}"
+                )
+        finally:
+            with contextlib.suppress(OSError):
+                manifest_path.unlink(missing_ok=True)
 
     async def overlay_logo(
         self,
@@ -416,7 +470,9 @@ class FFmpegRenderer:
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
         except TimeoutError as exc:
-            proc.kill()
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            await proc.wait()
             raise FFmpegExecutionError(
                 f"FFmpeg mux timed out after {timeout_seconds}s."
             ) from exc

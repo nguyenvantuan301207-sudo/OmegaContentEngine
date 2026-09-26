@@ -160,3 +160,30 @@ def test_noncanonical_or_unsafe_reference_is_rejected(reference: str) -> None:
             content_hash="a" * 64,
             mime_type="image/png",
         )
+
+
+def test_brand_asset_duration_seconds_propagation(tmp_path: Path) -> None:
+    """Verify BrandAssetReference.duration_seconds propagates to ResolvedBrandAsset."""
+    channel_id = uuid4()
+    storage = LocalMediaStorageProvider(str(tmp_path))
+    _store(storage, channel_id, "intro.mp4", MP4)
+    resolver = BrandAssetResolver(storage)
+
+    # 1. Explicit duration propagates exactly
+    ref_with_duration = BrandAssetReference(
+        reference="brand://channel/intro.mp4",
+        content_hash=hashlib.sha256(MP4).hexdigest(),
+        mime_type="video/mp4",
+        duration_seconds=2.5,
+    )
+    resolved = resolver.resolve(channel_id, ref_with_duration, BrandMediaKind.VIDEO)
+    assert resolved.duration_seconds == 2.5
+
+    # 2. Missing duration remains None
+    ref_without_duration = BrandAssetReference(
+        reference="brand://channel/intro.mp4",
+        content_hash=hashlib.sha256(MP4).hexdigest(),
+        mime_type="video/mp4",
+    )
+    resolved_none = resolver.resolve(channel_id, ref_without_duration, BrandMediaKind.VIDEO)
+    assert resolved_none.duration_seconds is None

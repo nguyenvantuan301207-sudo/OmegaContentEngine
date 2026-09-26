@@ -36,6 +36,7 @@ from omega.application.canonical_beat_preparation import CanonicalBeatPreparatio
 from omega.application.ffmpeg_renderer import (
     FINAL_MASTER_SAMPLE_RATE_HZ,
     FFmpegRenderer,
+    compute_final_concat_timeout,
 )
 from omega.application.media_storage import LocalMediaStorageProvider
 from omega.application.narration_provider import NarrationProvider
@@ -2259,6 +2260,12 @@ class VisualProductionV2Service:
                     branded_content_paths.append(branded_path)
 
             generated_content_mp4 = work_dir / "generated_content.mp4"
+            final_concat_timeout = compute_final_concat_timeout(
+                exact_video_frame_count=global_canonical_frame_budget,
+                target_fps=fps,
+                canonical_duration_sec=narration_total_duration_ms / 1000.0 if narration_total_duration_ms else None,
+                clip_count=len(branded_content_paths),
+            )
             try:
                 await self._ffmpeg_renderer.concatenate_clips(
                     clip_paths=branded_content_paths,
@@ -2266,6 +2273,7 @@ class VisualProductionV2Service:
                     srt_path=None,
                     target_fps=fps,
                     exact_video_frame_count=global_canonical_frame_budget,
+                    timeout_seconds=final_concat_timeout,
                 )
             except Exception as e:
                 raise VerticalSliceError(f"Generated content concatenation failed: {self._sanitize_error(e)}") from e
@@ -2438,12 +2446,55 @@ class VisualProductionV2Service:
                     enabled_outro,
                 )
                 final_branded_mp4 = work_dir / "final_branded.mp4"
+                working_content_duration = (
+                    global_canonical_frame_budget / fps
+                    if global_canonical_frame_budget and fps > 0
+                    else (narration_total_duration_ms / 1000.0 if narration_total_duration_ms else total_duration)
+                )
+                if narration_total_duration_ms and fps > 0 and global_canonical_frame_budget:
+                    working_content_duration = max(
+                        global_canonical_frame_budget / fps,
+                        narration_total_duration_ms / 1000.0,
+                    )
+
+                intro_duration = 0.0
+                intro_frames = 0
+                if enabled_intro is not None:
+                    if getattr(enabled_intro, "duration_seconds", None) is not None:
+                        intro_duration = float(enabled_intro.duration_seconds)
+                    elif resolved_brand.intro_asset and resolved_brand.intro_asset.duration_seconds is not None:
+                        intro_duration = float(resolved_brand.intro_asset.duration_seconds)
+                    if intro_duration > 0 and fps > 0:
+                        intro_frames = int(round(intro_duration * fps))
+
+                outro_duration = 0.0
+                outro_frames = 0
+                if enabled_outro is not None:
+                    if getattr(enabled_outro, "duration_seconds", None) is not None:
+                        outro_duration = float(enabled_outro.duration_seconds)
+                    elif resolved_brand.outro_asset and resolved_brand.outro_asset.duration_seconds is not None:
+                        outro_duration = float(resolved_brand.outro_asset.duration_seconds)
+                    if outro_duration > 0 and fps > 0:
+                        outro_frames = int(round(outro_duration * fps))
+
+                brand_total_duration = working_content_duration + intro_duration + outro_duration
+                brand_total_frames = (
+                    global_canonical_frame_budget + intro_frames + outro_frames
+                ) if global_canonical_frame_budget else None
+
+                brand_concat_timeout = compute_final_concat_timeout(
+                    exact_video_frame_count=brand_total_frames,
+                    target_fps=fps,
+                    canonical_duration_sec=brand_total_duration if brand_total_duration > 0 else None,
+                    clip_count=len(final_clip_paths),
+                )
                 try:
                     await self._ffmpeg_renderer.concatenate_clips(
                         clip_paths=final_clip_paths,
                         output_path=final_branded_mp4,
                         srt_path=None,
                         target_fps=fps,
+                        timeout_seconds=brand_concat_timeout,
                     )
                 except Exception as e:
                     raise VerticalSliceError(f"Final brand concatenation failed: {self._sanitize_error(e)}") from e
@@ -2960,11 +3011,27 @@ class VisualProductionV2Service:
                     new_scene_results.append(s_info)
 
             final_temp_mp4 = work_dir / "final_temp.mp4"
+            total_delta_duration = sum(float(s.get("duration_seconds", 0.0)) for s in new_scene_results)
+            if total_delta_duration <= 0.0 and manifest.get("duration_seconds"):
+                total_delta_duration = float(manifest["duration_seconds"])
+
+            exact_delta_frames = (
+                int(round(total_delta_duration * fps))
+                if total_delta_duration > 0 and fps > 0
+                else None
+            )
+            delta_concat_timeout = compute_final_concat_timeout(
+                exact_video_frame_count=exact_delta_frames,
+                target_fps=fps,
+                canonical_duration_sec=total_delta_duration if total_delta_duration > 0 else None,
+                clip_count=len(ordered_scene_paths),
+            )
             await self._ffmpeg_renderer.concatenate_clips(
                 clip_paths=ordered_scene_paths,
                 output_path=final_temp_mp4,
                 srt_path=None,
                 target_fps=fps,
+                timeout_seconds=delta_concat_timeout,
             )
 
             if not final_temp_mp4.is_file() or final_temp_mp4.stat().st_size <= 0:

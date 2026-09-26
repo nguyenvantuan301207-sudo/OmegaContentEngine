@@ -1970,3 +1970,290 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
             session, m_exec.id, req.id, base_fingerprint, scene_index=2,
         )
 
+
+
+@pytest.mark.asyncio
+async def test_canonical_production_passes_computed_timeout_to_final_concat(tmp_path: Path, lineage_data):
+    """Verify that canonical production passes operation-specific bounded timeout to concatenate_clips."""
+    from omega.application.ffmpeg_renderer import compute_final_concat_timeout, FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+    from omega.application.visual_direction import VisualTemplateId
+
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+    session = make_mock_session(m_exec=m_exec, req=req)
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch,
+        output_root=tmp_path / "renders",
+    )
+
+    def fake_storyboard(_sdict):
+        return StoryboardPlan(
+            title="Custom Test Storyboard",
+            estimated_duration_seconds=5.0,
+            scenes=[
+                StoryboardScene(
+                    sequence_index=1,
+                    section_id="Sec1",
+                    purpose="Hook",
+                    source_statement_references=[1],
+                    narration_excerpt="Title scene hook",
+                    estimated_duration_seconds=5.0,
+                    visual_strategy=VisualStrategy.TITLE_MOTION,
+                    visual_brief="Title",
+                )
+            ],
+        )
+    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+    svc._video_renderer = MagicMock()
+
+    async def fake_render(*args, **kwargs):
+        out = kwargs.get("output_path")
+        if not out and len(args) > 3:
+            out = args[3]
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(VALID_MP4_HEADER + b"render_content")
+        return VisualV2VideoRenderResult(
+            output_path=out, scene_index=1, template_id=VisualTemplateId.HERO_TITLE,
+            width=1920, height=1080, fps=12,
+            duration_seconds=5.0, frame_count=60,
+            video_sha256="3bc895d0ff078b2ca7f795644e6b79eda6e2ea5e1ed390d802a731038a03d8f6", source_html_sha256="b"*64, motion_profile="p"
+        )
+    svc._video_renderer.render_clip = AsyncMock(side_effect=fake_render)
+    mock_ffmpeg = MagicMock()
+
+    async def fake_concat(*args, **kwargs):
+        out = kwargs.get("output_path") or args[1]
+        Path(out).write_bytes(VALID_MP4_HEADER + b"render_content")
+
+    mock_ffmpeg.concatenate_clips = AsyncMock(side_effect=fake_concat)
+    mock_ffmpeg.normalize_master_audio = AsyncMock(side_effect=fake_concat)
+    mock_ffmpeg.mux_video_audio = AsyncMock()
+    svc._ffmpeg_renderer = mock_ffmpeg
+
+    mock_browser_ctx = MagicMock()
+    mock_browser_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+    mock_browser_ctx.__aexit__ = AsyncMock(return_value=None)
+    svc._browser_runtime_factory = lambda: mock_browser_ctx
+
+    res = await svc.render_mission_execution(session, m_exec.id, req.id)
+    assert res.output_path.is_file()
+
+    mock_ffmpeg.concatenate_clips.assert_called_once()
+    concat_kwargs = mock_ffmpeg.concatenate_clips.call_args[1]
+    assert "timeout_seconds" in concat_kwargs
+    assert concat_kwargs["timeout_seconds"] >= FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+
+@pytest.mark.asyncio
+async def test_regenerate_scene_delta_concat_timeout_duration_aware(tmp_path: Path, lineage_data):
+    """Verify revision delta concat receives duration-scaled timeout rather than collapsing to minimum."""
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+    session = make_mock_session(m_exec=m_exec, req=req)
+    script = lineage_data["script"]
+
+    async def fake_get(model, obj_id):
+        if model is ScriptVersion and obj_id == script.id:
+            return script
+        return None
+
+    session.get = AsyncMock(side_effect=fake_get)
+
+    mock_browser_ctx = MagicMock()
+    mock_browser_ctx.__aenter__ = AsyncMock(return_value=MagicMock())
+    mock_browser_ctx.__aexit__ = AsyncMock(return_value=None)
+
+    mock_video_renderer = MagicMock()
+    async def fake_render_clip(document, motion_profile, duration_seconds, output_path, browser_runtime, fps, broll_asset=None, frame_count_override=None, **kwargs):
+        content = f"render_content_seq_{document.scene_index}".encode()
+        output_path.write_bytes(VALID_MP4_HEADER + content)
+        sha = hashlib.sha256(VALID_MP4_HEADER + content).hexdigest()
+        return VisualV2VideoRenderResult(
+            output_path=output_path, scene_index=document.scene_index, template_id=document.template_id,
+            width=1920, height=1080, fps=fps, duration_seconds=duration_seconds, frame_count=int(duration_seconds * fps),
+            video_sha256=sha, source_html_sha256="b"*64, motion_profile=motion_profile,
+        )
+    mock_video_renderer.render_clip = AsyncMock(side_effect=fake_render_clip)
+
+    mock_ffmpeg_renderer = MagicMock()
+    last_concat_kwargs = {}
+    async def fake_concat(clip_paths, output_path, srt_path=None, target_fps=None, exact_video_frame_count=None, **kwargs):
+        nonlocal last_concat_kwargs
+        last_concat_kwargs = dict(kwargs)
+        Path(output_path).write_bytes(VALID_MP4_HEADER + b"concat_" + str(len(clip_paths)).encode("utf-8"))
+    mock_ffmpeg_renderer.concatenate_clips = AsyncMock(side_effect=fake_concat)
+
+    total_scenes = 10
+    scene_dur = 50.0
+    scenes = [
+        StoryboardScene(
+            sequence_index=i, section_id=f"Sec{i}", purpose="Body", source_statement_references=[i],
+            narration_excerpt=f"Scene {i}", estimated_duration_seconds=scene_dur,
+            visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief=f"Scene {i}"
+        )
+        for i in range(1, total_scenes + 1)
+    ]
+
+    def fake_storyboard(_sdict):
+        return StoryboardPlan(
+            title="Long Revision Storyboard", estimated_duration_seconds=total_scenes * scene_dur,
+            scenes=scenes,
+        )
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch, output_root=tmp_path, browser_runtime_factory=lambda: mock_browser_ctx,
+        video_renderer=mock_video_renderer, ffmpeg_renderer=mock_ffmpeg_renderer,
+    )
+    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+
+    res_base = await svc.render_mission_execution(session, m_exec.id, req.id)
+    base_fingerprint = res_base.run_fingerprint
+
+    base_manifest_path = tmp_path / str(m_exec.id) / base_fingerprint / "manifest.json"
+    with open(base_manifest_path) as f:
+        base_manifest = json.load(f)
+
+    base_manifest["canonical_render_semantics_version"] = 2
+    with open(base_manifest_path, "w", encoding="utf-8") as f:
+        json.dump(base_manifest, f, indent=2)
+
+    last_concat_kwargs.clear()
+    await svc.regenerate_scene(
+        session, m_exec.id, req.id, base_fingerprint, scene_index=2,
+        visual_strategy_override=VisualStrategy.TITLE_MOTION,
+    )
+
+    assert "timeout_seconds" in last_concat_kwargs
+    timeout = last_concat_kwargs["timeout_seconds"]
+    # Total delta duration = 500s across 10 scenes.
+    # Calculated: ceil(500 * 2.5 + 10 * 2) = 1270s.
+    # Proves revision delta does NOT collapse to the 300s minimum.
+    from omega.application.ffmpeg_renderer import FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+    assert timeout == 1270
+    assert timeout > FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+
+@pytest.mark.asyncio
+async def test_brand_concat_timeout_includes_intro_and_outro(tmp_path: Path, lineage_data):
+    """Verify final brand concat computes timeout using intro + working content + outro full duration."""
+    orch = make_mock_orchestrator(tmp_path)
+    m_exec = lineage_data["mission_execution"]
+    req = lineage_data["content_request"]
+
+    intro_path = tmp_path / "intro.mp4"
+    intro_path.write_bytes(VALID_MP4_HEADER + b"intro")
+    outro_path = tmp_path / "outro.mp4"
+    outro_path.write_bytes(VALID_MP4_HEADER + b"outro")
+
+    m_exec.channel_dna_revision.snapshot = {
+        "brand_package": {
+            "intro_asset": {
+                "reference": "brand://channel/intro.mp4",
+                "content_hash": hashlib.sha256(VALID_MP4_HEADER + b"intro").hexdigest(),
+                "mime_type": "video/mp4",
+                "duration_seconds": 2.5,
+            },
+            "outro_asset": {
+                "reference": "brand://channel/outro.mp4",
+                "content_hash": hashlib.sha256(VALID_MP4_HEADER + b"outro").hexdigest(),
+                "mime_type": "video/mp4",
+                "duration_seconds": 6.0,
+            },
+            "long_form": {
+                "micro_intro_enabled": True,
+                "branded_outro_enabled": True,
+            },
+        }
+    }
+
+    brand_resolver = MagicMock()
+    brand_resolver.resolve_optional.side_effect = [
+        None,
+        ResolvedBrandAsset(
+            local_path=intro_path,
+            content_hash=hashlib.sha256(VALID_MP4_HEADER + b"intro").hexdigest(),
+            media_kind=BrandMediaKind.VIDEO,
+            mime_type="video/mp4",
+            reference="brand://channel/intro.mp4",
+            duration_seconds=2.5,
+        ),
+        ResolvedBrandAsset(
+            local_path=outro_path,
+            content_hash=hashlib.sha256(VALID_MP4_HEADER + b"outro").hexdigest(),
+            media_kind=BrandMediaKind.VIDEO,
+            mime_type="video/mp4",
+            reference="brand://channel/outro.mp4",
+            duration_seconds=6.0,
+        ),
+    ]
+    session = make_mock_session(m_exec=m_exec, req=req)
+
+    mock_narration_provider = AsyncMock()
+    mock_narration_provider.__class__.__name__ = "MockProvider"
+    mock_narration_provider.model = "mock-model"
+    mock_narration_provider.default_voice = "mock-voice"
+    mock_narration_provider.synthesize_segment_audio.return_value = {
+        "storage_uri": "channels/test/1.wav", "duration_ms": 200000, "content_hash": "hash1"
+    }
+
+    mock_storage = MagicMock()
+    audio_path = tmp_path / "mock.wav"
+    audio_path.write_bytes(VALID_MP4_HEADER + b"wav")
+    mock_storage.resolve_stored_uri.return_value = audio_path
+
+    mock_video_renderer = AsyncMock()
+    async def fake_render(*args, **kwargs):
+        out = kwargs.get("output_path") or args[3]
+        Path(out).write_bytes(VALID_MP4_HEADER + b"render_content")
+        return VisualV2VideoRenderResult(
+            output_path=out, scene_index=1, template_id="HERO_TITLE",
+            width=1920, height=1080, fps=12, duration_seconds=200.0, frame_count=2400,
+            video_sha256=hashlib.sha256(VALID_MP4_HEADER + b"render_content").hexdigest(), source_html_sha256="h", motion_profile="none"
+        )
+    mock_video_renderer.render_clip.side_effect = fake_render
+
+    brand_concat_kwargs = {}
+    mock_ffmpeg = AsyncMock()
+    async def fake_concat(*args, **kwargs):
+        nonlocal brand_concat_kwargs
+        output_path = Path(kwargs["output_path"])
+        if output_path.name == "final_branded.mp4":
+            brand_concat_kwargs = dict(kwargs)
+        output_path.write_bytes(VALID_MP4_HEADER + b"concat")
+    mock_ffmpeg.concatenate_clips.side_effect = fake_concat
+
+    async def fake_mux(*args, **kwargs):
+        out = kwargs.get("output_path") or (args[2] if len(args) > 2 else None)
+        if out:
+            Path(out).write_bytes(VALID_MP4_HEADER + b"mux")
+    mock_ffmpeg.mux_video_audio.side_effect = fake_mux
+
+    svc = VisualProductionV2Service(
+        asset_orchestrator=orch, output_root=tmp_path / "renders",
+        browser_runtime_factory=MagicMock(), video_renderer=mock_video_renderer,
+        ffmpeg_renderer=mock_ffmpeg, narration_provider=mock_narration_provider,
+        narration_storage=mock_storage, brand_asset_resolver=brand_resolver,
+    )
+
+    def fake_storyboard(_):
+        return StoryboardPlan(
+            title="BrandTimeout", estimated_duration_seconds=200.0,
+            scenes=[StoryboardScene(
+                sequence_index=1, section_id="1", purpose="1", source_statement_references=[],
+                narration_excerpt="Hi", estimated_duration_seconds=200.0,
+                visual_strategy=VisualStrategy.TITLE_MOTION, visual_brief="1"
+            )]
+        )
+    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
+
+    await svc.render_mission_execution(session, m_exec.id, req.id, subtitle_enabled=False)
+
+    assert "timeout_seconds" in brand_concat_kwargs
+    # Working content: 200s (2400 frames at 12fps)
+    # Intro: 2.5s (30 frames at 12fps)
+    # Outro: 6.0s (72 frames at 12fps)
+    # Total duration = 208.5s; 3 clips
+    # Timeout = ceil(208.5 * 2.5 + 3 * 2) = ceil(521.25 + 6) = 528s
+    # Without intro/outro duration: ceil(200.0 * 2.5 + 3 * 2) = 506s
+    assert brand_concat_kwargs["timeout_seconds"] == 528

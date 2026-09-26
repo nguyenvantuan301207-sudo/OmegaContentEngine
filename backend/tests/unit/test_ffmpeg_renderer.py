@@ -1,12 +1,17 @@
 """Unit tests for FFmpeg filter safety and string escaping."""
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from omega.application.ffmpeg_renderer import (
+    DEFAULT_RENDER_TIMEOUT_SECONDS,
+    FINAL_CONCAT_MAX_TIMEOUT_SECONDS,
+    FINAL_CONCAT_MIN_TIMEOUT_SECONDS,
     FFmpegExecutionError,
     FFmpegRenderer,
+    compute_final_concat_timeout,
     escape_ffmpeg_filter_string,
 )
 
@@ -882,3 +887,246 @@ async def test_concatenate_clips_rejects_invalid_target_fps(tmp_path, invalid_fp
             output_path=out_p,
             target_fps=invalid_fps,
         )
+
+
+def test_compute_final_concat_timeout_policy():
+    """Verify deterministic, bounded timeout policy for final generated-content normalization."""
+    # 1. Short duration is bounded by minimum timeout
+    assert compute_final_concat_timeout(canonical_duration_sec=10.0, clip_count=1) == FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+    assert compute_final_concat_timeout(exact_video_frame_count=300, target_fps=30, clip_count=1) == FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+
+    # 2. G2A scale (922.2s, 53 clips) computes operation-appropriate budget
+    # 922.2 * 2.5 = 2305.5; 53 * 2 = 106; total = 2411.5 -> ceil = 2412
+    expected_g2a = 2412
+    assert compute_final_concat_timeout(canonical_duration_sec=922.2, clip_count=53) == expected_g2a
+    assert compute_final_concat_timeout(exact_video_frame_count=27666, target_fps=30, clip_count=53) == expected_g2a
+    assert compute_final_concat_timeout(exact_video_frame_count=27666, target_fps=30, canonical_duration_sec=922.2, clip_count=53) == expected_g2a
+
+    # 3. Very large workload is clamped to hard maximum bound
+    assert compute_final_concat_timeout(canonical_duration_sec=5000.0, clip_count=200) == FINAL_CONCAT_MAX_TIMEOUT_SECONDS
+
+    # 4. Zero/negative inputs fallback to minimum bound safely
+    assert compute_final_concat_timeout(canonical_duration_sec=0, clip_count=0) == FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+
+
+def test_compute_final_concat_timeout_authority_precedence():
+    """Verify duration authority precedence: effective_duration = max(frame_duration, canonical_duration_sec)."""
+    # 1. frame duration only
+    # 6000 frames at 30fps = 200s; 200 * 2.5 + 10 * 2 = 520s
+    assert compute_final_concat_timeout(exact_video_frame_count=6000, target_fps=30, clip_count=10) == 520
+
+    # 2. canonical duration only
+    # 200s canonical; 200 * 2.5 + 10 * 2 = 520s
+    assert compute_final_concat_timeout(canonical_duration_sec=200.0, clip_count=10) == 520
+
+    # 3. both equal
+    # frame_duration = 6000 / 30 = 200s; canonical = 200s -> duration = 200s -> 520s
+    assert compute_final_concat_timeout(
+        exact_video_frame_count=6000,
+        target_fps=30,
+        canonical_duration_sec=200.0,
+        clip_count=10,
+    ) == 520
+
+    # 4. canonical duration shorter than frame duration
+    # Planned/narration duration cannot undercut physical frame workload:
+    # frame_duration = 6000 / 30 = 200s; canonical = 100s -> effective = max(200, 100) = 200s -> 520s
+    assert compute_final_concat_timeout(
+        exact_video_frame_count=6000,
+        target_fps=30,
+        canonical_duration_sec=100.0,
+        clip_count=10,
+    ) == 520
+
+    # 5. canonical duration longer than frame duration
+    # Longer canonical duration takes precedence if narration/content is longer:
+    # frame_duration = 3000 / 30 = 100s; canonical = 200s -> effective = max(100, 200) = 200s -> 520s
+    assert compute_final_concat_timeout(
+        exact_video_frame_count=3000,
+        target_fps=30,
+        canonical_duration_sec=200.0,
+        clip_count=10,
+    ) == 520
+
+    # 6. hard min and max bounds
+    # Short duration is clamped to hard minimum bound (300s)
+    assert compute_final_concat_timeout(canonical_duration_sec=5.0, clip_count=1) == FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+    assert compute_final_concat_timeout(exact_video_frame_count=150, target_fps=30, clip_count=1) == FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+    assert compute_final_concat_timeout(exact_video_frame_count=150, target_fps=30, canonical_duration_sec=5.0, clip_count=1) == FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+
+    # Huge duration is clamped to hard maximum bound (3600s)
+    assert compute_final_concat_timeout(canonical_duration_sec=10000.0, clip_count=100) == FINAL_CONCAT_MAX_TIMEOUT_SECONDS
+    assert compute_final_concat_timeout(exact_video_frame_count=300000, target_fps=30, clip_count=100) == FINAL_CONCAT_MAX_TIMEOUT_SECONDS
+    assert compute_final_concat_timeout(exact_video_frame_count=300000, target_fps=30, canonical_duration_sec=10000.0, clip_count=100) == FINAL_CONCAT_MAX_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_concatenate_clips_timeout_reaps_process_and_cleans_manifest(tmp_path):
+    """Verify that timeout raises FFmpegExecutionError, reaps the subprocess, and unlinks manifest."""
+    renderer = FFmpegRenderer()
+    in1 = tmp_path / "c1.mp4"
+    in2 = tmp_path / "c2.mp4"
+    out_p = tmp_path / "out.mp4"
+    in1.write_bytes(b"c1")
+    in2.write_bytes(b"c2")
+    manifest_path = tmp_path / f"concat_{out_p.stem}.txt"
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.side_effect = TimeoutError()
+    mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        pytest.raises(FFmpegExecutionError, match="FFmpeg concatenation timed out after 42s."),
+    ):
+        await renderer.concatenate_clips(
+            clip_paths=[in1, in2],
+            output_path=out_p,
+            target_fps=24,
+            timeout_seconds=42,
+        )
+
+    mock_proc.kill.assert_called_once()
+    mock_proc.wait.assert_awaited_once()
+    assert not manifest_path.exists(), "Manifest file must be cleaned up on timeout"
+
+
+@pytest.mark.asyncio
+async def test_concatenate_clips_failure_cleans_manifest(tmp_path):
+    """Verify that execution failure cleans up temporary manifest file."""
+    renderer = FFmpegRenderer()
+    in1 = tmp_path / "c1.mp4"
+    out_p = tmp_path / "out.mp4"
+    in1.write_bytes(b"c1")
+    manifest_path = tmp_path / f"concat_{out_p.stem}.txt"
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"Conversion failed")
+    mock_proc.returncode = 1
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        pytest.raises(FFmpegExecutionError, match="FFmpeg concatenation failed"),
+    ):
+        await renderer.concatenate_clips(
+            clip_paths=[in1],
+            output_path=out_p,
+            target_fps=24,
+        )
+
+    assert not manifest_path.exists(), "Manifest file must be cleaned up on failure"
+
+
+@pytest.mark.asyncio
+async def test_concatenate_clips_legacy_default_timeout(tmp_path):
+    """Verify that legacy callers inherit DEFAULT_RENDER_TIMEOUT_SECONDS."""
+    renderer = FFmpegRenderer()
+    in1 = tmp_path / "c1.mp4"
+    out_p = tmp_path / "out.mp4"
+    in1.write_bytes(b"c1")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.return_value = (b"", b"")
+    mock_proc.returncode = 0
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        patch("asyncio.wait_for", side_effect=asyncio.wait_for) as mock_wait_for,
+    ):
+        await renderer.concatenate_clips(
+            clip_paths=[in1],
+            output_path=out_p,
+            target_fps=24,
+        )
+        assert mock_wait_for.call_args[1]["timeout"] == DEFAULT_RENDER_TIMEOUT_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_concatenate_visual_clips_timeout_reaps_process_and_cleans_manifest(tmp_path):
+    """Verify visual concat reaps process and cleans manifest on timeout."""
+    renderer = FFmpegRenderer()
+    in1 = tmp_path / "c1.mp4"
+    out_p = tmp_path / "out.mp4"
+    in1.write_bytes(b"c1")
+    manifest_path = tmp_path / f"concat_visual_{out_p.stem}.txt"
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.side_effect = TimeoutError()
+    mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        pytest.raises(FFmpegExecutionError, match="FFmpeg visual concatenation timed out after 35s."),
+    ):
+        await renderer.concatenate_visual_clips(
+            clip_paths=[in1],
+            output_path=out_p,
+            target_fps=24,
+            timeout_seconds=35,
+        )
+
+    mock_proc.kill.assert_called_once()
+    mock_proc.wait.assert_awaited_once()
+    assert not manifest_path.exists(), "Visual manifest file must be cleaned up on timeout"
+
+
+@pytest.mark.asyncio
+async def test_render_scene_clip_timeout_reaps_process(tmp_path):
+    """Verify scene render reaps process on timeout."""
+    renderer = FFmpegRenderer()
+    img = tmp_path / "img.png"
+    aud = tmp_path / "aud.wav"
+    out_p = tmp_path / "out.mp4"
+    img.write_bytes(b"img")
+    aud.write_bytes(b"aud")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.side_effect = TimeoutError()
+    mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        pytest.raises(FFmpegExecutionError, match="FFmpeg scene render timed out after 20s."),
+    ):
+        await renderer.render_scene_clip(
+            image_path=img,
+            audio_path=aud,
+            output_path=out_p,
+            timeout_seconds=20,
+        )
+
+    mock_proc.kill.assert_called_once()
+    mock_proc.wait.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mux_video_audio_timeout_reaps_process(tmp_path):
+    """Verify mux_video_audio reaps process on timeout."""
+    renderer = FFmpegRenderer()
+    vid = tmp_path / "vid.mp4"
+    aud = tmp_path / "aud.wav"
+    out_p = tmp_path / "out.mp4"
+    vid.write_bytes(b"vid")
+    aud.write_bytes(b"aud")
+
+    mock_proc = AsyncMock()
+    mock_proc.communicate.side_effect = TimeoutError()
+    mock_proc.kill = MagicMock()
+    mock_proc.wait = AsyncMock()
+
+    with (
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        pytest.raises(FFmpegExecutionError, match="FFmpeg mux timed out after 15s."),
+    ):
+        await renderer.mux_video_audio(
+            video_path=vid,
+            audio_path=aud,
+            output_path=out_p,
+            timeout_seconds=15,
+        )
+
+    mock_proc.kill.assert_called_once()
+    mock_proc.wait.assert_awaited_once()

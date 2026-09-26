@@ -32,6 +32,7 @@ class ResolvedBrandAsset(BaseModel):
     media_kind: BrandMediaKind
     mime_type: str
     reference: str
+    duration_seconds: float | None = None
 
 
 class BrandAssetResolver:
@@ -83,6 +84,7 @@ class BrandAssetResolver:
             media_kind=expected_kind,
             mime_type=asset.mime_type,
             reference=asset.reference,
+            duration_seconds=asset.duration_seconds,
         )
 
     @staticmethod
