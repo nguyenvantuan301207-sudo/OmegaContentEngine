@@ -2171,7 +2171,14 @@ def autonomy_approval_expiry_sweep_task() -> dict[str, Any]:
 
 @celery_app.task(name="omega.production.reconcile_orphans_sweep")
 def production_orphan_reconciliation_sweep_task() -> dict[str, Any]:
-    """Periodic sweep reconciling orphaned RUNNING production requests."""
+    """Periodic sweep reconciling orphaned RUNNING production requests and expired leases (rollout gated)."""
+    from omega.config import get_settings
+
+    settings = get_settings()
+    if not getattr(settings, "production_lease_sweep_enabled", False):
+        logger.debug("Production lease sweep disabled by configuration")
+        return {"status": "disabled", "scanned": 0, "expired": 0}
+
     import asyncio
 
     from omega.application.production_lifecycle_service import ProductionLifecycleService
@@ -2179,11 +2186,18 @@ def production_orphan_reconciliation_sweep_task() -> dict[str, Any]:
 
     async def _run() -> dict[str, Any]:
         async with AsyncWorkerSessionLocal() as session:
-            return await ProductionLifecycleService.reconcile_orphaned_requests(session, limit=50)
+            lease_res = await ProductionLifecycleService.reconcile_expired_leases(session, limit=50)
+            req_res = await ProductionLifecycleService.reconcile_orphaned_requests(session, limit=50)
+            return {
+                "status": "success",
+                "scanned": lease_res.get("scanned", 0) + req_res.get("scanned", 0),
+                "expired": lease_res.get("expired", 0),
+                "request_reconciled": req_res,
+            }
 
     try:
         res = asyncio.run(_run())
-        return {"status": "success", **res}
+        return res
     except Exception as exc:
         logger.error("Production orphan reconciliation sweep failed", error=str(exc), exc_info=True)
-        return {"status": "error", "scanned": 0}
+        return {"status": "error", "scanned": 0, "expired": 0}

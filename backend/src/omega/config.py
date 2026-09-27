@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # ── Worker health ──
     worker_health_timeout: float = 3.0
 
+    # ── Production Worker Lease & Sweep (P19-LR2) ──
+    production_lease_sweep_enabled: bool = False
+
     # ── OMEGA-011 Publisher & Vault ──
     omega_secret_encryption_key: str | None = None
     google_client_id: str | None = None

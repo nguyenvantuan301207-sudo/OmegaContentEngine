@@ -2232,6 +2232,12 @@ class ProductionRenderJob(Base):
             "idempotency_key",
             name="uq_production_render_job_idempotency",
         ),
+        Index(
+            "idx_production_render_jobs_lease",
+            "state",
+            "lease_expires_at",
+            postgresql_where=text("state = 'RUNNING' AND lease_expires_at IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -2254,6 +2260,13 @@ class ProductionRenderJob(Base):
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     sanitized_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Worker Lease & Heartbeat Authority (P19-LR2)
+    lease_owner_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    lease_token: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    heartbeat_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

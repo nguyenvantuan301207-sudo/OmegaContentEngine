@@ -113,6 +113,11 @@ celery_app.conf.update(
             "schedule": 600.0,
             "options": {"expires": 1200},
         },
+        "production-orphan-reconciliation-sweep": {
+            "task": "omega.production.reconcile_orphans_sweep",
+            "schedule": 60.0,
+            "options": {"expires": 120},
+        },
     },
 )
 

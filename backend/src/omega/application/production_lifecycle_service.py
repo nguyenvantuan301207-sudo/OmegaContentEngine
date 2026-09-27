@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -51,6 +51,7 @@ from omega.infrastructure.models import (
 logger = logging.getLogger(__name__)
 
 SHA256_HEX_PATTERN = re.compile(r"^[a-fA-F0-9]{64}$")
+SWEEP_GRACE_SECONDS = 10
 
 
 class LifecycleTransitionError(Exception):
@@ -94,6 +95,13 @@ def classify_failure_retryability(
     if code_str == RenderErrorCode.TIMEOUT.value or "timed out" in reason_lower or "timeout" in reason_lower:
         if "ffmpeg" in reason_lower:
             return RetryabilityCategory.FFMPEG_TIMEOUT
+        return RetryabilityCategory.TRANSIENT_INFRASTRUCTURE
+
+    if (
+        code_str == RenderErrorCode.WORKER_LEASE_EXPIRED.value
+        or "lease expired" in reason_lower
+        or "heartbeat" in reason_lower
+    ):
         return RetryabilityCategory.TRANSIENT_INFRASTRUCTURE
 
     if code_str == RenderErrorCode.STORAGE_FAILED.value or "storage" in reason_lower or "disk" in reason_lower:
@@ -424,6 +432,8 @@ class ProductionLifecycleService:
         ).scalars().all()
         for j in active_jobs:
             j.state = RenderJobState.CANCELLED.value
+            j.fencing_token = (j.fencing_token or 0) + 1
+            j.lease_expires_at = now
             j.completed_at = now
             j.sanitized_error = f"Cancelled with ProductionRequest: {reason}"[:1000]
 
@@ -446,6 +456,7 @@ class ProductionLifecycleService:
         - Orphaned RUNNING requests whose authoritative RenderJobs are terminal FAILED/CANCELLED.
         - Orphaned RUNNING requests whose owning Task or MissionExecution is terminal FAILED/CANCELLED.
         - Unpropagated SUCCEEDED states where RenderJob and MediaArtifact are complete.
+        - Hard-crashed RUNNING render jobs whose worker lease expired past TTL + grace.
 
         Guarantees:
         - Valid non-terminal states (e.g. Retry-6 QA WAITING_APPROVAL) are NEVER modified or marked failed.
@@ -482,6 +493,43 @@ class ProductionLifecycleService:
             .scalars()
             .all()
         )
+
+        # Check for expired worker leases on RUNNING jobs (P19-LR2)
+        expired_leased_jobs = []
+        for j in jobs:
+            if (
+                j.state == RenderJobState.RUNNING.value
+                and j.lease_token is not None
+                and j.lease_expires_at is not None
+            ):
+                check_stmt = select(ProductionRenderJob.id).where(
+                    ProductionRenderJob.id == j.id,
+                    ProductionRenderJob.lease_expires_at < func.now() - text(f"interval '{SWEEP_GRACE_SECONDS} seconds'"),
+                )
+                is_expired = (await session.execute(check_stmt)).scalar_one_or_none() is not None
+                if is_expired:
+                    expired_leased_jobs.append(j)
+
+        if expired_leased_jobs:
+            from omega.application.production_render_lease_service import (
+                ProductionRenderLeaseService,
+            )
+
+            for ej in expired_leased_jobs:
+                await ProductionRenderLeaseService.expire_lease(session, request_id, ej.id)
+
+            # Re-fetch jobs to reflect newly converged terminal states
+            jobs = list(
+                (
+                    await session.execute(
+                        select(ProductionRenderJob)
+                        .where(ProductionRenderJob.production_request_id == request_id)
+                        .order_by(ProductionRenderJob.created_at.desc())
+                    )
+                )
+                .scalars()
+                .all()
+            )
 
         has_active_job = any(j.state in cls.ACTIVE_JOB_STATES for j in jobs)
         succeeded_job = next((j for j in jobs if j.state == RenderJobState.SUCCEEDED.value), None)
@@ -654,6 +702,52 @@ class ProductionLifecycleService:
             "converged_succeeded": converged_succeeded,
             "no_action": no_action,
         }
+
+    @classmethod
+    async def reconcile_expired_leases(
+        cls,
+        session: AsyncSession,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        """Scan and expire RUNNING render jobs with expired worker leases.
+
+        Leverages the partial composite index `idx_production_render_jobs_lease`.
+        """
+        stmt = (
+            select(ProductionRenderJob.id, ProductionRenderJob.production_request_id)
+            .where(
+                ProductionRenderJob.state == RenderJobState.RUNNING.value,
+                ProductionRenderJob.lease_token.isnot(None),
+                ProductionRenderJob.lease_expires_at.isnot(None),
+                ProductionRenderJob.lease_expires_at < func.now() - text("interval '10 seconds'"),
+            )
+            .order_by(ProductionRenderJob.lease_expires_at.asc())
+            .limit(limit)
+        )
+        candidates = (await session.execute(stmt)).all()
+
+        scanned = 0
+        expired_count = 0
+        from omega.application.production_render_lease_service import ProductionRenderLeaseService
+
+        for job_id, req_id in candidates:
+            scanned += 1
+            try:
+                success, action = await ProductionRenderLeaseService.expire_lease(
+                    session, req_id, job_id
+                )
+                if success:
+                    expired_count += 1
+                await session.commit()
+            except Exception as exc:
+                await session.rollback()
+                logger.error(
+                    "Error expiring stale lease",
+                    extra={"job_id": str(job_id), "error": str(exc)},
+                    exc_info=True,
+                )
+
+        return {"scanned": scanned, "expired": expired_count}
 
     # ──────────────────────────────────────────────────────────────────────
     # SYNC ADAPTER METHODS (FOR CELERY WORKER EXECUTION)
