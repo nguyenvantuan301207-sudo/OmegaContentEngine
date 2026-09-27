@@ -564,6 +564,7 @@ class ProductionRenderService:
                 .values(
                     status=ProductionRequestStatus.SUCCEEDED.value,
                     outcome=outcome,
+                    completed_at=datetime.now(UTC),
                     metadata_={
                         **dict(req.metadata_ or {}),
                         **(
@@ -1055,6 +1056,20 @@ class ProductionRenderService:
 
             request = await session.get(ProductionRequest, job.production_request_id)
             if request is not None:
+                now = datetime.now(UTC)
+                setattr(request, "status", ProductionRequestStatus.FAILED.value)
+                setattr(request, "outcome", ProductionOutcome.BLOCKED.value)
+                setattr(request, "failed_at", now)
+                raw_meta = getattr(request, "metadata_", None)
+                metadata = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+                metadata["failure_info"] = {
+                    "error_code": error_code.value,
+                    "failure_stage": "RENDER_EXECUTION",
+                    "reason": error_msg[:1000],
+                    "failed_at": now.isoformat(),
+                    "details": {"job_id": str(job_id)},
+                }
+                setattr(request, "metadata_", metadata)
                 await self._enqueue_terminal_evaluation(session, request, job_id)
             await session.commit()
         except Exception:

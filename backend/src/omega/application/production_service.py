@@ -365,6 +365,16 @@ class ProductionService:
             plan = plan_res.scalar_one()
             return existing_job, plan, False
 
+        # Terminal requests are immutable: new render jobs cannot be allocated beneath terminal FAILED or CANCELLED requests
+        if req.status in (
+            ProductionRequestStatus.FAILED.value,
+            ProductionRequestStatus.CANCELLED.value,
+        ):
+            raise ProductionStateError(
+                f"Cannot allocate render job for terminal {req.status} ProductionRequest {req.id}. "
+                "Terminal requests are immutable; explicit retry requires a new ProductionRequest attempt."
+            )
+
         # If rerender, ensure all prior jobs are terminal
         if is_rerender:
             active_jobs_stmt = select(ProductionRenderJob).where(

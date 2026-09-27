@@ -51,7 +51,12 @@ async def _record_render_bootstrap_failure(
     from sqlalchemy import select
 
     from omega.application.durable_dispatch import DurableDispatchService
-    from omega.domain.production import RenderErrorCode, RenderJobState
+    from omega.domain.production import (
+        ProductionOutcome,
+        ProductionRequestStatus,
+        RenderErrorCode,
+        RenderJobState,
+    )
     from omega.infrastructure.models import MissionExecution, ProductionRenderJob, ProductionRequest
 
     try:
@@ -94,6 +99,21 @@ async def _record_render_bootstrap_failure(
     job.error_code = RenderErrorCode.UNKNOWN.value
     job.sanitized_error = sanitized_error[:1000]
     job.completed_at = datetime.now(UTC)
+
+    now = datetime.now(UTC)
+    setattr(request, "status", ProductionRequestStatus.FAILED.value)
+    setattr(request, "outcome", ProductionOutcome.BLOCKED.value)
+    setattr(request, "failed_at", now)
+    raw_meta = getattr(request, "metadata_", None)
+    metadata = dict(raw_meta) if isinstance(raw_meta, dict) else {}
+    metadata["failure_info"] = {
+        "error_code": RenderErrorCode.UNKNOWN.value,
+        "failure_stage": "RENDER_BOOTSTRAP",
+        "reason": sanitized_error[:1000],
+        "failed_at": now.isoformat(),
+        "details": {"job_id": str(parsed_job_id)},
+    }
+    setattr(request, "metadata_", metadata)
 
     execution_id = request.mission_execution_id
     if execution_id is not None:
@@ -220,6 +240,7 @@ def _execute_canonical_production(
             ProductionMode,
             ProductionRequestCreate,
             ProductionRequestStatus,
+            RenderErrorCode,
             RenderJobState,
         )
         from omega.infrastructure.database import AsyncWorkerSessionLocal
@@ -366,6 +387,20 @@ def _execute_canonical_production(
                 output["media_artifact_id"] = str(artifact.id)
                 return output
             if job.state in (RenderJobState.FAILED.value, RenderJobState.CANCELLED.value):
+                from omega.application.production_lifecycle_service import (
+                    ProductionLifecycleService,
+                )
+
+                await ProductionLifecycleService.fail_production_request(
+                    async_session,
+                    persisted.id,
+                    reason=getattr(job, "sanitized_error", None) or f"render job terminal failure: {job.state}",
+                    error_code=getattr(job, "error_code", None) or RenderErrorCode.UNKNOWN.value,
+                    failure_stage="CANONICAL_PRODUCTION_EXECUTION",
+                    details={"job_id": str(job.id)},
+                )
+                if hasattr(async_session, "commit"):
+                    await async_session.commit()
                 raise RuntimeError(f"render job terminal failure: {job.state}")
             raise ValueError(f"unsupported render job state: {job.state}")
 
@@ -1387,6 +1422,29 @@ def execute_task(self, task_id: str) -> dict:
                     task.completed_at = now
                     task.updated_at = now
 
+                    if task.task_type == "production" and isinstance(task.output, dict):
+                        req_id_val = task.output.get("production_request_id")
+                        if req_id_val:
+                            try:
+                                from omega.application.production_lifecycle_service import (
+                                    ProductionLifecycleService,
+                                )
+                                from omega.domain.production import RenderErrorCode
+
+                                ProductionLifecycleService.fail_production_request_sync(
+                                    session,
+                                    uuid.UUID(str(req_id_val)),
+                                    reason=f"Production task permanently failed: {sanitized_err}",
+                                    error_code=RenderErrorCode.UNKNOWN.value,
+                                    failure_stage="TASK_RETRIES_EXHAUSTED",
+                                    lock=False,
+                                )
+                            except Exception:
+                                logger.warning(
+                                    "Failed to propagate task failure to production request",
+                                    exc_info=True,
+                                )
+
                     session.add(
                         DecisionLog(
                             mission_id=task.mission_id,
@@ -2109,3 +2167,23 @@ def autonomy_approval_expiry_sweep_task() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Autonomy approval expiry sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "expired_count": 0}
+
+
+@celery_app.task(name="omega.production.reconcile_orphans_sweep")
+def production_orphan_reconciliation_sweep_task() -> dict[str, Any]:
+    """Periodic sweep reconciling orphaned RUNNING production requests."""
+    import asyncio
+
+    from omega.application.production_lifecycle_service import ProductionLifecycleService
+    from omega.infrastructure.database import AsyncWorkerSessionLocal
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncWorkerSessionLocal() as session:
+            return await ProductionLifecycleService.reconcile_orphaned_requests(session, limit=50)
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Production orphan reconciliation sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "scanned": 0}

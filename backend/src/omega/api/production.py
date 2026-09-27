@@ -899,7 +899,18 @@ async def cancel_production(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"ProductionRequest {request_id} not found.",
         )
-    req.status = ProductionRequestStatus.CANCELLED.value
+    from omega.application.production_lifecycle_service import (
+        ProductionLifecycleService,
+    )
+
+    success, action = await ProductionLifecycleService.cancel_production_request(
+        session, request_id, reason="User cancelled via API", lock=False
+    )
+    if not success and action == "TERMINAL_IMMUTABLE":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot cancel ProductionRequest in terminal state: {req.status}",
+        )
     await session.commit()
     await session.refresh(req)
     return req
