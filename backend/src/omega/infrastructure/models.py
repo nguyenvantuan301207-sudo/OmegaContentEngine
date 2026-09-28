@@ -2238,6 +2238,12 @@ class ProductionRenderJob(Base):
             "lease_expires_at",
             postgresql_where=text("state = 'RUNNING' AND lease_expires_at IS NOT NULL"),
         ),
+        Index(
+            "ix_production_render_jobs_dispatch_stall",
+            "state",
+            "dispatch_started_at",
+            postgresql_where=text("state = 'QUEUED' AND dispatch_started_at IS NOT NULL"),
+        ),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
@@ -2267,6 +2273,14 @@ class ProductionRenderJob(Base):
     fencing_token: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     heartbeat_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lease_expires_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Dispatch Freshness & Queue Stall Authority (P19-LR3)
+    dispatch_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+    dispatch_started_at: Mapped[DateTime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

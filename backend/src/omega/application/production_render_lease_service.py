@@ -76,6 +76,14 @@ class ProductionDuplicateExecutionError(ProductionLeaseError):
     """Raised when an attempt is made to acquire a lease on an active or terminal job."""
 
 
+class ProductionStaleDispatchGenerationError(ProductionLeaseError):
+    """Raised when worker receives a stale dispatch generation."""
+
+
+class ProductionInvalidFutureDispatchGenerationError(ProductionLeaseError):
+    """Raised when worker receives an invalid future dispatch generation."""
+
+
 class ProductionRenderLeaseService:
     """Authoritative service for managing render leases, heartbeats, and fencing."""
 
@@ -86,6 +94,7 @@ class ProductionRenderLeaseService:
         request_id: uuid.UUID,
         job_id: uuid.UUID,
         owner_id: str | None = None,
+        expected_dispatch_generation: int | None = None,
     ) -> RenderLeaseAuthority:
         """Atomically acquire exclusive execution lease on a ProductionRenderJob.
 
@@ -140,6 +149,41 @@ class ProductionRenderLeaseService:
             raise ProductionDuplicateExecutionError(
                 f"Render job {job_id} is in non-acquirable state {job.state}; acquisition rejected"
             )
+
+        # Validate dispatch generation (P19-LR3)
+        is_enrolled = getattr(job, "dispatch_started_at", None) is not None
+        if is_enrolled or expected_dispatch_generation is not None:
+            current_gen = getattr(job, "dispatch_generation", 1) or 1
+            if expected_dispatch_generation is None:
+                raise ProductionStaleDispatchGenerationError(
+                    f"Render job {job_id} requires dispatch_generation but message contained None"
+                )
+            if expected_dispatch_generation < current_gen:
+                logger.warning(
+                    "production_dispatch_stale_generation_rejected",
+                    extra={
+                        "event": "production_dispatch_stale_generation_rejected",
+                        "job_id": str(job_id),
+                        "message_generation": expected_dispatch_generation,
+                        "persisted_generation": current_gen,
+                    },
+                )
+                raise ProductionStaleDispatchGenerationError(
+                    f"Stale dispatch generation {expected_dispatch_generation} < current {current_gen} for job {job_id}"
+                )
+            if expected_dispatch_generation > current_gen:
+                logger.warning(
+                    "production_dispatch_future_generation_rejected",
+                    extra={
+                        "event": "production_dispatch_future_generation_rejected",
+                        "job_id": str(job_id),
+                        "message_generation": expected_dispatch_generation,
+                        "persisted_generation": current_gen,
+                    },
+                )
+                raise ProductionInvalidFutureDispatchGenerationError(
+                    f"Future dispatch generation {expected_dispatch_generation} > current {current_gen} for job {job_id}"
+                )
 
         # Increment fencing token and issue fresh lease
         owner = owner_id or get_worker_instance_id()

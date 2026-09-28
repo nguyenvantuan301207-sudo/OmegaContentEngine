@@ -118,6 +118,11 @@ celery_app.conf.update(
             "schedule": 60.0,
             "options": {"expires": 120},
         },
+        "production-dispatch-stall-sweep": {
+            "task": "omega.production.reconcile_dispatch_stalls",
+            "schedule": 60.0,
+            "options": {"expires": 120},
+        },
     },
 )
 

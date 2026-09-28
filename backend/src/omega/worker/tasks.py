@@ -322,12 +322,25 @@ def _execute_canonical_production(
                     async_session, mission.channel_id, persisted.id
                 )
 
+            from omega.application.production_dispatch_service import (
+                ProductionDispatchService,
+            )
+
             render_key = hashlib.sha256(
                 f"mission-render:{persisted.id}:{task_id}".encode()
             ).hexdigest()
             if persisted.status == ProductionRequestStatus.READY.value:
-                job, _plan, is_new = await service.allocate_render_job(
-                    async_session, mission.channel_id, persisted.id, render_key
+                job, _plan, is_new, _intent = (
+                    await ProductionDispatchService.allocate_and_enqueue_render(
+                        async_session,
+                        mission.channel_id,
+                        persisted.id,
+                        render_key,
+                        prod_service=service,
+                        mission_id=mission.id,
+                        mission_execution_id=execution.id,
+                        mission_task_id=task.id,
+                    )
                 )
             elif persisted.status in (
                 ProductionRequestStatus.RUNNING.value,
@@ -1316,28 +1329,6 @@ def execute_task(self, task_id: str) -> dict:
 
             task.output = dict(result_output)
             task.updated_at = datetime.now(UTC)
-            if result_output.dispatch_required:
-                from omega.application.durable_dispatch import DurableDispatchService
-
-                DurableDispatchService.enqueue(
-                    session,
-                    idempotency_key=(
-                        "render-dispatch:"
-                        f"{result_output.production_request_id}:{result_output.render_job_id}"
-                    ),
-                    task_name="omega.production.render",
-                    args=[
-                        result_output.channel_id,
-                        result_output.production_request_id,
-                        result_output.render_job_id,
-                    ],
-                    purpose="PRODUCTION_RENDER_DISPATCH",
-                    mission_id=task.mission_id,
-                    mission_execution_id=task.execution_id,
-                    mission_task_id=task.id,
-                    production_request_id=uuid.UUID(result_output.production_request_id),
-                    render_job_id=uuid.UUID(result_output.render_job_id),
-                )
             session.commit()
             return {"status": "pending", "task_id": task_id}
 
@@ -1509,6 +1500,7 @@ def execute_production_render_task(
     channel_id: str,
     request_id: str,
     job_id: str,
+    dispatch_generation: int | None = None,
 ) -> dict:
     """Asynchronous background rendering task using ProductionRenderService."""
     import asyncio
@@ -1520,6 +1512,7 @@ def execute_production_render_task(
         channel_id=channel_id,
         request_id=request_id,
         job_id=job_id,
+        dispatch_generation=dispatch_generation,
     )
 
     async def _run():
@@ -1553,12 +1546,68 @@ def execute_production_render_task(
                     "failure_persisted": persisted,
                 }
 
+            from omega.application.production_render_lease_service import (
+                ProductionDuplicateExecutionError,
+                ProductionInvalidFutureDispatchGenerationError,
+                ProductionStaleDispatchGenerationError,
+            )
+
             try:
-                art, qa_status = await service.execute_render_job(session, c_id, r_id, j_id)
+                if dispatch_generation is not None:
+                    art, qa_status = await service.execute_render_job(
+                        session,
+                        c_id,
+                        r_id,
+                        j_id,
+                        expected_dispatch_generation=dispatch_generation,
+                    )
+                else:
+                    art, qa_status = await service.execute_render_job(
+                        session,
+                        c_id,
+                        r_id,
+                        j_id,
+                    )
                 return {
                     "status": "success",
                     "artifact_id": str(art.id) if art else None,
                     "qa_status": str(qa_status.value),
+                }
+            except ProductionStaleDispatchGenerationError as exc:
+                logger.warning(
+                    "Stale dispatch generation rejected",
+                    job_id=job_id,
+                    error=str(exc),
+                    extra={"event": "production_dispatch_stale_generation_rejected"},
+                )
+                return {
+                    "status": "rejected",
+                    "reason": "STALE_DISPATCH_GENERATION",
+                    "message": str(exc),
+                }
+            except ProductionInvalidFutureDispatchGenerationError as exc:
+                logger.warning(
+                    "Future dispatch generation rejected",
+                    job_id=job_id,
+                    error=str(exc),
+                    extra={"event": "production_dispatch_future_generation_rejected"},
+                )
+                return {
+                    "status": "rejected",
+                    "reason": "INVALID_FUTURE_DISPATCH_GENERATION",
+                    "message": str(exc),
+                }
+            except ProductionDuplicateExecutionError as exc:
+                logger.info(
+                    "Duplicate delivery rejected",
+                    job_id=job_id,
+                    error=str(exc),
+                    extra={"event": "production_dispatch_duplicate_delivery_rejected"},
+                )
+                return {
+                    "status": "duplicate",
+                    "reason": "DUPLICATE_DELIVERY_REJECTED",
+                    "message": str(exc),
                 }
             except Exception as exc:
                 logger.error("Background render task failed", job_id=job_id, exc_info=True)
@@ -2201,3 +2250,35 @@ def production_orphan_reconciliation_sweep_task() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Production orphan reconciliation sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "scanned": 0, "expired": 0}
+
+
+@celery_app.task(name="omega.production.reconcile_dispatch_stalls")
+def production_dispatch_stall_reconciliation_task() -> dict[str, Any]:
+    """Periodic sweep reconciling stalled QUEUED render dispatches (rollout gated)."""
+    from omega.config import get_settings
+
+    settings = get_settings()
+    if not getattr(settings, "production_dispatch_recovery_enabled", False):
+        logger.debug("Production dispatch recovery disabled by configuration")
+        return {"status": "disabled", "candidates": 0, "redispatched": 0, "exhausted": 0, "skipped": 0}
+
+    import asyncio
+
+    from omega.application.production_dispatch_service import ProductionDispatchService
+    from omega.infrastructure.database import AsyncWorkerSessionLocal
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncWorkerSessionLocal() as session:
+            return await ProductionDispatchService.reconcile_all_dispatch_stalls(
+                session,
+                timeout_seconds=getattr(settings, "production_dispatch_timeout_seconds", 300),
+                max_generations=getattr(settings, "production_dispatch_max_generations", 3),
+                limit=25,
+            )
+
+    try:
+        res = asyncio.run(_run())
+        return {"status": "success", **res}
+    except Exception as exc:
+        logger.error("Production dispatch stall sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "candidates": 0, "redispatched": 0, "exhausted": 0, "skipped": 0}

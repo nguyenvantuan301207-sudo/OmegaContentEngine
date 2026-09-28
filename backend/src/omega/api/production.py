@@ -63,7 +63,7 @@ from omega.infrastructure.models import (
     RenderPlan,
     SubtitleCue,
 )
-from omega.worker.tasks import execute_production_render_task
+from omega.application.production_dispatch_service import ProductionDispatchService
 
 logger = structlog.get_logger()
 
@@ -367,22 +367,16 @@ async def render_production(
     prod_service: Annotated[ProductionService, Depends(_get_production_service)],
 ) -> ProductionRenderJob:
     try:
-        job, _, is_new = await prod_service.allocate_render_job(
+        job, _, is_new, _ = await ProductionDispatchService.allocate_and_enqueue_render(
             session=session,
             channel_id=channel_id,
             request_id=request_id,
             idempotency_key=payload.idempotency_key,
             is_rerender=False,
+            prod_service=prod_service,
         )
     except (ProductionLineageError, ProductionStateError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    if is_new:
-        execute_production_render_task.delay(
-            str(channel_id),
-            str(request_id),
-            str(job.id),
-        )
 
     return job
 
@@ -401,22 +395,16 @@ async def rerender_production(
     prod_service: Annotated[ProductionService, Depends(_get_production_service)],
 ) -> ProductionRenderJob:
     try:
-        job, _, is_new = await prod_service.allocate_render_job(
+        job, _, is_new, _ = await ProductionDispatchService.allocate_and_enqueue_render(
             session=session,
             channel_id=channel_id,
             request_id=request_id,
             idempotency_key=payload.idempotency_key,
             is_rerender=True,
+            prod_service=prod_service,
         )
     except (ProductionLineageError, ProductionStateError) as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-
-    if is_new:
-        execute_production_render_task.delay(
-            str(channel_id),
-            str(request_id),
-            str(job.id),
-        )
 
     return job
 

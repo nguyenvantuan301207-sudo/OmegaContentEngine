@@ -99,6 +99,26 @@ class AsyncSession:
     async def execute(self, statement):
         return ScalarResult(self.artifact)
 
+    def add(self, entity):
+        pass
+
+    async def commit(self):
+        pass
+
+    async def refresh(self, entity):
+        pass
+
+    async def flush(self):
+        pass
+
+    def begin_nested(self):
+        class _Nested:
+            async def __aenter__(self):
+                return self
+            async def __aexit__(self, *args):
+                return None
+        return _Nested()
+
 
 @pytest.fixture
 def lineage():
@@ -173,7 +193,7 @@ def install(monkeypatch, data, state=RenderJobState.QUEUED.value, is_new=True, a
     prepare = AsyncMock(side_effect=prepare_request)
     job = SimpleNamespace(id=data.job_id, state=state)
 
-    async def allocate_ready_request(*args):
+    async def allocate_ready_request(*args, **kwargs):
         assert data.request.status == ProductionRequestStatus.READY.value
         return job, SimpleNamespace(), is_new
 
@@ -340,17 +360,9 @@ def test_execute_task_commits_ids_before_new_render_dispatch(monkeypatch) -> Non
     assert task.input is original_input
     assert task.output == {"production_request_id": str(request_id), "render_job_id": str(job_id)}
 
-    # Durable dispatch must have been enrolled for the render task
+    # Secondary render dispatch must NOT occur in execute_task (already atomic in canonical allocation)
     render_enqueues = [c for c in enqueue_calls if c["task_name"] == "omega.production.render"]
-    assert len(render_enqueues) == 1, "Expected exactly one render dispatch intent enrolled"
-    render_enqueue = render_enqueues[0]
-    assert render_enqueue["args"] == [str(channel_id), str(request_id), str(job_id)]
-    assert render_enqueue["purpose"] == "PRODUCTION_RENDER_DISPATCH"
-    # task.output must already be set when the durable intent is enrolled
-    assert render_enqueue["output_at_enqueue"] == {
-        "production_request_id": str(request_id),
-        "render_job_id": str(job_id),
-    }
+    assert len(render_enqueues) == 0, "Expected zero secondary render dispatch intents in execute_task"
 
     # Direct broker publication must NOT occur
     direct_dispatch.assert_not_called()

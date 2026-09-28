@@ -333,6 +333,9 @@ class ProductionService:
         request_id: uuid.UUID,
         idempotency_key: str,
         is_rerender: bool = False,
+        commit: bool = True,
+        dispatch_generation: int = 1,
+        dispatch_started_at: datetime | None = None,
     ) -> tuple[ProductionRenderJob, RenderPlan, bool]:
         """Atomically allocate a ProductionRenderJob inside a short row lock.
 
@@ -436,9 +439,14 @@ class ProductionService:
             state=RenderJobState.QUEUED.value,
             attempt=1,
             max_attempts=3,
+            dispatch_generation=dispatch_generation,
+            dispatch_started_at=dispatch_started_at,
         )
         session.add(job)
         req.status = ProductionRequestStatus.RUNNING.value
-        await session.commit()
-        await session.refresh(job)
+        if commit:
+            await session.commit()
+            await session.refresh(job)
+        else:
+            await session.flush()
         return job, render_plan, True

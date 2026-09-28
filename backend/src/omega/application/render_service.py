@@ -26,7 +26,11 @@ from omega.application.production_heartbeat_runner import ProductionHeartbeatRun
 from omega.application.production_qa import ProductionQAEngine
 from omega.application.production_render_lease_service import (
     LEASE_TTL_SECONDS,
+    ProductionDuplicateExecutionError,
+    ProductionInvalidFutureDispatchGenerationError,
     ProductionLeaseFencingError,
+    ProductionRenderLeaseService,
+    ProductionStaleDispatchGenerationError,
     get_worker_instance_id,
 )
 from omega.application.production_runtime_truth import (
@@ -136,6 +140,7 @@ class ProductionRenderService:
         channel_id: uuid.UUID,
         request_id: uuid.UUID,
         job_id: uuid.UUID,
+        expected_dispatch_generation: int | None = None,
     ) -> tuple[MediaArtifact | None, ProductionQAStatus]:
         """Execute the 3-phase render workflow for a render job."""
         # ══════════════════════════════════════════════════════════════════
@@ -217,14 +222,70 @@ class ProductionRenderService:
             await session.rollback()
             return art, ProductionQAStatus.PASSED
         if job.state == RenderJobState.RUNNING.value:
+            logger.info(
+                "production_dispatch_duplicate_delivery_rejected",
+                extra={
+                    "event": "production_dispatch_duplicate_delivery_rejected",
+                    "job_id": str(job_id),
+                    "request_id": str(request_id),
+                    "state": job.state,
+                },
+            )
             await session.rollback()
             return None, ProductionQAStatus.PENDING
         if job.state in (RenderJobState.FAILED.value, RenderJobState.CANCELLED.value):
             await session.rollback()
             return None, ProductionQAStatus.BLOCKED
-        if job.state not in (RenderJobState.QUEUED.value, RenderJobState.RETRY.value):
+        if job.state not in (RenderJobState.QUEUED.value, RenderJobState.RETRY.value, RenderJobState.PENDING.value):
             await session.rollback()
             return None, ProductionQAStatus.PENDING
+
+        # Validate dispatch generation under canonical locks (P19-LR3)
+        is_enrolled = getattr(job, "dispatch_started_at", None) is not None
+        if is_enrolled or expected_dispatch_generation is not None:
+            current_gen = getattr(job, "dispatch_generation", 1) or 1
+            if expected_dispatch_generation is None:
+                await session.rollback()
+                logger.warning(
+                    "production_dispatch_stale_generation_rejected",
+                    extra={
+                        "event": "production_dispatch_stale_generation_rejected",
+                        "job_id": str(job_id),
+                        "message_generation": None,
+                        "persisted_generation": current_gen,
+                    },
+                )
+                raise ProductionStaleDispatchGenerationError(
+                    f"Render job {job_id} requires dispatch_generation but message contained None"
+                )
+            if expected_dispatch_generation < current_gen:
+                await session.rollback()
+                logger.warning(
+                    "production_dispatch_stale_generation_rejected",
+                    extra={
+                        "event": "production_dispatch_stale_generation_rejected",
+                        "job_id": str(job_id),
+                        "message_generation": expected_dispatch_generation,
+                        "persisted_generation": current_gen,
+                    },
+                )
+                raise ProductionStaleDispatchGenerationError(
+                    f"Stale dispatch generation {expected_dispatch_generation} < current {current_gen} for job {job_id}"
+                )
+            if expected_dispatch_generation > current_gen:
+                await session.rollback()
+                logger.warning(
+                    "production_dispatch_future_generation_rejected",
+                    extra={
+                        "event": "production_dispatch_future_generation_rejected",
+                        "job_id": str(job_id),
+                        "message_generation": expected_dispatch_generation,
+                        "persisted_generation": current_gen,
+                    },
+                )
+                raise ProductionInvalidFutureDispatchGenerationError(
+                    f"Future dispatch generation {expected_dispatch_generation} > current {current_gen} for job {job_id}"
+                )
 
         prod_req = job.production_request
         mission_id = await self._resolve_mission_id(session, prod_req)
@@ -312,6 +373,18 @@ class ProductionRenderService:
         job.heartbeat_at = func.now()
         job.lease_expires_at = func.now() + text(f"interval '{LEASE_TTL_SECONDS} seconds'")
         await session.commit()
+
+        logger.info(
+            "production_dispatch_render_lease_acquired",
+            extra={
+                "event": "production_dispatch_render_lease_acquired",
+                "job_id": str(job.id),
+                "request_id": str(request_id),
+                "fencing_token": fencing_token,
+                "owner_id": worker_id,
+                "dispatch_generation": getattr(job, "dispatch_generation", 1),
+            },
+        )
 
         heartbeat_runner = ProductionHeartbeatRunner(
             job_id=job.id,

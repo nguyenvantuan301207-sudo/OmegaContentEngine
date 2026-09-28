@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     # ── Production Worker Lease & Sweep (P19-LR2) ──
     production_lease_sweep_enabled: bool = False
 
+    # ── Production Dispatch Reliability & Queue Stall Recovery (P19-LR3) ──
+    production_dispatch_timeout_seconds: int = 300
+    production_dispatch_max_generations: int = 3
+    production_dispatch_recovery_enabled: bool = False
+
     # ── OMEGA-011 Publisher & Vault ──
     omega_secret_encryption_key: str | None = None
     google_client_id: str | None = None

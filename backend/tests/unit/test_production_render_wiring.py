@@ -227,72 +227,75 @@ async def test_new_render_job_is_allocated_and_published_once(
     channel_id = uuid4()
     request_id = uuid4()
     job = SimpleNamespace(id=uuid4(), state="QUEUED")
-    prod_service = SimpleNamespace(
-        allocate_render_job=AsyncMock(return_value=(job, object(), True))
-    )
-    publish = MagicMock()
-    monkeypatch.setattr(production.execute_production_render_task, "delay", publish)
+    dispatch_mock = AsyncMock(return_value=(job, object(), True, object()))
+    monkeypatch.setattr(production.ProductionDispatchService, "allocate_and_enqueue_render", dispatch_mock)
 
+    session = MagicMock()
+    prod_service = MagicMock()
     result = await endpoint(
         channel_id=channel_id,
         request_id=request_id,
         payload=SimpleNamespace(idempotency_key="render-key"),
-        session=MagicMock(),
+        session=session,
         prod_service=prod_service,
     )
 
     assert result is job
     assert result.state == "QUEUED"
-    prod_service.allocate_render_job.assert_awaited_once_with(
-        session=prod_service.allocate_render_job.await_args.kwargs["session"],
+    dispatch_mock.assert_awaited_once_with(
+        session=session,
         channel_id=channel_id,
         request_id=request_id,
         idempotency_key="render-key",
         is_rerender=is_rerender,
+        prod_service=prod_service,
     )
-    publish.assert_called_once_with(str(channel_id), str(request_id), str(job.id))
 
 
 @pytest.mark.asyncio
 async def test_idempotent_render_replay_does_not_publish(monkeypatch):
+    channel_id = uuid4()
+    request_id = uuid4()
     job = SimpleNamespace(id=uuid4(), state="QUEUED")
-    prod_service = SimpleNamespace(
-        allocate_render_job=AsyncMock(return_value=(job, object(), False))
-    )
-    publish = MagicMock()
-    monkeypatch.setattr(production.execute_production_render_task, "delay", publish)
+    dispatch_mock = AsyncMock(return_value=(job, object(), False, None))
+    monkeypatch.setattr(production.ProductionDispatchService, "allocate_and_enqueue_render", dispatch_mock)
 
+    session = MagicMock()
+    prod_service = MagicMock()
     result = await production.render_production(
-        channel_id=uuid4(),
-        request_id=uuid4(),
+        channel_id=channel_id,
+        request_id=request_id,
         payload=SimpleNamespace(idempotency_key="existing-key"),
-        session=MagicMock(),
+        session=session,
         prod_service=prod_service,
     )
 
     assert result is job
-    publish.assert_not_called()
+    dispatch_mock.assert_awaited_once_with(
+        session=session,
+        channel_id=channel_id,
+        request_id=request_id,
+        idempotency_key="existing-key",
+        is_rerender=False,
+        prod_service=prod_service,
+    )
 
 
 @pytest.mark.asyncio
 async def test_publication_failure_is_not_silently_converted_to_success(monkeypatch):
-    job = SimpleNamespace(id=uuid4(), state="QUEUED")
-    prod_service = SimpleNamespace(
-        allocate_render_job=AsyncMock(return_value=(job, object(), True))
-    )
     monkeypatch.setattr(
-        production.execute_production_render_task,
-        "delay",
-        MagicMock(side_effect=RuntimeError("broker unavailable")),
+        production.ProductionDispatchService,
+        "allocate_and_enqueue_render",
+        AsyncMock(side_effect=RuntimeError("outbox enqueue unavailable")),
     )
 
-    with pytest.raises(RuntimeError, match="broker unavailable"):
+    with pytest.raises(RuntimeError, match="outbox enqueue unavailable"):
         await production.render_production(
             channel_id=uuid4(),
             request_id=uuid4(),
             payload=SimpleNamespace(idempotency_key="render-key"),
             session=MagicMock(),
-            prod_service=prod_service,
+            prod_service=MagicMock(),
         )
 
 

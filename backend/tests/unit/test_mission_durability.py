@@ -89,11 +89,12 @@ def test_converted_boundaries_use_durable_intents_and_no_direct_delay():
     orchestrator = source("src/omega/application/orchestrator.py")
     render_service = source("src/omega/application/render_service.py")
     tasks = source("src/omega/worker/tasks.py")
+    dispatch_service = source("src/omega/application/production_dispatch_service.py")
     assert 'task_name="omega.tasks.execute"' in orchestrator
     assert "execute_task.delay(" not in orchestrator
     assert 'task_name="omega.orchestrator.evaluate"' in tasks
     assert "evaluate_mission_task.delay(" not in tasks
-    assert 'task_name="omega.production.render"' in tasks
+    assert 'task_name="omega.production.render"' in dispatch_service
     assert "execute_production_render_task.delay(" not in tasks
     assert "render-terminal-evaluation:" in render_service
     assert "_enqueue_terminal_evaluation(session, prod_req, job_id)" in render_service
