@@ -794,3 +794,178 @@ async def test_concurrent_reconciler_sees_generation_mismatch_and_no_ops():
     assert result["action"] == "NO_ACTION"
     assert result["reason"] == "generation_mismatch"
     assert job.dispatch_generation == 2
+
+
+# ══════════════════════════════════════════════════════════════════
+# 10. P19-OR2-B.1 Post-Rollback ORM Expiration & Logger Correctness
+# ══════════════════════════════════════════════════════════════════
+
+
+class PostRollbackExpiringSession(MockDispatchAsyncSession):
+    """Mock session that expires ORM attributes on rollback to verify no post-rollback access."""
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
+        from sqlalchemy.orm import attributes
+        for entity in list(self.records.values()):
+            try:
+                state = attributes.instance_state(entity)
+                if isinstance(entity, DurableDispatchIntent):
+                    state._expire_attributes(entity.__dict__, ["state"])
+                elif isinstance(entity, ProductionRenderJob):
+                    state._expire_attributes(entity.__dict__, ["state"])
+            except Exception:
+                pass
+
+
+@pytest.mark.asyncio
+async def test_reconcile_pending_outbox_no_action_post_rollback():
+    """Section 6: Verify PENDING outbox state returns NO_ACTION without post-rollback ORM access."""
+    session = PostRollbackExpiringSession()
+    req, job = _make_production_hierarchy(
+        dispatch_gen=1,
+        dispatch_started_at=datetime.now(UTC) - timedelta(seconds=400),
+    )
+    session.add(req)
+    session.add(job)
+
+    intent = _make_intent(req, job, gen=1, state=PENDING)
+    session.add(intent)
+
+    result = await ProductionDispatchService.reconcile_dispatch_stall_candidate(
+        session, req.id, job.id, expected_generation=1, timeout_seconds=30
+    )
+
+    assert result["action"] == "NO_ACTION"
+    assert result["reason"] == "outbox_active_pending"
+    assert job.dispatch_generation == 1
+    assert session.rolled_back is True
+    # Verify no new intent or RenderJob created
+    intents = [rec for (m, _), rec in session.records.items() if m is DurableDispatchIntent]
+    assert len(intents) == 1
+    jobs = [rec for (m, _), rec in session.records.items() if m is ProductionRenderJob]
+    assert len(jobs) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_claimed_outbox_no_action_post_rollback():
+    """Section 7: Verify CLAIMED outbox state returns NO_ACTION without post-rollback ORM access."""
+    session = PostRollbackExpiringSession()
+    req, job = _make_production_hierarchy(
+        dispatch_gen=1,
+        dispatch_started_at=datetime.now(UTC) - timedelta(seconds=400),
+    )
+    session.add(req)
+    session.add(job)
+
+    intent = _make_intent(req, job, gen=1, state=CLAIMED)
+    session.add(intent)
+
+    result = await ProductionDispatchService.reconcile_dispatch_stall_candidate(
+        session, req.id, job.id, expected_generation=1, timeout_seconds=30
+    )
+
+    assert result["action"] == "NO_ACTION"
+    assert result["reason"] == "outbox_active_claimed"
+    assert job.dispatch_generation == 1
+    assert session.rolled_back is True
+    intents = [rec for (m, _), rec in session.records.items() if m is DurableDispatchIntent]
+    assert len(intents) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_retry_outbox_no_action_post_rollback():
+    """Section 8: Verify RETRY outbox state returns NO_ACTION without post-rollback ORM access."""
+    session = PostRollbackExpiringSession()
+    req, job = _make_production_hierarchy(
+        dispatch_gen=1,
+        dispatch_started_at=datetime.now(UTC) - timedelta(seconds=400),
+    )
+    session.add(req)
+    session.add(job)
+
+    intent = _make_intent(req, job, gen=1, state=RETRY)
+    session.add(intent)
+
+    result = await ProductionDispatchService.reconcile_dispatch_stall_candidate(
+        session, req.id, job.id, expected_generation=1, timeout_seconds=30
+    )
+
+    assert result["action"] == "NO_ACTION"
+    assert result["reason"] == "outbox_active_retry"
+    assert job.dispatch_generation == 1
+    assert session.rolled_back is True
+    intents = [rec for (m, _), rec in session.records.items() if m is DurableDispatchIntent]
+    assert len(intents) == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_unknown_outbox_state_fallback_post_rollback():
+    """Section 9: Verify fallback unknown outbox state returns NO_ACTION without post-rollback ORM access."""
+    session = PostRollbackExpiringSession()
+    req, job = _make_production_hierarchy(
+        dispatch_gen=1,
+        dispatch_started_at=datetime.now(UTC) - timedelta(seconds=400),
+    )
+    session.add(req)
+    session.add(job)
+
+    intent = _make_intent(req, job, gen=1, state="UNKNOWN_INTENT_STATE")
+    session.add(intent)
+
+    result = await ProductionDispatchService.reconcile_dispatch_stall_candidate(
+        session, req.id, job.id, expected_generation=1, timeout_seconds=30
+    )
+
+    assert result["action"] == "NO_ACTION"
+    assert result["reason"] == "unknown_outbox_state_UNKNOWN_INTENT_STATE"
+    assert job.dispatch_generation == 1
+    assert session.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_job_state_not_queued_post_rollback():
+    """Audit check: Verify non-QUEUED job returns NO_ACTION without post-rollback ORM access."""
+    session = PostRollbackExpiringSession()
+    req, job = _make_production_hierarchy(
+        job_state=RenderJobState.RUNNING.value,
+        dispatch_gen=1,
+        dispatch_started_at=datetime.now(UTC) - timedelta(seconds=400),
+    )
+    session.add(req)
+    session.add(job)
+
+    result = await ProductionDispatchService.reconcile_dispatch_stall_candidate(
+        session, req.id, job.id, expected_generation=1, timeout_seconds=30
+    )
+
+    assert result["action"] == "NO_ACTION"
+    assert result["reason"] == f"job_state_{RenderJobState.RUNNING.value}"
+    assert session.rolled_back is True
+
+
+@pytest.mark.asyncio
+async def test_reconcile_all_dispatch_stalls_logger_handles_candidate_exception_no_typeerror():
+    """Section 10: Verify candidate reconciliation exception is logged without TypeError from stdlib logger."""
+    session = MockDispatchAsyncSession()
+    req, job = _make_production_hierarchy(
+        dispatch_started_at=datetime.now(UTC) - timedelta(seconds=400)
+    )
+    session.add(req)
+    session.add(job)
+
+    # Patch reconcile_dispatch_stall_candidate to raise a controlled candidate-level error
+    with patch.object(
+        ProductionDispatchService,
+        "reconcile_dispatch_stall_candidate",
+        side_effect=RuntimeError("controlled candidate reconciliation failure"),
+    ):
+        results = await ProductionDispatchService.reconcile_all_dispatch_stalls(
+            session, timeout_seconds=300
+        )
+
+        assert results["candidates"] == 1
+        assert results["skipped"] == 1
+        assert results["redispatched"] == 0
+        assert results["exhausted"] == 0
+        assert session.rolled_back is True

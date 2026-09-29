@@ -181,9 +181,10 @@ class ProductionDispatchService:
             return {"action": "NO_ACTION", "reason": "job_not_found"}
 
         # 3. Re-verify eligibility preconditions under lock
-        if job.state != RenderJobState.QUEUED.value:
+        job_state = job.state
+        if job_state != RenderJobState.QUEUED.value:
             await session.rollback()
-            return {"action": "NO_ACTION", "reason": f"job_state_{job.state}"}
+            return {"action": "NO_ACTION", "reason": f"job_state_{job_state}"}
         if job.started_at is not None or job.lease_token is not None:
             await session.rollback()
             return {"action": "NO_ACTION", "reason": "execution_authority_active"}
@@ -223,8 +224,9 @@ class ProductionDispatchService:
             can_redispatch = True
         elif intent.state in (PENDING, CLAIMED, RETRY):
             # Outbox relay owns active transport for this generation — NO_ACTION
+            intent_state = intent.state
             await session.rollback()
-            return {"action": "NO_ACTION", "reason": f"outbox_active_{intent.state.lower()}"}
+            return {"action": "NO_ACTION", "reason": f"outbox_active_{intent_state.lower()}"}
         elif intent.state == DEAD_LETTER:
             # Relay exhausted all attempts for this generation — immediately eligible
             can_redispatch = True
@@ -243,8 +245,9 @@ class ProductionDispatchService:
                 return {"action": "NO_ACTION", "reason": "timeout_not_elapsed"}
             can_redispatch = True
         else:
+            intent_state = intent.state
             await session.rollback()
-            return {"action": "NO_ACTION", "reason": f"unknown_outbox_state_{intent.state}"}
+            return {"action": "NO_ACTION", "reason": f"unknown_outbox_state_{intent_state}"}
 
         if not can_redispatch:
             await session.rollback()
@@ -353,9 +356,12 @@ class ProductionDispatchService:
                 await session.rollback()
                 logger.error(
                     "reconcile_dispatch_stall_candidate_failed",
-                    job_id=str(job_id),
-                    error=str(exc),
                     exc_info=True,
+                    extra={
+                        "event": "reconcile_dispatch_stall_candidate_failed",
+                        "job_id": str(job_id),
+                        "error": str(exc),
+                    },
                 )
                 results["skipped"] += 1
         return results
