@@ -68,6 +68,14 @@ from omega.logging import get_logger
 logger = get_logger(service="omega-render-service")
 
 
+async def _db_wall_clock(session: AsyncSession) -> datetime:
+    """Return PostgreSQL wall-clock time, not the transaction start time."""
+    value = await session.scalar(select(func.clock_timestamp()))
+    if not isinstance(value, datetime):
+        raise RuntimeError("Database clock_timestamp() did not return a timestamp")
+    return value
+
+
 class RuntimeRenderProvenance(dict):
     """JSON provenance plus transient V2 inputs needed by Phase 3."""
 
@@ -663,6 +671,11 @@ class ProductionRenderService:
                     f"Terminal finalization rejected: worker lost lease fence for job {job_id}"
                 )
 
+            # Capture one authoritative event-wall-clock value for all facts
+            # finalized atomically below. PostgreSQL now()/CURRENT_TIMESTAMP
+            # would report the start of this potentially long-lived transaction.
+            completion_db_time = await _db_wall_clock(session)
+
             # 2. Insert the candidate as non-current. Current authority moves
             # only after both local QA and POST_RENDER Guardian accept it.
             media_art = MediaArtifact(
@@ -679,6 +692,7 @@ class ProductionRenderService:
                 width=probe_summary.get("width", width),
                 height=probe_summary.get("height", height),
                 duration_ms=probe_summary.get("duration_ms", 0),
+                created_at=completion_db_time,
             )
             session.add(media_art)
             await session.flush()
@@ -692,6 +706,7 @@ class ProductionRenderService:
                             runtime_snapshot.fingerprints.manifest_run
                         ),
                         payload=runtime_snapshot.canonical_dict(),
+                        created_at=completion_db_time,
                     )
                 )
                 await session.flush()
@@ -703,6 +718,7 @@ class ProductionRenderService:
                 artifact_id=media_art.id,
                 status=qa_status.value,
                 findings=[f.model_dump() for f in qa_findings],
+                executed_at=completion_db_time,
             )
             session.add(qa_record)
 
@@ -764,7 +780,7 @@ class ProductionRenderService:
                 .values(
                     status=ProductionRequestStatus.SUCCEEDED.value,
                     outcome=outcome,
-                    completed_at=datetime.now(UTC),
+                    completed_at=completion_db_time,
                     metadata_={
                         **dict(req.metadata_ or {}),
                         **(
@@ -783,7 +799,7 @@ class ProductionRenderService:
                 .values(
                     state=RenderJobState.SUCCEEDED.value,
                     lease_expires_at=None,
-                    completed_at=func.now(),
+                    completed_at=completion_db_time,
                 )
             )
             await self._enqueue_terminal_evaluation(session, prod_req, job_id)

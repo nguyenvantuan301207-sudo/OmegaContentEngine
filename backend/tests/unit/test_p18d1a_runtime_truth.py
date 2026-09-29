@@ -1,5 +1,6 @@
 import importlib.util
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -633,8 +634,10 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
         )
 
     query_result = SimpleNamespace(scalar_one_or_none=lambda: job)
+    completion_db_time = datetime(2026, 9, 29, 6, 40, 47, tzinfo=UTC)
     session = SimpleNamespace(
         execute=AsyncMock(return_value=query_result),
+        scalar=AsyncMock(return_value=completion_db_time),
         commit=AsyncMock(),
         rollback=AsyncMock(),
         flush=AsyncMock(),
@@ -731,8 +734,19 @@ async def test_cache_hit_result_persists_one_artifact_truth_and_same_qa_snapshot
     assert truth_rows[0].artifact_id == artifact.id
     assert truth_rows[0].payload == qa_snapshot.canonical_dict()
     assert truth_rows[0].manifest_run_fingerprint == runtime_result.run_fingerprint
+    assert truth_rows[0].created_at == completion_db_time
     assert qa_rows[0].status == expected_status.value
+    assert qa_rows[0].executed_at == completion_db_time
     assert artifact.is_current is (expected_status != ProductionQAStatus.BLOCKED)
+    assert artifact.created_at == completion_db_time
+    completed_at_values = [
+        statement.compile().params.get("completed_at")
+        for call in session.execute.await_args_list
+        if (statement := call.args[0]).__class__.__name__ == "Update"
+        and "completed_at" in statement.compile().params
+    ]
+    assert completed_at_values == [completion_db_time, completion_db_time]
+    session.scalar.assert_awaited_once()
     assert service.storage.resolve_stored_uri(
         channel_id, request_id, artifact.storage_uri
     ).is_file()
