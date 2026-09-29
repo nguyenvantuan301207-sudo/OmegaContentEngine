@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from omega.application.durable_dispatch import DEAD_LETTER, DurableDispatchService
 from omega.application.planner import StaticMissionPlanner
 from omega.domain.channel import ChannelState
 from omega.domain.content import ContentType
@@ -31,6 +32,7 @@ from omega.infrastructure.models import (
     Channel,
     ChannelDNARevision,
     DecisionLog,
+    DurableDispatchIntent,
     Mission,
     MissionExecution,
     Task,
@@ -40,6 +42,71 @@ from omega.logging import get_logger
 from omega.worker.tasks import evaluate_mission_task
 
 logger = get_logger(service="omega-mission-service")
+
+MISSION_START_PURPOSE = "MISSION_START_EVALUATION"
+
+
+class MissionStartDeliveryError(RuntimeError):
+    """The canonical start exists but its only durable wakeup is dead-lettered."""
+
+
+async def _canonical_start_lineage(
+    session: AsyncSession, mission: Mission
+) -> tuple[MissionExecution, DecisionLog, DurableDispatchIntent] | None:
+    """Return one unambiguous RUNNING start lineage, repairing only a missing intent."""
+    executions = list(
+        (
+            await session.execute(
+                select(MissionExecution)
+                .where(
+                    MissionExecution.mission_id == mission.id,
+                    MissionExecution.state == ExecutionState.RUNNING.value,
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(executions) != 1:
+        raise ValueError(
+            "RUNNING mission must have exactly one RUNNING execution for start replay."
+        )
+    execution = executions[0]
+    decisions = list(
+        (
+            await session.execute(
+                select(DecisionLog)
+                .where(
+                    DecisionLog.mission_id == mission.id,
+                    DecisionLog.execution_id == execution.id,
+                    DecisionLog.decision_type == DecisionType.MISSION_START.value,
+                )
+                .with_for_update()
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if len(decisions) != 1:
+        raise ValueError("RUNNING mission must have exactly one canonical MISSION_START decision.")
+    decision = decisions[0]
+    key = f"mission-evaluation:{execution.id}:{decision.id}"
+    intent = await DurableDispatchService.enqueue_async(
+        session,
+        idempotency_key=key,
+        task_name="omega.orchestrator.evaluate",
+        args=[str(mission.id), str(execution.id)],
+        purpose=MISSION_START_PURPOSE,
+        mission_id=mission.id,
+        mission_execution_id=execution.id,
+        mission_task_id=None,
+    )
+    if intent.state == DEAD_LETTER:
+        raise MissionStartDeliveryError(
+            "Mission start wakeup is DEAD_LETTER; operator recovery is required."
+        )
+    return execution, decision, intent
 
 
 def _normalize_canonical_uuid(value: object, field_name: str) -> str:
@@ -483,12 +550,20 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
 
 
 async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
-    """Start a planned mission: activate planned MissionExecution, transition READY -> RUNNING, trigger orchestrator."""
+    """Atomically start a planned mission and persist its durable orchestrator wakeup."""
     res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
     mission = res.scalar_one_or_none()
     if not mission:
         return None
 
+    if mission.state == MissionState.RUNNING.value:
+        try:
+            await _canonical_start_lineage(session, mission)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        return MissionResponse.model_validate(mission)
     validate_mission_transition(MissionState(mission.state), MissionState.RUNNING)
 
     # Channel check: verify linked channel is not archived
@@ -510,38 +585,49 @@ async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
         .order_by(MissionExecution.created_at.desc())
         .with_for_update()
     )
-    execution = exec_res.scalars().first()
-    if execution:
-        execution.state = ExecutionState.RUNNING.value
-        execution.started_at = now
-        execution.updated_at = now
+    executions = list(exec_res.scalars().all())
+    if len(executions) != 1:
+        raise ValueError("Mission start requires exactly one PLANNED execution.")
+    execution = executions[0]
+    execution.state = ExecutionState.RUNNING.value
+    execution.started_at = now
+    execution.updated_at = now
 
     # 2. Transition Mission READY -> RUNNING
     mission.state = MissionState.RUNNING.value
     mission.started_at = now
     mission.updated_at = now
 
-    session.add(
-        DecisionLog(
-            mission_id=mission.id,
-            execution_id=execution.id if execution else None,
-            decision_type=DecisionType.MISSION_START.value,
-            decision="Start mission execution",
-            reason="Mission initiated by user, activating planned execution DAG",
-            actor=Actor.USER.value,
-        )
+    decision = DecisionLog(
+        id=uuid4(),
+        mission_id=mission.id,
+        execution_id=execution.id if execution else None,
+        decision_type=DecisionType.MISSION_START.value,
+        decision="Start mission execution",
+        reason="Mission initiated by user, activating planned execution DAG",
+        actor=Actor.USER.value,
     )
+    try:
+        session.add(decision)
+        await session.flush()
+        await DurableDispatchService.enqueue_async(
+            session,
+            idempotency_key=f"mission-evaluation:{execution.id}:{decision.id}",
+            task_name="omega.orchestrator.evaluate",
+            args=[str(mission.id), str(execution.id)],
+            purpose=MISSION_START_PURPOSE,
+            mission_id=mission.id,
+            mission_execution_id=execution.id,
+            mission_task_id=None,
+        )
 
-    await session.commit()
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        raise
     logger.info("Mission started", mission_id=str(mission.id))
 
-    # 3. Publish initial Orchestrator evaluation after the RUNNING state commit
-    evaluate_mission_task.delay(
-        str(mission.id),
-        str(execution.id) if execution else "",
-    )
-
-    # Reload fresh state
+    # DurableDispatchService relay owns broker publication after commit.
     fresh_res = await session.execute(select(Mission).where(Mission.id == mission_id))
     return MissionResponse.model_validate(fresh_res.scalar_one())
 

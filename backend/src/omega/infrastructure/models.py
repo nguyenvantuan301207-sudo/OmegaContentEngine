@@ -24,6 +24,7 @@ from sqlalchemy import (
     Index,
     Integer,
     Numeric,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -792,6 +793,9 @@ class ContentCampaign(Base):
     objective: Mapped[str | None] = mapped_column(Text, nullable=True)
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="READY", index=True)
+    orchestration_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="LEGACY_UPFRONT", server_default="LEGACY_UPFRONT")
+    plan_checksum_version: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=1, server_default="1")
+    max_concurrent_missions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     plan_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
     item_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -799,6 +803,12 @@ class ContentCampaign(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    started_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    paused_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cancelled_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_admitted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    archived_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     items: Mapped[list[ContentCampaignItem]] = relationship(
         "ContentCampaignItem",
@@ -810,7 +820,11 @@ class ContentCampaign(Base):
         UniqueConstraint(
             "channel_id", "idempotency_key", name="uq_content_campaigns_channel_idempotency"
         ),
-        CheckConstraint("status = 'READY'", name="ck_content_campaigns_status"),
+        CheckConstraint("status IN ('READY','RUNNING','PAUSED','CANCELLING','SUCCEEDED','PARTIAL','FAILED','CANCELLED')", name="ck_content_campaigns_status"),
+        CheckConstraint("orchestration_mode IN ('LEGACY_UPFRONT','LAZY_ADMISSION_V1')", name="ck_content_campaigns_orchestration_mode"),
+        CheckConstraint("max_concurrent_missions IS NULL OR max_concurrent_missions >= 1", name="ck_content_campaigns_max_concurrency"),
+        Index("ix_content_campaigns_channel_mode_status", "channel_id", "orchestration_mode", "status"),
+        Index("ix_content_campaigns_admission_order", "status", "last_admitted_at", "priority", "created_at"),
         CheckConstraint(
             "item_count >= 1 AND item_count <= 50", name="ck_content_campaigns_item_count_range"
         ),
@@ -831,6 +845,14 @@ class ContentCampaignItem(Base):
         index=True,
     )
     position: Mapped[int] = mapped_column(Integer, nullable=False)
+    item_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    admission_state: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING", server_default="PENDING")
+    materialization_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    materialization_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sanitized_materialization_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    next_materialization_attempt_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    admitted_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    materialized_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     selection_run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("content_selection_runs.id", ondelete="RESTRICT"),
@@ -869,11 +891,15 @@ class ContentCampaignItem(Base):
     topic_candidate: Mapped[TopicCandidate] = relationship(
         "TopicCandidate"
     )
+    execution_binding: Mapped[ContentCampaignItemExecution | None] = relationship(
+        "ContentCampaignItemExecution", back_populates="campaign_item", uselist=False
+    )
 
     __table_args__ = (
         UniqueConstraint(
             "campaign_id", "position", name="uq_content_campaign_items_campaign_position"
         ),
+        UniqueConstraint("campaign_id", "item_key", name="uq_content_campaign_items_campaign_item_key"),
         UniqueConstraint(
             "selection_run_id", name="uq_content_campaign_items_selection_run"
         ),
@@ -883,6 +909,10 @@ class ContentCampaignItem(Base):
         CheckConstraint(
             "position >= 1 AND position <= 50", name="ck_content_campaign_items_position_positive"
         ),
+        CheckConstraint("admission_state IN ('PENDING','ADMITTED','MATERIALIZED','FAILED','CANCELLED')", name="ck_content_campaign_items_admission_state"),
+        CheckConstraint("materialization_attempts >= 0", name="ck_content_campaign_items_attempts"),
+        Index("ix_content_campaign_items_pending", "campaign_id", "position", postgresql_where=text("admission_state = 'PENDING'")),
+        Index("ix_content_campaign_items_admitted_recovery", "campaign_id", "next_materialization_attempt_at", "position", postgresql_where=text("admission_state = 'ADMITTED'")),
         CheckConstraint(
             "target_content_type IN ('YOUTUBE_LONGFORM', 'YOUTUBE_SHORT')",
             name="ck_content_campaign_items_content_type",
@@ -924,6 +954,7 @@ class ContentCampaignExecution(Base):
     created_at: Mapped[DateTime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    materialization_completed_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     campaign: Mapped[ContentCampaign] = relationship("ContentCampaign")
     channel: Mapped[Channel] = relationship("Channel")
@@ -938,7 +969,7 @@ class ContentCampaignExecution(Base):
         UniqueConstraint(
             "campaign_id", name="uq_content_campaign_executions_campaign_id"
         ),
-        CheckConstraint("status = 'MATERIALIZED'", name="ck_content_campaign_executions_status"),
+        CheckConstraint("status IN ('ACTIVE','MATERIALIZED','CANCELLED')", name="ck_content_campaign_executions_status"),
         CheckConstraint(
             "item_count >= 1 AND item_count <= 50",
             name="ck_content_campaign_executions_item_count_range",
@@ -981,7 +1012,9 @@ class ContentCampaignItemExecution(Base):
     campaign_execution: Mapped[ContentCampaignExecution] = relationship(
         "ContentCampaignExecution", back_populates="items"
     )
-    campaign_item: Mapped[ContentCampaignItem] = relationship("ContentCampaignItem")
+    campaign_item: Mapped[ContentCampaignItem] = relationship(
+        "ContentCampaignItem", back_populates="execution_binding"
+    )
     mission: Mapped[Mission] = relationship("Mission")
     mission_execution: Mapped[MissionExecution] = relationship("MissionExecution")
 

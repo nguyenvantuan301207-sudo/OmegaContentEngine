@@ -10,11 +10,14 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from omega.config import get_settings
 from omega.domain.channel import ChannelState
 from omega.domain.content import ContentType
 from omega.domain.content_campaign import (
     ContentCampaignCreate,
+    ContentCampaignItemAdmissionState,
     ContentCampaignItemResponse,
+    ContentCampaignOrchestrationMode,
     ContentCampaignResponse,
     ContentCampaignStatus,
     compute_campaign_plan_checksum,
@@ -25,6 +28,7 @@ from omega.infrastructure.models import (
     Channel,
     ContentCampaign,
     ContentCampaignItem,
+    ContentCampaignItemExecution,
     ContentSelectionRun,
 )
 
@@ -45,18 +49,17 @@ class ContentCampaignIntegrityError(Exception):
     """Raised when persisted campaign historical lineage or invariant check fails closed."""
 
 
-async def _load_campaign(
-    session: AsyncSession, campaign_id: UUID
-) -> ContentCampaign | None:
+async def _load_campaign(session: AsyncSession, campaign_id: UUID) -> ContentCampaign | None:
     stmt = (
         select(ContentCampaign)
         .options(
-            selectinload(ContentCampaign.items).selectinload(
-                ContentCampaignItem.selection_run
-            ),
+            selectinload(ContentCampaign.items).selectinload(ContentCampaignItem.selection_run),
             selectinload(ContentCampaign.items).selectinload(
                 ContentCampaignItem.selection_decision
             ),
+            selectinload(ContentCampaign.items)
+            .selectinload(ContentCampaignItem.execution_binding)
+            .selectinload(ContentCampaignItemExecution.mission),
         )
         .where(ContentCampaign.id == campaign_id)
     )
@@ -139,6 +142,17 @@ def _to_response(campaign: ContentCampaign) -> ContentCampaignResponse:
                 id=it.id,
                 campaign_id=it.campaign_id,
                 position=it.position,
+                item_key=it.item_key,
+                admission_state=ContentCampaignItemAdmissionState(it.admission_state),
+                materialization_attempts=it.materialization_attempts,
+                materialization_error_code=it.materialization_error_code,
+                sanitized_materialization_error=it.sanitized_materialization_error,
+                admitted_at=it.admitted_at,
+                materialized_at=it.materialized_at,
+                mission_id=it.execution_binding.mission_id if it.execution_binding else None,
+                mission_state=(
+                    it.execution_binding.mission.state if it.execution_binding else None
+                ),
                 selection_run_id=it.selection_run_id,
                 selection_decision_id=it.selection_decision_id,
                 topic_candidate_id=it.topic_candidate_id,
@@ -158,11 +172,20 @@ def _to_response(campaign: ContentCampaign) -> ContentCampaignResponse:
         objective=campaign.objective,
         priority=campaign.priority,
         status=ContentCampaignStatus(campaign.status),
+        orchestration_mode=ContentCampaignOrchestrationMode(campaign.orchestration_mode),
+        plan_checksum_version=campaign.plan_checksum_version,
+        max_concurrent_missions=campaign.max_concurrent_missions,
         idempotency_key=campaign.idempotency_key,
         plan_checksum=campaign.plan_checksum,
         item_count=campaign.item_count,
         created_by=campaign.created_by,
         created_at=campaign.created_at,
+        started_at=campaign.started_at,
+        paused_at=campaign.paused_at,
+        completed_at=campaign.completed_at,
+        cancelled_at=campaign.cancelled_at,
+        archived_at=campaign.archived_at,
+        orchestration_enabled=get_settings().campaign_orchestration_enabled,
         items=items_response,
     )
 
@@ -185,6 +208,12 @@ async def create_campaign(
     - Idempotency reconciliation and concurrency safety
     """
     # 1. Check channel
+    settings = get_settings()
+    max_concurrency = request.max_concurrent_missions or settings.campaign_default_concurrency
+    if not 1 <= max_concurrency <= settings.campaign_max_concurrency:
+        raise ContentCampaignValidationError(
+            f"max_concurrent_missions must be between 1 and {settings.campaign_max_concurrency}."
+        )
     channel = await session.get(Channel, channel_id)
     if channel is None:
         raise ContentCampaignNotFoundError(f"Channel '{channel_id}' not found.")
@@ -263,9 +292,7 @@ async def create_campaign(
 
         # Match exact decision
         matching_decisions = [
-            d
-            for d in run.decisions
-            if d.selection_run_id == run.id and d.candidate_id == cand_id
+            d for d in run.decisions if d.selection_run_id == run.id and d.candidate_id == cand_id
         ]
         if len(matching_decisions) != 1:
             raise ContentCampaignValidationError(
@@ -276,6 +303,7 @@ async def create_campaign(
         resolved_items_metadata.append(
             {
                 "position": pos,
+                "item_key": f"selection-run:{run.id}",
                 "selection_run_id": run.id,
                 "selection_decision_id": decision.id,
                 "topic_candidate_id": cand_id,
@@ -285,6 +313,7 @@ async def create_campaign(
         )
 
     # 6. Compute plan checksum
+    checksum_version = existing.plan_checksum_version if existing is not None else 2
     calculated_checksum = compute_campaign_plan_checksum(
         channel_id=channel_id,
         channel_dna_revision_id=shared_dna_revision_id,
@@ -292,6 +321,7 @@ async def create_campaign(
         objective=request.objective,
         priority=request.priority,
         items=resolved_items_metadata,
+        version=checksum_version,
     )
 
     # 7. Idempotent replay check: if (channel_id, idempotency_key) already exists,
@@ -330,6 +360,9 @@ async def create_campaign(
         objective=request.objective,
         priority=request.priority,
         status=ContentCampaignStatus.READY.value,
+        orchestration_mode=ContentCampaignOrchestrationMode.LAZY_ADMISSION_V1.value,
+        plan_checksum_version=2,
+        max_concurrent_missions=max_concurrency,
         idempotency_key=request.idempotency_key,
         plan_checksum=calculated_checksum,
         item_count=len(resolved_items_metadata),
@@ -339,6 +372,8 @@ async def create_campaign(
     for item_meta in resolved_items_metadata:
         campaign_item = ContentCampaignItem(
             position=item_meta["position"],
+            item_key=item_meta["item_key"],
+            admission_state=ContentCampaignItemAdmissionState.PENDING.value,
             selection_run_id=item_meta["selection_run_id"],
             selection_decision_id=item_meta["selection_decision_id"],
             topic_candidate_id=item_meta["topic_candidate_id"],
@@ -417,12 +452,13 @@ async def list_campaigns(
     stmt = (
         select(ContentCampaign)
         .options(
-            selectinload(ContentCampaign.items).selectinload(
-                ContentCampaignItem.selection_run
-            ),
+            selectinload(ContentCampaign.items).selectinload(ContentCampaignItem.selection_run),
             selectinload(ContentCampaign.items).selectinload(
                 ContentCampaignItem.selection_decision
             ),
+            selectinload(ContentCampaign.items)
+            .selectinload(ContentCampaignItem.execution_binding)
+            .selectinload(ContentCampaignItemExecution.mission),
         )
         .where(ContentCampaign.channel_id == channel_id)
         .order_by(ContentCampaign.created_at.desc(), ContentCampaign.id.desc())

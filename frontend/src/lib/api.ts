@@ -517,6 +517,7 @@ export interface ContentCampaignCreatePayload {
   priority: number;
   idempotency_key: string;
   created_by: string;
+  max_concurrent_missions?: number;
   items: ContentCampaignItemInput[];
 }
 
@@ -524,6 +525,15 @@ export interface ContentCampaignItem {
   id: string;
   campaign_id: string;
   position: number;
+  item_key: string;
+  admission_state: "PENDING" | "ADMITTED" | "MATERIALIZED" | "FAILED" | "CANCELLED";
+  materialization_attempts: number;
+  materialization_error_code: string | null;
+  sanitized_materialization_error: string | null;
+  admitted_at: string | null;
+  materialized_at: string | null;
+  mission_id: string | null;
+  mission_state: MissionState | null;
   selection_run_id: string;
   selection_decision_id: string;
   topic_candidate_id: string;
@@ -541,12 +551,21 @@ export interface ContentCampaign {
   title: string;
   objective: string | null;
   priority: number;
-  status: "READY";
+  status: "READY" | "RUNNING" | "PAUSED" | "CANCELLING" | "SUCCEEDED" | "PARTIAL" | "FAILED" | "CANCELLED";
+  orchestration_mode: "LEGACY_UPFRONT" | "LAZY_ADMISSION_V1";
+  plan_checksum_version: number;
+  max_concurrent_missions: number | null;
   idempotency_key: string;
   plan_checksum: string;
   item_count: number;
   created_by: string;
   created_at: string;
+  started_at: string | null;
+  paused_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  archived_at: string | null;
+  orchestration_enabled: boolean;
   items: ContentCampaignItem[];
 }
 
@@ -567,13 +586,14 @@ export interface ContentCampaignExecution {
   campaign_id: string;
   channel_id: string;
   channel_dna_revision_id: string;
-  status: "MATERIALIZED";
+  status: "ACTIVE" | "MATERIALIZED" | "CANCELLED";
   fanout_policy_name: string;
   fanout_policy_version: number;
   fanout_policy_checksum: string;
   item_count: number;
   materialized_by: string;
   created_at: string;
+  materialization_completed_at: string | null;
   items: ContentCampaignItemExecution[];
 }
 
@@ -1102,6 +1122,10 @@ export function materializeContentCampaign(channelId: string, campaignId: string
 
 export function getContentCampaignExecution(channelId: string, campaignId: string): Promise<ContentCampaignExecution> {
   return apiFetch(`/api/v1/channels/${channelId}/campaigns/${campaignId}/execution`);
+}
+
+export function campaignRuntimeAction(channelId: string, campaignId: string, action: "start" | "pause" | "resume" | "cancel" | "archive", actor = "OPERATOR"): Promise<ContentCampaign> {
+  return apiFetch(`/api/v1/channels/${channelId}/campaigns/${campaignId}/${action}`, { method: "POST", body: JSON.stringify({ actor }) });
 }
 
 // ── Mission Engine API Functions (OMEGA-002) ──

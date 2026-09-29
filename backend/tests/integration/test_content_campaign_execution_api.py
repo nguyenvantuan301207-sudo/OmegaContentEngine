@@ -11,18 +11,22 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from omega.application import mission_service
 from omega.application.mission_service import (
     _create_mission_in_transaction,
     _plan_mission_in_transaction,
 )
+from omega.domain.content_campaign import recompute_persisted_campaign_plan_checksum
 from omega.domain.content_campaign_execution import (
     compute_fanout_policy_checksum,
 )
 from omega.domain.mission import MissionCreate, MissionTriggerType
+from omega.infrastructure.database import AsyncSessionLocal
 from omega.infrastructure.models import (
     ChannelDNARevision,
+    ContentCampaign,
     ContentCampaignExecution,
     ContentCampaignItemExecution,
     ContentGenerationRequest,
@@ -111,11 +115,7 @@ async def _create_channel_and_campaign(
     items_payload = []
     for idx, r_id in enumerate(run_ids):
         content_type = "YOUTUBE_LONGFORM" if idx % 2 == 0 else "YOUTUBE_SHORT"
-        rel_at = (
-            datetime.datetime(2026, 10, 1, 12, 0, 0, tzinfo=datetime.UTC)
-            if idx == 0
-            else None
-        )
+        rel_at = datetime.datetime(2026, 10, 1, 12, 0, 0, tzinfo=datetime.UTC) if idx == 0 else None
         items_payload.append(
             {
                 "selection_run_id": r_id,
@@ -138,6 +138,22 @@ async def _create_channel_and_campaign(
     assert camp_resp.status_code == 201, camp_resp.text
     campaign_id = camp_resp.json()["id"]
 
+    # This suite verifies the pre-CB2 legacy upfront authority. New API-created
+    # campaigns are intentionally lazy, so make the historical mode explicit.
+    async with AsyncSessionLocal() as session:
+        campaign = (
+            await session.execute(
+                select(ContentCampaign)
+                .options(selectinload(ContentCampaign.items))
+                .where(ContentCampaign.id == uuid.UUID(campaign_id))
+            )
+        ).scalar_one()
+        campaign.orchestration_mode = "LEGACY_UPFRONT"
+        campaign.plan_checksum_version = 1
+        campaign.max_concurrent_missions = None
+        campaign.plan_checksum = recompute_persisted_campaign_plan_checksum(campaign)
+        await session.commit()
+
     return channel_id, dna_revision_id, campaign_id, candidate_ids
 
 
@@ -158,9 +174,7 @@ async def test_campaign_execution_schema_constraints_and_foreign_keys(
         lambda conn: inspect(conn).get_foreign_keys("content_campaign_executions")
     )
 
-    assert {item["name"] for item in exec_uniques} >= {
-        "uq_content_campaign_executions_campaign_id"
-    }
+    assert {item["name"] for item in exec_uniques} >= {"uq_content_campaign_executions_campaign_id"}
     assert {item["name"] for item in exec_checks} >= {
         "ck_content_campaign_executions_status",
         "ck_content_campaign_executions_item_count_range",
@@ -329,7 +343,9 @@ async def test_explicit_dna_override_validation_fail_closed(
 
         # Count tasks and executions before call
         tasks_before = (await db_session.execute(select(func.count(Task.id)))).scalar_one()
-        execs_before = (await db_session.execute(select(func.count(MissionExecution.id)))).scalar_one()
+        execs_before = (
+            await db_session.execute(select(func.count(MissionExecution.id)))
+        ).scalar_one()
 
         # Call _plan_mission_in_transaction with channel 2's DNA revision
         with pytest.raises(ValueError, match="belongs to channel"):
@@ -344,7 +360,9 @@ async def test_explicit_dna_override_validation_fail_closed(
         await db_session.rollback()
 
         tasks_after = (await db_session.execute(select(func.count(Task.id)))).scalar_one()
-        execs_after = (await db_session.execute(select(func.count(MissionExecution.id)))).scalar_one()
+        execs_after = (
+            await db_session.execute(select(func.count(MissionExecution.id)))
+        ).scalar_one()
         assert tasks_after == tasks_before
         assert execs_after == execs_before
 
@@ -440,9 +458,7 @@ async def test_materialization_replay_idempotency_and_integrity_validation(
 ) -> None:
     """Replay must return exact historical execution without creating any new entities. Corrupt lineage must fail closed."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(
-            client, item_count=2
-        )
+        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(client, item_count=2)
 
         # Initial materialization
         mat1 = await client.post(
@@ -455,12 +471,20 @@ async def test_materialization_replay_idempotency_and_integrity_validation(
         # Count all entities in DB
         counts_before = {
             "missions": (await db_session.execute(select(func.count(Mission.id)))).scalar_one(),
-            "executions": (await db_session.execute(select(func.count(MissionExecution.id)))).scalar_one(),
+            "executions": (
+                await db_session.execute(select(func.count(MissionExecution.id)))
+            ).scalar_one(),
             "tasks": (await db_session.execute(select(func.count(Task.id)))).scalar_one(),
             "deps": (await db_session.execute(select(func.count(TaskDependency.id)))).scalar_one(),
-            "decision_logs": (await db_session.execute(select(func.count(DecisionLog.id)))).scalar_one(),
-            "bindings": (await db_session.execute(select(func.count(ContentCampaignItemExecution.id)))).scalar_one(),
-            "campaign_executions": (await db_session.execute(select(func.count(ContentCampaignExecution.id)))).scalar_one(),
+            "decision_logs": (
+                await db_session.execute(select(func.count(DecisionLog.id)))
+            ).scalar_one(),
+            "bindings": (
+                await db_session.execute(select(func.count(ContentCampaignItemExecution.id)))
+            ).scalar_one(),
+            "campaign_executions": (
+                await db_session.execute(select(func.count(ContentCampaignExecution.id)))
+            ).scalar_one(),
         }
 
         # Replay with DIFFERENT actor
@@ -482,12 +506,20 @@ async def test_materialization_replay_idempotency_and_integrity_validation(
         # Verify zero new entity rows were created
         counts_after = {
             "missions": (await db_session.execute(select(func.count(Mission.id)))).scalar_one(),
-            "executions": (await db_session.execute(select(func.count(MissionExecution.id)))).scalar_one(),
+            "executions": (
+                await db_session.execute(select(func.count(MissionExecution.id)))
+            ).scalar_one(),
             "tasks": (await db_session.execute(select(func.count(Task.id)))).scalar_one(),
             "deps": (await db_session.execute(select(func.count(TaskDependency.id)))).scalar_one(),
-            "decision_logs": (await db_session.execute(select(func.count(DecisionLog.id)))).scalar_one(),
-            "bindings": (await db_session.execute(select(func.count(ContentCampaignItemExecution.id)))).scalar_one(),
-            "campaign_executions": (await db_session.execute(select(func.count(ContentCampaignExecution.id)))).scalar_one(),
+            "decision_logs": (
+                await db_session.execute(select(func.count(DecisionLog.id)))
+            ).scalar_one(),
+            "bindings": (
+                await db_session.execute(select(func.count(ContentCampaignItemExecution.id)))
+            ).scalar_one(),
+            "campaign_executions": (
+                await db_session.execute(select(func.count(ContentCampaignExecution.id)))
+            ).scalar_one(),
         }
         assert counts_after == counts_before
 
@@ -518,9 +550,7 @@ async def test_historical_read_allows_future_mission_lifecycle_progression(
 ) -> None:
     """Historical read integrity allows legitimate Mission lifecycle progression (e.g. CANCELLED) and exposes current state."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(
-            client, item_count=2
-        )
+        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(client, item_count=2)
 
         mat = await client.post(
             f"/api/v1/channels/{channel_id}/campaigns/{campaign_id}/materialize",
@@ -563,15 +593,19 @@ async def test_atomic_rollback_all_seven_authorities(
 ) -> None:
     """If failure occurs while materializing item 2, rollback must leave zero delta across all seven authorities."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(
-            client, item_count=2
-        )
+        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(client, item_count=2)
 
         # Count baseline rows across all 7 authorities
-        c_camp_execs = (await db_session.execute(select(func.count(ContentCampaignExecution.id)))).scalar_one()
-        c_item_execs = (await db_session.execute(select(func.count(ContentCampaignItemExecution.id)))).scalar_one()
+        c_camp_execs = (
+            await db_session.execute(select(func.count(ContentCampaignExecution.id)))
+        ).scalar_one()
+        c_item_execs = (
+            await db_session.execute(select(func.count(ContentCampaignItemExecution.id)))
+        ).scalar_one()
         c_missions = (await db_session.execute(select(func.count(Mission.id)))).scalar_one()
-        c_mission_execs = (await db_session.execute(select(func.count(MissionExecution.id)))).scalar_one()
+        c_mission_execs = (
+            await db_session.execute(select(func.count(MissionExecution.id)))
+        ).scalar_one()
         c_tasks = (await db_session.execute(select(func.count(Task.id)))).scalar_one()
         c_deps = (await db_session.execute(select(func.count(TaskDependency.id)))).scalar_one()
         c_decisions = (await db_session.execute(select(func.count(DecisionLog.id)))).scalar_one()
@@ -600,13 +634,23 @@ async def test_atomic_rollback_all_seven_authorities(
             )
 
         # Verify delta = 0 for all 7 authorities
-        assert (await db_session.execute(select(func.count(ContentCampaignExecution.id)))).scalar_one() == c_camp_execs
-        assert (await db_session.execute(select(func.count(ContentCampaignItemExecution.id)))).scalar_one() == c_item_execs
+        assert (
+            await db_session.execute(select(func.count(ContentCampaignExecution.id)))
+        ).scalar_one() == c_camp_execs
+        assert (
+            await db_session.execute(select(func.count(ContentCampaignItemExecution.id)))
+        ).scalar_one() == c_item_execs
         assert (await db_session.execute(select(func.count(Mission.id)))).scalar_one() == c_missions
-        assert (await db_session.execute(select(func.count(MissionExecution.id)))).scalar_one() == c_mission_execs
+        assert (
+            await db_session.execute(select(func.count(MissionExecution.id)))
+        ).scalar_one() == c_mission_execs
         assert (await db_session.execute(select(func.count(Task.id)))).scalar_one() == c_tasks
-        assert (await db_session.execute(select(func.count(TaskDependency.id)))).scalar_one() == c_deps
-        assert (await db_session.execute(select(func.count(DecisionLog.id)))).scalar_one() == c_decisions
+        assert (
+            await db_session.execute(select(func.count(TaskDependency.id)))
+        ).scalar_one() == c_deps
+        assert (
+            await db_session.execute(select(func.count(DecisionLog.id)))
+        ).scalar_one() == c_decisions
 
 
 @pytest.mark.asyncio
@@ -615,18 +659,28 @@ async def test_zero_downstream_dispatch_side_effects(
 ) -> None:
     """Materialization must create zero execution-side-effect rows across all durable outbox tables."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(
-            client, item_count=2
-        )
+        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(client, item_count=2)
 
         # Baseline outbox counts
-        c_sched_dec = (await db_session.execute(select(func.count(ScheduleDecision.id)))).scalar_one()
-        c_sched_res = (await db_session.execute(select(func.count(ScheduleReservation.id)))).scalar_one()
-        c_dispatch = (await db_session.execute(select(func.count(DurableDispatchIntent.id)))).scalar_one()
+        c_sched_dec = (
+            await db_session.execute(select(func.count(ScheduleDecision.id)))
+        ).scalar_one()
+        c_sched_res = (
+            await db_session.execute(select(func.count(ScheduleReservation.id)))
+        ).scalar_one()
+        c_dispatch = (
+            await db_session.execute(select(func.count(DurableDispatchIntent.id)))
+        ).scalar_one()
         c_research = (await db_session.execute(select(func.count(ResearchRequest.id)))).scalar_one()
-        c_content = (await db_session.execute(select(func.count(ContentGenerationRequest.id)))).scalar_one()
-        c_prod_req = (await db_session.execute(select(func.count(ProductionRequest.id)))).scalar_one()
-        c_prod_render = (await db_session.execute(select(func.count(ProductionRenderJob.id)))).scalar_one()
+        c_content = (
+            await db_session.execute(select(func.count(ContentGenerationRequest.id)))
+        ).scalar_one()
+        c_prod_req = (
+            await db_session.execute(select(func.count(ProductionRequest.id)))
+        ).scalar_one()
+        c_prod_render = (
+            await db_session.execute(select(func.count(ProductionRenderJob.id)))
+        ).scalar_one()
         c_publish = (await db_session.execute(select(func.count(PublishIntent.id)))).scalar_one()
 
         mat_resp = await client.post(
@@ -636,14 +690,30 @@ async def test_zero_downstream_dispatch_side_effects(
         assert mat_resp.status_code == 201
 
         # Assert delta = 0 for all 8 tables
-        assert (await db_session.execute(select(func.count(ScheduleDecision.id)))).scalar_one() == c_sched_dec
-        assert (await db_session.execute(select(func.count(ScheduleReservation.id)))).scalar_one() == c_sched_res
-        assert (await db_session.execute(select(func.count(DurableDispatchIntent.id)))).scalar_one() == c_dispatch
-        assert (await db_session.execute(select(func.count(ResearchRequest.id)))).scalar_one() == c_research
-        assert (await db_session.execute(select(func.count(ContentGenerationRequest.id)))).scalar_one() == c_content
-        assert (await db_session.execute(select(func.count(ProductionRequest.id)))).scalar_one() == c_prod_req
-        assert (await db_session.execute(select(func.count(ProductionRenderJob.id)))).scalar_one() == c_prod_render
-        assert (await db_session.execute(select(func.count(PublishIntent.id)))).scalar_one() == c_publish
+        assert (
+            await db_session.execute(select(func.count(ScheduleDecision.id)))
+        ).scalar_one() == c_sched_dec
+        assert (
+            await db_session.execute(select(func.count(ScheduleReservation.id)))
+        ).scalar_one() == c_sched_res
+        assert (
+            await db_session.execute(select(func.count(DurableDispatchIntent.id)))
+        ).scalar_one() == c_dispatch
+        assert (
+            await db_session.execute(select(func.count(ResearchRequest.id)))
+        ).scalar_one() == c_research
+        assert (
+            await db_session.execute(select(func.count(ContentGenerationRequest.id)))
+        ).scalar_one() == c_content
+        assert (
+            await db_session.execute(select(func.count(ProductionRequest.id)))
+        ).scalar_one() == c_prod_req
+        assert (
+            await db_session.execute(select(func.count(ProductionRenderJob.id)))
+        ).scalar_one() == c_prod_render
+        assert (
+            await db_session.execute(select(func.count(PublishIntent.id)))
+        ).scalar_one() == c_publish
 
 
 @pytest.mark.asyncio
@@ -652,9 +722,7 @@ async def test_real_same_campaign_concurrency(
 ) -> None:
     """Two concurrent materialization requests serialize cleanly on the campaign row lock, returning the same execution."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(
-            client, item_count=2
-        )
+        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(client, item_count=2)
 
         import asyncio
 
@@ -724,7 +792,9 @@ async def test_real_same_campaign_concurrency(
 
         deps_in_db = (
             await db_session.execute(
-                select(func.count(TaskDependency.id)).where(TaskDependency.mission_id.in_(mission_ids))
+                select(func.count(TaskDependency.id)).where(
+                    TaskDependency.mission_id.in_(mission_ids)
+                )
             )
         ).scalar_one()
         assert deps_in_db == 12  # 6 * 2
@@ -736,9 +806,7 @@ async def test_integrityerror_reconciliation_reloads_validated_winner(
 ) -> None:
     """When commit raises an IntegrityError (e.g. race condition), the production handler rolls back, reloads the durable winner, validates integrity, and returns it."""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(
-            client, item_count=1
-        )
+        channel_id, _, campaign_id, _ = await _create_channel_and_campaign(client, item_count=1)
 
         from unittest.mock import patch
 
@@ -784,8 +852,6 @@ async def test_integrityerror_reconciliation_reloads_validated_winner(
         # No duplicate missions
         m_id = uuid.UUID(data["items"][0]["mission_id"])
         missions = (
-            await db_session.execute(
-                select(func.count(Mission.id)).where(Mission.id == m_id)
-            )
+            await db_session.execute(select(func.count(Mission.id)).where(Mission.id == m_id))
         ).scalar_one()
         assert missions == 1

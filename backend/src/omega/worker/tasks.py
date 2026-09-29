@@ -1636,6 +1636,23 @@ def durable_dispatch_relay_task() -> dict[str, int | str]:
         session.close()
 
 
+@celery_app.task(name="omega.campaign.reconcile")
+def campaign_reconciliation_task() -> dict[str, int | str]:
+    """Reconcile a bounded Campaign batch; safety convergence runs even gate-off."""
+    from omega.application.campaign_admission_service import reconcile_batch
+    from omega.infrastructure.database import AsyncWorkerSessionLocal
+
+    async def _run() -> dict[str, int]:
+        async with AsyncWorkerSessionLocal() as session:
+            return await reconcile_batch(session)
+
+    try:
+        return {"status": "success", **asyncio.run(_run())}
+    except Exception:
+        logger.error("Campaign reconciliation failed", exc_info=True)
+        return {"status": "error", "campaigns_seen": 0}
+
+
 @celery_app.task(name="omega.guardian.process_alert_outbox")
 def process_guardian_alert_outbox() -> dict[str, int]:
     """Process pending alerts from the transactional guardian outbox."""

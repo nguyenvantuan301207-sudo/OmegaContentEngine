@@ -3,7 +3,7 @@
 import { use, useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
-  ApiError, getChannel, getContentCampaign, getContentCampaignExecution, materializeContentCampaign, startMission,
+  ApiError, campaignRuntimeAction, getChannel, getContentCampaign, getContentCampaignExecution, materializeContentCampaign, startMission,
   type Channel, type ContentCampaign, type ContentCampaignExecution, type ContentCampaignItemExecution,
 } from "@/lib/api";
 import { canMaterializeCampaign, canStartCampaignMission } from "@/lib/content-workflow";
@@ -74,6 +74,14 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
     finally { setBusy(false); }
   }
 
+  async function runtimeAction(action: "start" | "pause" | "resume" | "cancel" | "archive") {
+    if (!campaign) return;
+    setBusy(true); setError(null);
+    try { await campaignRuntimeAction(channelId, campaign.id, action, actor.trim() || "OPERATOR"); await load(); }
+    catch (cause: unknown) { setError(cause instanceof Error ? cause.message : `Unable to ${action} campaign.`); }
+    finally { setBusy(false); }
+  }
+
   return <div className="workflow-page ui-page-stack">
     <ChannelContextBar currentTab="campaigns" />
     <PageHeader eyebrow="Channel workflow · Step 2" title={campaign?.title || "Campaign details"}
@@ -84,11 +92,23 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
       <PageSection title="Immutable plan" description={campaign.objective || "No objective supplied."}>
         <p>Priority {campaign.priority} · {campaign.item_count} items · <StatusBadge>{campaign.status}</StatusBadge> · Created {new Date(campaign.created_at).toLocaleString()}</p>
         <p className="small muted">Pinned DNA revision: {campaign.channel_dna_revision_id}</p>
+        <p>Mode {campaign.orchestration_mode} · max concurrency {campaign.max_concurrent_missions ?? "legacy"}</p>
+        {campaign.orchestration_mode === "LAZY_ADMISSION_V1" && !campaign.orchestration_enabled && <Alert tone="warning">Campaign orchestration is disabled. Growth actions are unavailable; cancellation and terminal convergence remain active.</Alert>}
+        <div className="ui-inline-actions">
+          {campaign.orchestration_mode === "LAZY_ADMISSION_V1" && campaign.status === "READY" && <button className="btn btn-primary" disabled={busy || !campaign.orchestration_enabled} onClick={() => void runtimeAction("start")}>Start</button>}
+          {campaign.status === "RUNNING" && <button className="btn btn-secondary" disabled={busy} onClick={() => void runtimeAction("pause")}>Pause</button>}
+          {campaign.status === "PAUSED" && <button className="btn btn-primary" disabled={busy || !campaign.orchestration_enabled} onClick={() => void runtimeAction("resume")}>Resume</button>}
+          {(["READY", "RUNNING", "PAUSED", "CANCELLING"] as string[]).includes(campaign.status) && <button className="btn btn-secondary" disabled={busy} onClick={() => void runtimeAction("cancel")}>Cancel</button>}
+          {(["SUCCEEDED", "PARTIAL", "FAILED", "CANCELLED"] as string[]).includes(campaign.status) && !campaign.archived_at && <button className="btn btn-secondary" disabled={busy} onClick={() => void runtimeAction("archive")}>Archive</button>}
+        </div>
         <div className="workflow-card-grid">{[...campaign.items].sort((a, b) => a.position - b.position).map((item) => <article className="workflow-card" key={item.id}>
           <h3>#{item.position} {item.candidate_title_snapshot}</h3>
           <p>{item.target_content_type.replaceAll("_", " ")} · {item.selection_mode} selection</p>
+          <p>Admission: <StatusBadge>{item.admission_state}</StatusBadge>{item.materialization_error_code ? ` · ${item.materialization_error_code}` : ""}</p>
+          {item.mission_id && <p>Mission: <StatusBadge>{item.mission_state || "UNKNOWN"}</StatusBadge> · <Link href={`/missions/${item.mission_id}`}>Open Mission</Link></p>}
+          {item.sanitized_materialization_error && <p className="small muted">{item.sanitized_materialization_error}</p>}
           <p>Planned release: {item.planned_release_at ? new Date(item.planned_release_at).toLocaleString() : "Not set"}</p>
-          <TechnicalDetails data={{ campaign_item_id: item.id, selection_run_id: item.selection_run_id, selection_decision_id: item.selection_decision_id, topic_candidate_id: item.topic_candidate_id }} />
+          <TechnicalDetails data={{ campaign_item_id: item.id, item_key: item.item_key, selection_run_id: item.selection_run_id, selection_decision_id: item.selection_decision_id, topic_candidate_id: item.topic_candidate_id }} />
         </article>)}</div>
         <TechnicalDetails data={{ campaign_id: campaign.id, plan_checksum: campaign.plan_checksum, created_by: campaign.created_by }} />
       </PageSection>
@@ -96,7 +116,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
       <PageSection title="Mission handoff" description="Execution status MATERIALIZED records fan-out lineage; it does not represent campaign runtime success.">
         {!execution ? <>
           <Alert tone="info" title="Not yet materialized">No Missions have been created from this campaign.</Alert>
-          {channel && canMaterializeCampaign(false, Boolean(archived)) && <div className="workflow-dialog-form">
+          {campaign.orchestration_mode === "LEGACY_UPFRONT" && channel && canMaterializeCampaign(false, Boolean(archived)) && <div className="workflow-dialog-form">
             <FormField id="materialize-actor" label="Operator actor" required><input className="input" value={actor} maxLength={100} onChange={(event) => setActor(event.target.value)} /></FormField>
             <button type="button" className="btn btn-primary" disabled={busy || !actor.trim()} onClick={() => setMaterializeOpen(true)}>Materialize missions</button>
           </div>}
@@ -110,7 +130,7 @@ export default function CampaignDetailPage({ params }: { params: Promise<{ id: s
               <p>Mission: <StatusBadge>{binding.mission_state}</StatusBadge> · Mission execution: <StatusBadge>{binding.mission_execution_state}</StatusBadge></p>
               <div className="ui-inline-actions">
                 <Link className="btn btn-secondary btn-sm" href={`/missions/${binding.mission_id}`}>Open Mission</Link>
-                {canStartCampaignMission(binding) && <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => setStartBinding(binding)}>Start Mission</button>}
+                {campaign.orchestration_mode === "LEGACY_UPFRONT" && canStartCampaignMission(binding) && <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => setStartBinding(binding)}>Start Mission</button>}
               </div>
               {mode === "DEVELOPMENT" && <TechnicalDetails data={{ mission_id: binding.mission_id, mission_execution_id: binding.mission_execution_id, selection_run_id: item?.selection_run_id, selection_decision_id: item?.selection_decision_id }} />}
             </article>;

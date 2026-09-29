@@ -18,7 +18,10 @@ from omega.application.mission_service import (
     _create_mission_in_transaction,
     _plan_mission_in_transaction,
 )
-from omega.domain.content_campaign import normalize_planned_release_at
+from omega.domain.content_campaign import (
+    ContentCampaignOrchestrationMode,
+    normalize_planned_release_at,
+)
 from omega.domain.content_campaign_execution import (
     FANOUT_DEPENDENCY_COUNT,
     FANOUT_MISSION_TRIGGER_TYPE,
@@ -71,6 +74,10 @@ class ContentCampaignExecutionValidationError(ValueError):
     """Raised when execution parameters or campaign state fail validation."""
 
 
+class ContentCampaignExecutionModeConflict(ContentCampaignExecutionValidationError):
+    """Raised when lazy and legacy materialization authorities are mixed."""
+
+
 def _clamp_priority(priority: int) -> int:
     return max(FANOUT_PRIORITY_MIN, min(FANOUT_PRIORITY_MAX, priority))
 
@@ -102,9 +109,9 @@ async def _validate_historical_execution_integrity(
         raise ContentCampaignExecutionIntegrityError(
             f"Execution channel_dna_revision_id '{execution.channel_dna_revision_id}' does not match campaign '{campaign.channel_dna_revision_id}'."
         )
-    if execution.status != ContentCampaignExecutionStatus.MATERIALIZED.value:
+    if execution.status not in {status.value for status in ContentCampaignExecutionStatus}:
         raise ContentCampaignExecutionIntegrityError(
-            f"Execution status '{execution.status}' must be MATERIALIZED."
+            f"Execution status '{execution.status}' is unsupported."
         )
 
     expected_checksum = compute_fanout_policy_checksum()
@@ -132,18 +139,25 @@ async def _validate_historical_execution_integrity(
     )
     bindings = list(binding_res.scalars().all())
 
-    if len(bindings) != len(sorted_campaign_items):
+    is_legacy = campaign.orchestration_mode == ContentCampaignOrchestrationMode.LEGACY_UPFRONT.value
+    if is_legacy and len(bindings) != len(sorted_campaign_items):
         raise ContentCampaignExecutionIntegrityError(
             f"Persisted bindings count {len(bindings)} does not match campaign item count {len(sorted_campaign_items)}."
         )
 
     response_items: list[ContentCampaignItemExecutionResponse] = []
 
-    for idx, (campaign_item, binding) in enumerate(zip(sorted_campaign_items, bindings, strict=True)):
-        expected_pos = idx + 1
+    campaign_items_by_position = {item.position: item for item in sorted_campaign_items}
+    for binding in bindings:
+        campaign_item = campaign_items_by_position.get(binding.position)
+        if campaign_item is None:
+            raise ContentCampaignExecutionIntegrityError(
+                f"Binding position {binding.position} has no campaign item."
+            )
+        expected_pos = binding.position
         if binding.position != expected_pos or campaign_item.position != expected_pos:
             raise ContentCampaignExecutionIntegrityError(
-                f"Binding position mismatch at index {idx}: binding.position={binding.position}, campaign_item.position={campaign_item.position}, expected={expected_pos}."
+                f"Binding position mismatch: binding.position={binding.position}, campaign_item.position={campaign_item.position}, expected={expected_pos}."
             )
         if binding.campaign_item_id != campaign_item.id:
             raise ContentCampaignExecutionIntegrityError(
@@ -266,6 +280,7 @@ async def _validate_historical_execution_integrity(
         item_count=execution.item_count,
         materialized_by=execution.materialized_by,
         created_at=execution.created_at,
+        materialization_completed_at=execution.materialization_completed_at,
         items=response_items,
     )
 
@@ -290,7 +305,6 @@ async def get_campaign_execution(
         raise ContentCampaignNotFoundError(
             f"Campaign '{campaign_id}' not found for channel '{channel_id}'."
         )
-
     exec_res = await session.execute(
         select(ContentCampaignExecution).where(
             ContentCampaignExecution.campaign_id == campaign_id,
@@ -333,6 +347,10 @@ async def materialize_campaign(
     if not campaign:
         raise ContentCampaignNotFoundError(
             f"Campaign '{campaign_id}' not found for channel '{channel_id}'."
+        )
+    if campaign.orchestration_mode != ContentCampaignOrchestrationMode.LEGACY_UPFRONT.value:
+        raise ContentCampaignExecutionModeConflict(
+            "LAZY_ADMISSION_V1 campaigns must use the campaign start authority; legacy materialize is unavailable."
         )
 
     # 2. Check for existing materialization (replay)

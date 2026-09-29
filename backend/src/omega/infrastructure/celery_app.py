@@ -48,6 +48,11 @@ celery_app.conf.update(
             "schedule": 5.0,
             "options": {"expires": 15},
         },
+        "campaign-reconciliation": {
+            "task": "omega.campaign.reconcile",
+            "schedule": float(settings.campaign_reconciliation_interval_seconds),
+            "options": {"expires": settings.campaign_reconciliation_interval_seconds * 3},
+        },
         "schedule-dispatch-sweep": {
             "task": "omega.scheduler.dispatch_sweep",
             "schedule": 10.0,

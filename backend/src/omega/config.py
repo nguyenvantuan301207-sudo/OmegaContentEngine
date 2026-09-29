@@ -44,6 +44,16 @@ class Settings(BaseSettings):
     production_dispatch_max_generations: int = 3
     production_dispatch_recovery_enabled: bool = False
 
+    # Campaign lazy-admission runtime (P19-CB2). One gate controls growth only;
+    # reconciliation always retains terminal/cancellation convergence.
+    campaign_orchestration_enabled: bool = False
+    campaign_default_concurrency: int = 1
+    campaign_max_concurrency: int = 10
+    campaign_channel_max_active_missions: int = 1
+    campaign_reconciliation_interval_seconds: int = 10
+    campaign_reconciliation_batch_size: int = 25
+    campaign_materialization_max_attempts: int = 3
+
     # ── OMEGA-011 Publisher & Vault ──
     omega_secret_encryption_key: str | None = None
     google_client_id: str | None = None

@@ -27,7 +27,9 @@ FANOUT_DEPENDENCY_COUNT = 6
 
 
 class ContentCampaignExecutionStatus(enum.StrEnum):
+    ACTIVE = "ACTIVE"
     MATERIALIZED = "MATERIALIZED"
+    CANCELLED = "CANCELLED"
 
 
 def get_fanout_policy_payload() -> dict[str, Any]:
@@ -81,6 +83,7 @@ class ContentCampaignItemExecutionResponse(BaseModel):
     mission_state: str
     mission_execution_state: str
     created_at: datetime.datetime
+    materialization_completed_at: datetime.datetime | None = None
 
 
 class ContentCampaignExecutionResponse(BaseModel):

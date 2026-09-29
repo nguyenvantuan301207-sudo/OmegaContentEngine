@@ -17,6 +17,26 @@ from omega.domain.content_selection import ContentSelectionMode
 
 class ContentCampaignStatus(enum.StrEnum):
     READY = "READY"
+    RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
+    CANCELLING = "CANCELLING"
+    SUCCEEDED = "SUCCEEDED"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class ContentCampaignOrchestrationMode(enum.StrEnum):
+    LEGACY_UPFRONT = "LEGACY_UPFRONT"
+    LAZY_ADMISSION_V1 = "LAZY_ADMISSION_V1"
+
+
+class ContentCampaignItemAdmissionState(enum.StrEnum):
+    PENDING = "PENDING"
+    ADMITTED = "ADMITTED"
+    MATERIALIZED = "MATERIALIZED"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
 
 
 def normalize_planned_release_at(value: datetime.datetime | str | None) -> str | None:
@@ -39,6 +59,7 @@ def compute_campaign_plan_checksum(
     objective: str | None,
     priority: int,
     items: list[dict[str, Any]],
+    version: int = 1,
 ) -> str:
     """Deterministic SHA-256 plan checksum using sorted-key compact JSON.
 
@@ -52,8 +73,7 @@ def compute_campaign_plan_checksum(
             if rel_at is not None
             else None
         )
-        canonical_items.append(
-            {
+        canonical_item = {
                 "position": int(item["position"]),
                 "selection_run_id": str(item["selection_run_id"]),
                 "selection_decision_id": str(item["selection_decision_id"]),
@@ -61,7 +81,11 @@ def compute_campaign_plan_checksum(
                 "target_content_type": str(item["target_content_type"]),
                 "planned_release_at": norm_rel,
             }
-        )
+        if version == 2:
+            canonical_item["item_key"] = str(item["item_key"])
+        elif version != 1:
+            raise ValueError(f"Unsupported campaign plan checksum version: {version}")
+        canonical_items.append(canonical_item)
 
     payload = {
         "channel_id": str(channel_id),
@@ -86,6 +110,7 @@ def recompute_persisted_campaign_plan_checksum(campaign: Any) -> str:
             "topic_candidate_id": it.topic_candidate_id,
             "target_content_type": it.target_content_type,
             "planned_release_at": it.planned_release_at,
+            "item_key": getattr(it, "item_key", None),
         }
         for it in sorted_items
     ]
@@ -96,6 +121,7 @@ def recompute_persisted_campaign_plan_checksum(campaign: Any) -> str:
         objective=campaign.objective,
         priority=campaign.priority,
         items=raw_items,
+        version=getattr(campaign, "plan_checksum_version", 1),
     )
 
 
@@ -120,6 +146,7 @@ class ContentCampaignCreate(BaseModel):
     priority: int = Field(default=1, ge=1, le=100)
     idempotency_key: str = Field(min_length=1, max_length=128)
     created_by: str = Field(min_length=1, max_length=100)
+    max_concurrent_missions: int | None = Field(default=None, ge=1)
     items: list[ContentCampaignItemInput] = Field(min_length=1, max_length=50)
 
     @field_validator("title", "created_by", "idempotency_key")
@@ -161,6 +188,15 @@ class ContentCampaignItemResponse(BaseModel):
     id: UUID
     campaign_id: UUID
     position: int
+    item_key: str
+    admission_state: ContentCampaignItemAdmissionState
+    materialization_attempts: int
+    materialization_error_code: str | None
+    sanitized_materialization_error: str | None
+    admitted_at: datetime.datetime | None
+    materialized_at: datetime.datetime | None
+    mission_id: UUID | None = None
+    mission_state: str | None = None
     selection_run_id: UUID
     selection_decision_id: UUID
     topic_candidate_id: UUID
@@ -181,11 +217,41 @@ class ContentCampaignResponse(BaseModel):
     objective: str | None
     priority: int
     status: ContentCampaignStatus
+    orchestration_mode: ContentCampaignOrchestrationMode
+    plan_checksum_version: int
+    max_concurrent_missions: int | None
     idempotency_key: str
     plan_checksum: str
     item_count: int
     created_by: str
     created_at: datetime.datetime
+    started_at: datetime.datetime | None
+    paused_at: datetime.datetime | None
+    completed_at: datetime.datetime | None
+    cancelled_at: datetime.datetime | None
+    archived_at: datetime.datetime | None
+    orchestration_enabled: bool
     items: list[ContentCampaignItemResponse]
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class CampaignRuntimeAction(BaseModel):
+    actor: str = Field(min_length=1, max_length=100)
+
+    @field_validator("actor")
+    @classmethod
+    def clean_actor(cls, value: str) -> str:
+        return value.strip()
+
+
+class CampaignSummaryResponse(BaseModel):
+    total: int
+    pending: int
+    admitted: int
+    active: int
+    succeeded: int
+    failed: int
+    cancelled: int
+    completed: int
+    progress: float

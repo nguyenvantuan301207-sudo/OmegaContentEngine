@@ -7,7 +7,7 @@ import pytest
 
 from omega.application import mission_service, orchestrator
 from omega.domain.guardian import GuardianAction, GuardianCheckpoint
-from omega.domain.mission import ExecutionState, InvalidStateTransitionError, MissionState
+from omega.domain.mission import ExecutionState, MissionState
 from omega.infrastructure.models import Mission, MissionExecution
 
 
@@ -55,6 +55,7 @@ def make_mission(mission_id, state):
         metadata_={},
         guardian_epoch=1,
         created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
     )
 
 
@@ -68,7 +69,7 @@ def make_execution(mission_id, state):
 
 
 @pytest.mark.asyncio
-async def test_valid_start_commits_running_then_publishes_once(monkeypatch, mission_id):
+async def test_valid_start_commits_running_with_durable_intent(monkeypatch, mission_id):
     mission = make_mission(mission_id, MissionState.READY.value)
     execution = make_execution(mission_id, ExecutionState.PLANNED.value)
     session = MagicMock()
@@ -82,7 +83,10 @@ async def test_valid_start_commits_running_then_publishes_once(monkeypatch, miss
         committed = True
 
     session.commit = AsyncMock(side_effect=commit)
-    publish = MagicMock(side_effect=lambda *_: committed or pytest.fail("published before commit"))
+    session.flush = AsyncMock()
+    enqueue = AsyncMock(return_value=SimpleNamespace(state="PENDING"))
+    monkeypatch.setattr(mission_service.DurableDispatchService, "enqueue_async", enqueue)
+    publish = MagicMock()
     direct_evaluate = AsyncMock()
     monkeypatch.setattr(mission_service.evaluate_mission_task, "delay", publish)
     monkeypatch.setattr(orchestrator, "evaluate_mission", direct_evaluate)
@@ -93,7 +97,12 @@ async def test_valid_start_commits_running_then_publishes_once(monkeypatch, miss
     assert mission.state == MissionState.RUNNING.value
     assert execution.state == ExecutionState.RUNNING.value
     session.commit.assert_awaited_once()
-    publish.assert_called_once_with(str(mission_id), str(execution.id))
+    publish.assert_not_called()
+    assert enqueue.await_args.kwargs["purpose"] == "MISSION_START_EVALUATION"
+    assert enqueue.await_args.kwargs["args"] == [str(mission_id), str(execution.id)]
+    assert enqueue.await_args.kwargs["idempotency_key"].startswith(
+        f"mission-evaluation:{execution.id}:"
+    )
     direct_evaluate.assert_not_awaited()
 
 
@@ -148,7 +157,9 @@ async def test_valid_resume_commits_running_then_publishes_once(monkeypatch, mis
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("operation", [mission_service.start_mission, mission_service.resume_mission])
+@pytest.mark.parametrize(
+    "operation", [mission_service.start_mission, mission_service.resume_mission]
+)
 async def test_missing_mission_publishes_nothing(monkeypatch, mission_id, operation):
     session = MagicMock()
     session.execute = AsyncMock(return_value=ScalarResult(None))
@@ -161,36 +172,98 @@ async def test_missing_mission_publishes_nothing(monkeypatch, mission_id, operat
 
 
 @pytest.mark.asyncio
-async def test_invalid_start_state_publishes_nothing(monkeypatch, mission_id):
+async def test_running_start_replay_reuses_canonical_lineage(monkeypatch, mission_id):
     mission = make_mission(mission_id, MissionState.RUNNING.value)
+    execution = make_execution(mission_id, ExecutionState.RUNNING.value)
+    decision = SimpleNamespace(id=uuid4())
     session = MagicMock()
-    session.execute = AsyncMock(return_value=ScalarResult(mission))
+    session.execute = AsyncMock(
+        side_effect=[ScalarResult(mission), ScalarResult(execution), ScalarResult(decision)]
+    )
+    session.commit = AsyncMock()
+    enqueue = AsyncMock(return_value=SimpleNamespace(state="PENDING"))
+    monkeypatch.setattr(mission_service.DurableDispatchService, "enqueue_async", enqueue)
     publish = MagicMock()
     monkeypatch.setattr(mission_service.evaluate_mission_task, "delay", publish)
 
-    with pytest.raises(InvalidStateTransitionError):
-        await mission_service.start_mission(session, mission_id)
+    result = await mission_service.start_mission(session, mission_id)
 
+    assert result.state == MissionState.RUNNING
+    session.commit.assert_awaited_once()
+    assert enqueue.await_args.kwargs["idempotency_key"] == (
+        f"mission-evaluation:{execution.id}:{decision.id}"
+    )
     publish.assert_not_called()
-    session.commit.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_broker_publication_failure_propagates_after_start_commit(monkeypatch, mission_id):
+async def test_start_is_independent_of_immediate_broker_availability(monkeypatch, mission_id):
     mission = make_mission(mission_id, MissionState.READY.value)
     execution = make_execution(mission_id, ExecutionState.PLANNED.value)
     session = MagicMock()
-    session.execute = AsyncMock(side_effect=[ScalarResult(mission), ScalarResult(execution)])
+    session.execute = AsyncMock(
+        side_effect=[ScalarResult(mission), ScalarResult(execution), ScalarResult(mission)]
+    )
     session.commit = AsyncMock()
+    session.flush = AsyncMock()
+    enqueue = AsyncMock(return_value=SimpleNamespace(state="PENDING"))
+    monkeypatch.setattr(mission_service.DurableDispatchService, "enqueue_async", enqueue)
     monkeypatch.setattr(
         mission_service.evaluate_mission_task,
         "delay",
         MagicMock(side_effect=RuntimeError("broker unavailable")),
     )
 
-    with pytest.raises(RuntimeError, match="broker unavailable"):
-        await mission_service.start_mission(session, mission_id)
+    result = await mission_service.start_mission(session, mission_id)
 
     session.commit.assert_awaited_once()
+    assert result.state == MissionState.RUNNING
+    enqueue.assert_awaited_once()
     assert mission.state == MissionState.RUNNING.value
     assert mission.state != MissionState.SUCCEEDED.value
+
+
+@pytest.mark.asyncio
+async def test_start_intent_failure_rolls_back_before_commit(monkeypatch, mission_id):
+    mission = make_mission(mission_id, MissionState.READY.value)
+    execution = make_execution(mission_id, ExecutionState.PLANNED.value)
+    session = MagicMock()
+    session.execute = AsyncMock(side_effect=[ScalarResult(mission), ScalarResult(execution)])
+    session.flush = AsyncMock()
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+    monkeypatch.setattr(
+        mission_service.DurableDispatchService,
+        "enqueue_async",
+        AsyncMock(side_effect=RuntimeError("intent construction failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="intent construction failed"):
+        await mission_service.start_mission(session, mission_id)
+
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_running_start_replay_dead_letter_fails_explicitly(monkeypatch, mission_id):
+    mission = make_mission(mission_id, MissionState.RUNNING.value)
+    execution = make_execution(mission_id, ExecutionState.RUNNING.value)
+    decision = SimpleNamespace(id=uuid4())
+    session = MagicMock()
+    session.execute = AsyncMock(
+        side_effect=[ScalarResult(mission), ScalarResult(execution), ScalarResult(decision)]
+    )
+    session.commit = AsyncMock()
+    session.rollback = AsyncMock()
+    monkeypatch.setattr(
+        mission_service.DurableDispatchService,
+        "enqueue_async",
+        AsyncMock(return_value=SimpleNamespace(state="DEAD_LETTER")),
+    )
+
+    with pytest.raises(mission_service.MissionStartDeliveryError, match="DEAD_LETTER"):
+        await mission_service.start_mission(session, mission_id)
+
+    session.commit.assert_not_awaited()
+    session.rollback.assert_awaited_once()
