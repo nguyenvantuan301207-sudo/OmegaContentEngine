@@ -78,6 +78,9 @@ def channel_admission_lock_key(channel_id: UUID) -> int:
 
 
 async def _lock_channel(session: AsyncSession, channel_id: UUID) -> None:
+    # Canonical Campaign lock hierarchy: channel advisory lock -> Campaign row
+    # lock -> child/execution/Mission locks. Callers must end the transaction
+    # before beginning a new acquisition sequence in this order.
     await session.execute(
         select(func.pg_advisory_xact_lock(channel_admission_lock_key(channel_id)))
     )
@@ -98,6 +101,7 @@ async def _locked_campaign(
                 ContentCampaign.channel_id == channel_id,
             )
             .with_for_update()
+            .execution_options(populate_existing=True)
         )
     ).scalar_one_or_none()
     if campaign is None:
@@ -597,7 +601,17 @@ async def reconcile_campaign(
     session: AsyncSession, campaign: ContentCampaign
 ) -> ReconciliationResult:
     """Run safety convergence always and growth only while the master gate is enabled."""
+    # Re-read all mutable authority under the canonical lock order. The
+    # Campaign instance supplied by batch discovery is only an identifier and
+    # must not authorize lifecycle, gate, or capacity decisions.
+    channel_id = campaign.channel_id
+    campaign_id = campaign.id
+    await _lock_channel(session, channel_id)
+    campaign = await _locked_campaign(session, channel_id, campaign_id)
     if campaign.status == CampaignState.CANCELLING.value:
+        # cancel_campaign owns the same canonical acquisition sequence. End
+        # this read/lock transaction before delegating so it can revalidate.
+        await session.commit()
         await cancel_campaign(session, campaign.channel_id, campaign.id)
         return ReconciliationResult(campaigns_seen=1, cancelled=1, finalized=1)
     if campaign.status in {
@@ -609,9 +623,10 @@ async def reconcile_campaign(
         not get_settings().campaign_orchestration_enabled
         or campaign.status != CampaignState.RUNNING.value
     ):
+        # finalize_campaign intentionally retains its row lock when there is
+        # nothing to finalize. Do not leak that lock into the next batch item.
+        await session.commit()
         return ReconciliationResult(campaigns_seen=1)
-    await _lock_channel(session, campaign.channel_id)
-    campaign = await _locked_campaign(session, campaign.channel_id, campaign.id)
     admitted = list(
         (
             await session.execute(
@@ -674,7 +689,9 @@ async def reconcile_campaign(
         except Exception as exc:
             await session.rollback()
             failed += int(await persist_materialization_failure(session, campaign.id, item.id, exc))
-    await finalize_campaign(session, campaign.id)
+    if not await finalize_campaign(session, campaign.id):
+        # End the final read/lock transaction before reconcile_batch advances.
+        await session.commit()
     return ReconciliationResult(1, reserved, materialized, started, failed)
 
 

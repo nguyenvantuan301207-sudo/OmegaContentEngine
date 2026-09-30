@@ -22,6 +22,7 @@ from omega.domain.content_campaign import ContentCampaignStatus as CampaignState
 from omega.infrastructure.database import AsyncSessionLocal
 from omega.infrastructure.models import (
     ContentCampaign,
+    ContentCampaignExecution,
     ContentCampaignItem,
     ContentCampaignItemExecution,
     DecisionLog,
@@ -153,6 +154,153 @@ def _subprocess(script: str, *, enabled: bool = True, channel_cap: int = 1) -> s
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip()
+
+
+@pytest.mark.asyncio
+async def test_start_reconcile_lock_boundary_has_one_authority_without_deadlock(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Start and reconcile serialize advisory-before-row across real DB sessions."""
+    monkeypatch.setattr(runtime, "get_settings", lambda: _settings())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        channel_id, campaign_id, _ = await _create_campaign(client, item_count=1)
+
+    original_lock_channel = runtime._lock_channel
+    original_locked_campaign = runtime._locked_campaign
+    starter_before_row = asyncio.Event()
+    reconciler_attempting_advisory = asyncio.Event()
+    release_starter = asyncio.Event()
+
+    async def observed_lock_channel(session: AsyncSession, channel: uuid.UUID) -> None:
+        if asyncio.current_task().get_name() == "reconciler":
+            reconciler_attempting_advisory.set()
+        await original_lock_channel(session, channel)
+
+    async def controlled_locked_campaign(
+        session: AsyncSession, channel: uuid.UUID, campaign: uuid.UUID
+    ) -> ContentCampaign:
+        if asyncio.current_task().get_name() == "starter":
+            starter_before_row.set()
+            await asyncio.wait_for(release_starter.wait(), timeout=5)
+        return await original_locked_campaign(session, channel, campaign)
+
+    monkeypatch.setattr(runtime, "_lock_channel", observed_lock_channel)
+    monkeypatch.setattr(runtime, "_locked_campaign", controlled_locked_campaign)
+
+    async def start() -> None:
+        async with AsyncSessionLocal() as session:
+            await runtime.start_campaign(session, channel_id, campaign_id, "lock-order-test")
+
+    async def reconcile() -> None:
+        async with AsyncSessionLocal() as session:
+            campaign = await session.get(ContentCampaign, campaign_id)
+            assert campaign is not None
+            await runtime.reconcile_campaign(session, campaign)
+
+    starter = asyncio.create_task(start(), name="starter")
+    await asyncio.wait_for(starter_before_row.wait(), timeout=5)
+    reconciler = asyncio.create_task(reconcile(), name="reconciler")
+    await asyncio.wait_for(reconciler_attempting_advisory.wait(), timeout=5)
+    release_starter.set()
+    await asyncio.wait_for(asyncio.gather(starter, reconciler), timeout=10)
+
+    async with AsyncSessionLocal() as session:
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ContentCampaignExecution)
+                .where(ContentCampaignExecution.campaign_id == campaign_id)
+            )
+            == 1
+        )
+        assert await session.scalar(select(func.count()).select_from(ContentCampaignItemExecution)) == 1
+        assert await session.scalar(select(func.count()).select_from(Mission)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(DurableDispatchIntent)
+                .where(DurableDispatchIntent.purpose == "MISSION_START_EVALUATION")
+            )
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+async def test_two_reconcilers_serialize_without_duplicate_materialization(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime, "get_settings", lambda: _settings())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        channel_id, campaign_id, _ = await _create_campaign(client, item_count=2)
+    await _start(channel_id, campaign_id)
+
+    release = asyncio.Event()
+    ready = 0
+    ready_lock = asyncio.Lock()
+
+    async def reconcile() -> None:
+        nonlocal ready
+        async with AsyncSessionLocal() as session:
+            campaign = await session.get(ContentCampaign, campaign_id)
+            assert campaign is not None
+            async with ready_lock:
+                ready += 1
+                if ready == 2:
+                    release.set()
+            await release.wait()
+            await runtime.reconcile_campaign(session, campaign)
+
+    await asyncio.wait_for(asyncio.gather(reconcile(), reconcile()), timeout=10)
+
+    async with AsyncSessionLocal() as session:
+        assert await session.scalar(select(func.count()).select_from(ContentCampaignItemExecution)) == 1
+        assert await session.scalar(select(func.count()).select_from(Mission)) == 1
+        assert (
+            await session.scalar(
+                select(func.count())
+                .select_from(ContentCampaignExecution)
+                .where(ContentCampaignExecution.campaign_id == campaign_id)
+            )
+            == 1
+        )
+        campaign = await session.get(ContentCampaign, campaign_id)
+        assert campaign is not None
+        campaign_active, _ = await runtime._active_counts(session, campaign)
+        assert campaign_active == 1
+
+
+@pytest.mark.asyncio
+async def test_reconcile_and_finalize_complete_without_deadlock(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(runtime, "get_settings", lambda: _settings())
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        channel_id, campaign_id, _ = await _create_campaign(client, item_count=1)
+    await _start(channel_id, campaign_id)
+    async with AsyncSessionLocal() as session:
+        campaign = await session.get(ContentCampaign, campaign_id)
+        assert campaign is not None
+        await runtime.reconcile_campaign(session, campaign)
+        await session.execute(update(Mission).values(state="FAILED"))
+        await session.commit()
+
+    async def reconcile() -> None:
+        async with AsyncSessionLocal() as session:
+            campaign = await session.get(ContentCampaign, campaign_id)
+            assert campaign is not None
+            await runtime.reconcile_campaign(session, campaign)
+
+    async def finalize() -> None:
+        async with AsyncSessionLocal() as session:
+            await runtime.finalize_campaign(session, campaign_id)
+
+    await asyncio.wait_for(asyncio.gather(reconcile(), finalize()), timeout=10)
+
+    async with AsyncSessionLocal() as session:
+        campaign = await session.get(ContentCampaign, campaign_id)
+        assert campaign is not None and campaign.status == CampaignState.FAILED.value
+        assert await session.scalar(select(func.count()).select_from(ContentCampaignItemExecution)) == 1
+        assert await session.scalar(select(func.count()).select_from(Mission)) == 1
 
 
 @pytest.mark.asyncio
