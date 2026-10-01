@@ -431,7 +431,7 @@ async def admit_schedule_occurrence(
 
     # 3. Reject LEGACY_UPFRONT campaigns
     if campaign.orchestration_mode != Mode.LAZY_ADMISSION_V1.value:
-        return None, f"INVALID_ORCHESTRATION_MODE_{campaign.orchestration_mode}" 
+        return None, f"INVALID_ORCHESTRATION_MODE_{campaign.orchestration_mode}"
 
     # 4. Check status
     if campaign.status != CampaignState.RUNNING.value:

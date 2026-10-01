@@ -2346,4 +2346,3 @@ def recurring_reconcile_sweep_task() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Recurring occurrence reconciliation sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "error": str(exc), "recovered": 0, "skipped": 0, "failed": 0}
-

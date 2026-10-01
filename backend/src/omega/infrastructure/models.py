@@ -6073,4 +6073,3 @@ class RecurringScheduleCampaignBinding(Base):
 
     def __repr__(self) -> str:
         return f"<RecurringScheduleCampaignBinding occurrence={self.occurrence_id} item={self.campaign_item_id}>"
-

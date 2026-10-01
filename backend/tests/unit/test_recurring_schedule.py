@@ -493,4 +493,3 @@ def test_campaign_admission_reason_taxonomy_classification() -> None:
     status, err = RecurringSweepService.classify_campaign_admission_outcome("UNKNOWN_INFRA_ERROR")
     assert status == RecurringOccurrenceStatus.FAILED
     assert err == "Unexpected campaign admission reason: UNKNOWN_INFRA_ERROR"
-

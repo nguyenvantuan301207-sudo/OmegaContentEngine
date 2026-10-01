@@ -148,7 +148,7 @@ async def run_canary():
     # ------------------------------------------------------------------
     print("\n--- 1. GATE-OFF CANARY ---")
     gate_off_result = recurring_schedule_sweep_task()
-    assert gate_off_result["status"] == "disabled" 
+    assert gate_off_result["status"] == "disabled"
     print(f"[PASS] Gate-OFF tick returns canonical disabled result: {gate_off_result}")
 
     # Create due schedule while gate is OFF
@@ -315,7 +315,7 @@ async def run_canary():
     async with AsyncSessionLocal() as session:
         occ = (await session.execute(select(RecurringScheduleOccurrence).where(RecurringScheduleOccurrence.id == mission_occ_id))).scalar_one()
         ver = (await session.execute(select(RecurringScheduleVersion).where(RecurringScheduleVersion.id == mission_ver_id))).scalar_one()
-        
+
         m_obj, reason = await MissionScheduleTargetAdapter.dispatch(session, occ, ver)
         assert m_obj is not None
         m_id = m_obj.id
@@ -340,7 +340,7 @@ async def run_canary():
     async with AsyncSessionLocal() as session:
         occ = (await session.execute(select(RecurringScheduleOccurrence).where(RecurringScheduleOccurrence.id == mission_occ_id))).scalar_one()
         ver = (await session.execute(select(RecurringScheduleVersion).where(RecurringScheduleVersion.id == mission_ver_id))).scalar_one()
-        
+
         m_obj_2, reason_2 = await MissionScheduleTargetAdapter.dispatch(session, occ, ver)
         assert m_obj_2.id == m_id
         assert reason_2 == "ALREADY_BOUND"
@@ -404,7 +404,7 @@ async def run_canary():
     async with AsyncSessionLocal() as session:
         occ = (await session.execute(select(RecurringScheduleOccurrence).where(RecurringScheduleOccurrence.id == camp_occ_id))).scalar_one()
         ver = (await session.execute(select(RecurringScheduleVersion).where(RecurringScheduleVersion.id == camp_ver_id))).scalar_one()
-        
+
         admitted_item, reason = await CampaignScheduleTargetAdapter.dispatch(session, occ, ver)
         assert admitted_item is not None
         assert reason in ("ADMITTED", "DISPATCHED")
