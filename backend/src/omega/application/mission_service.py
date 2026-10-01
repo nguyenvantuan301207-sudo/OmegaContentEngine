@@ -626,6 +626,15 @@ async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
     if not mission:
         return None
 
+    if mission.state == MissionState.RUNNING.value:
+        try:
+            await _canonical_start_lineage(session, mission)
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        return MissionResponse.model_validate(mission)
+
     try:
         await _start_mission_in_transaction(session, mission)
         await session.commit()

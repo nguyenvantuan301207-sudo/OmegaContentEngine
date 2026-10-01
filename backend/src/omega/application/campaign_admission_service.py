@@ -442,41 +442,55 @@ async def admit_schedule_occurrence(
     if item is None:
         return None, reason
 
-    # 6. Materialize item
-    binding = await materialize_admitted_item(session, campaign.id, item.id)
-    if binding is None:
-        return None, "MATERIALIZATION_FAILED"
+    try:
+        # 6. Materialize item in-transaction without commit
+        binding, mission = await _materialize_admitted_item_in_transaction(session, campaign.id, item.id)
+        if binding is None or mission is None:
+            await session.rollback()
+            return None, "MATERIALIZATION_FAILED"
 
-    # 7. Start mission
-    await start_mission(session, binding.mission_id)
+        # 7. Start mission in-transaction without commit
+        from omega.application.mission_service import _start_mission_in_transaction
+        await _start_mission_in_transaction(session, mission, actor="CAMPAIGN_SCHEDULER")
 
-    # 8. Record atomic schedule campaign binding
-    campaign_binding = RecurringScheduleCampaignBinding(
-        occurrence_id=occurrence_id,
-        campaign_id=campaign.id,
-        campaign_item_id=item.id,
-    )
-    session.add(campaign_binding)
-
-    # 9. Update occurrence status
-    occ = (
-        await session.execute(
-            select(RecurringScheduleOccurrence)
-            .where(RecurringScheduleOccurrence.id == occurrence_id)
-            .with_for_update()
+        # 8. Record atomic schedule campaign binding
+        campaign_binding = RecurringScheduleCampaignBinding(
+            occurrence_id=occurrence_id,
+            campaign_id=campaign.id,
+            campaign_item_id=item.id,
         )
-    ).scalar_one_or_none()
-    if occ is not None:
-        occ.status = RecurringOccurrenceStatus.DISPATCHED.value
-        occ.downstream_target_id = item.id
+        session.add(campaign_binding)
 
-    await session.commit()
-    return item, "ADMITTED" 
+        # 9. Update occurrence status
+        occ = (
+            await session.execute(
+                select(RecurringScheduleOccurrence)
+                .where(RecurringScheduleOccurrence.id == occurrence_id)
+                .with_for_update()
+            )
+        ).scalar_one_or_none()
+        if occ is not None:
+            occ.status = RecurringOccurrenceStatus.DISPATCHED.value
+            occ.downstream_target_id = item.id
+
+        # 10. Single atomic commit for reservation + materialization + mission start + schedule binding + occurrence DISPATCHED
+        await session.commit()
+        return item, "ADMITTED"
+    except Exception as exc:
+        await session.rollback()
+        logger.error(
+            "Failed atomic admit_schedule_occurrence",
+            occurrence_id=str(occurrence_id),
+            campaign_id=str(campaign.id),
+            error=str(exc),
+        )
+        raise
 
 
-async def materialize_admitted_item(
+async def _materialize_admitted_item_in_transaction(
     session: AsyncSession, campaign_id: UUID, item_id: UUID
-) -> ContentCampaignItemExecution | None:
+) -> tuple[ContentCampaignItemExecution | None, Mission | None]:
+    """Materialize an admitted item in an existing transaction without committing."""
     campaign = (
         await session.execute(
             select(ContentCampaign).where(ContentCampaign.id == campaign_id).with_for_update()
@@ -487,14 +501,11 @@ async def materialize_admitted_item(
             select(ContentCampaignItem).where(ContentCampaignItem.id == item_id).with_for_update()
         )
     ).scalar_one()
-    if item.admission_state != ItemState.ADMITTED.value:
-        await session.rollback()
-        return False
     if (
         campaign.status != CampaignState.RUNNING.value
         or item.admission_state != ItemState.ADMITTED.value
     ):
-        return None
+        return None, None
     existing = (
         await session.execute(
             select(ContentCampaignItemExecution).where(
@@ -504,7 +515,12 @@ async def materialize_admitted_item(
     ).scalar_one_or_none()
     if existing:
         item.admission_state = ItemState.MATERIALIZED.value
-        return existing
+        existing_mission = (
+            await session.execute(
+                select(Mission).where(Mission.id == existing.mission_id).with_for_update()
+            )
+        ).scalar_one_or_none()
+        return existing, existing_mission
     execution = (
         await session.execute(
             select(ContentCampaignExecution).where(
@@ -568,8 +584,23 @@ async def materialize_admitted_item(
     item.admission_state = ItemState.MATERIALIZED.value
     item.materialized_at = await _db_now(session)
     item.next_materialization_attempt_at = None
-    await session.commit()
-    return binding
+    await session.flush()
+    return binding, mission
+
+
+async def materialize_admitted_item(
+    session: AsyncSession, campaign_id: UUID, item_id: UUID
+) -> ContentCampaignItemExecution | None:
+    try:
+        binding, _ = await _materialize_admitted_item_in_transaction(session, campaign_id, item_id)
+        if binding is None:
+            await session.rollback()
+            return None
+        await session.commit()
+        return binding
+    except Exception:
+        await session.rollback()
+        raise
 
 
 def _transient_db_error(exc: BaseException) -> bool:
