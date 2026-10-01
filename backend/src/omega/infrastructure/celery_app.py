@@ -128,6 +128,16 @@ celery_app.conf.update(
             "schedule": 60.0,
             "options": {"expires": 120},
         },
+        "recurring-schedule-sweep": {
+            "task": "omega.scheduler.recurring_schedule_sweep",
+            "schedule": float(settings.scheduler_poll_interval_seconds),
+            "options": {"expires": settings.scheduler_poll_interval_seconds * 2},
+        },
+        "recurring-stale-reconciliation-sweep": {
+            "task": "omega.scheduler.recurring_reconcile_sweep",
+            "schedule": 60.0,
+            "options": {"expires": 120},
+        },
     },
 )
 

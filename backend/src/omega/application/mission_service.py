@@ -549,21 +549,18 @@ async def plan_mission(session: AsyncSession, mission_id: UUID) -> MissionRespon
     return MissionResponse.model_validate(mission)
 
 
-async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
-    """Atomically start a planned mission and persist its durable orchestrator wakeup."""
-    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
-    mission = res.scalar_one_or_none()
-    if not mission:
-        return None
-
+async def _start_mission_in_transaction(
+    session: AsyncSession,
+    mission: Mission,
+    actor: str = Actor.USER.value,
+) -> tuple[Mission, MissionExecution, DurableDispatchIntent]:
+    """Start a planned mission in an existing transaction without committing."""
     if mission.state == MissionState.RUNNING.value:
-        try:
-            await _canonical_start_lineage(session, mission)
-            await session.commit()
-        except Exception:
-            await session.rollback()
-            raise
-        return MissionResponse.model_validate(mission)
+        res = await _canonical_start_lineage(session, mission)
+        if res is None:
+            raise ValueError("RUNNING mission has no canonical start lineage.")
+        return mission, res[0], res[2]
+
     validate_mission_transition(MissionState(mission.state), MissionState.RUNNING)
 
     # Channel check: verify linked channel is not archived
@@ -604,30 +601,39 @@ async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionRespo
         execution_id=execution.id if execution else None,
         decision_type=DecisionType.MISSION_START.value,
         decision="Start mission execution",
-        reason="Mission initiated by user, activating planned execution DAG",
-        actor=Actor.USER.value,
+        reason="Mission initiated, activating planned execution DAG",
+        actor=actor,
     )
-    try:
-        session.add(decision)
-        await session.flush()
-        await DurableDispatchService.enqueue_async(
-            session,
-            idempotency_key=f"mission-evaluation:{execution.id}:{decision.id}",
-            task_name="omega.orchestrator.evaluate",
-            args=[str(mission.id), str(execution.id)],
-            purpose=MISSION_START_PURPOSE,
-            mission_id=mission.id,
-            mission_execution_id=execution.id,
-            mission_task_id=None,
-        )
+    session.add(decision)
+    await session.flush()
+    intent = await DurableDispatchService.enqueue_async(
+        session,
+        idempotency_key=f"mission-evaluation:{execution.id}:{decision.id}",
+        task_name="omega.orchestrator.evaluate",
+        args=[str(mission.id), str(execution.id)],
+        purpose=MISSION_START_PURPOSE,
+        mission_id=mission.id,
+        mission_execution_id=execution.id,
+        mission_task_id=None,
+    )
+    return mission, execution, intent
 
+
+async def start_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
+    """Atomically start a planned mission and persist its durable orchestrator wakeup."""
+    res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
+    mission = res.scalar_one_or_none()
+    if not mission:
+        return None
+
+    try:
+        await _start_mission_in_transaction(session, mission)
         await session.commit()
     except Exception:
         await session.rollback()
         raise
     logger.info("Mission started", mission_id=str(mission.id))
 
-    # DurableDispatchService relay owns broker publication after commit.
     fresh_res = await session.execute(select(Mission).where(Mission.id == mission_id))
     return MissionResponse.model_validate(fresh_res.scalar_one())
 

@@ -332,21 +332,20 @@ async def _active_counts(session: AsyncSession, campaign: ContentCampaign) -> tu
     return int(campaign_active), int(channel_active)
 
 
-async def reserve_one(
-    session: AsyncSession, campaign: ContentCampaign
-) -> ContentCampaignItem | None:
+async def _reserve_one_in_transaction(
+    session: AsyncSession, campaign: ContentCampaign, bypass_gate: bool = False
+) -> tuple[ContentCampaignItem | None, str]:
     settings = get_settings()
-    if (
-        not settings.campaign_orchestration_enabled
-        or campaign.status != CampaignState.RUNNING.value
-    ):
-        return None
+    if not bypass_gate and not settings.campaign_orchestration_enabled:
+        return None, "GATE_DISABLED"
+    if campaign.status != CampaignState.RUNNING.value:
+        return None, f"INVALID_STATUS_{campaign.status}"
     campaign_active, channel_active = await _active_counts(session, campaign)
     if (
         campaign_active >= int(campaign.max_concurrent_missions or 0)
         or channel_active >= settings.campaign_channel_max_active_missions
     ):
-        return None
+        return None, "CAPACITY_FULL"
     item = (
         await session.execute(
             select(ContentCampaignItem)
@@ -360,14 +359,119 @@ async def reserve_one(
         )
     ).scalar_one_or_none()
     if item is None:
-        return None
+        return None, "NO_PENDING_ITEMS"
     now = await _db_now(session)
     item.admission_state = ItemState.ADMITTED.value
     item.admitted_at = now
     item.next_materialization_attempt_at = None
     campaign.last_admitted_at = now
-    await session.commit()
+    return item, "RESERVED"
+
+
+async def reserve_one(
+    session: AsyncSession, campaign: ContentCampaign
+) -> ContentCampaignItem | None:
+    item, _ = await _reserve_one_in_transaction(session, campaign)
+    if item is not None:
+        await session.commit()
     return item
+
+
+async def admit_schedule_occurrence(
+    session: AsyncSession,
+    channel_id: UUID,
+    campaign_id: UUID,
+    occurrence_id: UUID,
+) -> tuple[ContentCampaignItem | None, str]:
+    """Atomically admit and materialize a Campaign item for a recurring schedule occurrence.
+
+    Preserves canonical lock hierarchy:
+    CHANNEL ADVISORY LOCK -> CAMPAIGN ROW LOCK -> ITEM SKIP LOCKED -> ITEM MATERIALIZATION -> BINDING.
+    Commits atomically in a single caller transaction.
+    """
+    from omega.infrastructure.models import (
+        RecurringScheduleCampaignBinding,
+        RecurringScheduleOccurrence,
+    )
+    from omega.domain.recurring_schedule import RecurringOccurrenceStatus
+
+    # 1. Check existing binding for this occurrence
+    existing_binding = (
+        await session.execute(
+            select(RecurringScheduleCampaignBinding).where(
+                RecurringScheduleCampaignBinding.occurrence_id == occurrence_id
+            )
+        )
+    ).scalar_one_or_none()
+    if existing_binding is not None:
+        item = (
+            await session.execute(
+                select(ContentCampaignItem).where(
+                    ContentCampaignItem.id == existing_binding.campaign_item_id
+                )
+            )
+        ).scalar_one_or_none()
+        return item, "ALREADY_BOUND"
+
+    # 2. Acquire canonical locks: channel advisory lock -> campaign row lock
+    await _lock_channel(session, channel_id)
+    campaign = (
+        await session.execute(
+            select(ContentCampaign)
+            .where(
+                ContentCampaign.id == campaign_id,
+                ContentCampaign.channel_id == channel_id,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if campaign is None:
+        return None, "CAMPAIGN_NOT_FOUND"
+
+    # 3. Reject LEGACY_UPFRONT campaigns
+    if campaign.orchestration_mode != Mode.LAZY_ADMISSION_V1.value:
+        return None, f"INVALID_ORCHESTRATION_MODE_{campaign.orchestration_mode}" 
+
+    # 4. Check status
+    if campaign.status != CampaignState.RUNNING.value:
+        return None, f"CAMPAIGN_NOT_RUNNING_{campaign.status}"
+
+    # 5. Check capacity and reserve next item
+    item, reason = await _reserve_one_in_transaction(session, campaign, bypass_gate=True)
+    if item is None:
+        return None, reason
+
+    # 6. Materialize item
+    binding = await materialize_admitted_item(session, campaign.id, item.id)
+    if binding is None:
+        return None, "MATERIALIZATION_FAILED"
+
+    # 7. Start mission
+    await start_mission(session, binding.mission_id)
+
+    # 8. Record atomic schedule campaign binding
+    campaign_binding = RecurringScheduleCampaignBinding(
+        occurrence_id=occurrence_id,
+        campaign_id=campaign.id,
+        campaign_item_id=item.id,
+    )
+    session.add(campaign_binding)
+
+    # 9. Update occurrence status
+    occ = (
+        await session.execute(
+            select(RecurringScheduleOccurrence)
+            .where(RecurringScheduleOccurrence.id == occurrence_id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    if occ is not None:
+        occ.status = RecurringOccurrenceStatus.DISPATCHED.value
+        occ.downstream_target_id = item.id
+
+    await session.commit()
+    return item, "ADMITTED" 
 
 
 async def materialize_admitted_item(

@@ -10,6 +10,12 @@ from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
+# ── P20-A Recurring Scheduler Hard Bounds ──
+# HARD_SCHEMA_SAFETY_BOUND: The database migration 025 enforces chk_interval_minimum >= 60.
+SCHEMA_MINIMUM_INTERVAL_SECONDS: int = 60
+# HARD_SCHEMA_SAFETY_BOUND: The database migration 025 enforces chk_max_catch_up_range <= 10.
+SCHEMA_MAX_CATCH_UP_OCCURRENCES_CAP: int = 10
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -71,6 +77,42 @@ class Settings(BaseSettings):
     local_tts_voice: str = "af_heart"
     local_tts_speed: float = 1.0
     local_tts_model_dir: str = "/app/models/tts/kokoro"
+
+    # ── P20-A Recurring Scheduler Hard Bounds & Configurable Defaults ──
+    # HARD_SCHEMA_SAFETY_BOUND: The database migration 025 enforces chk_interval_minimum >= 60.
+    SCHEMA_MINIMUM_INTERVAL_SECONDS: int = 60
+    # HARD_SCHEMA_SAFETY_BOUND: The database migration 025 enforces chk_max_catch_up_range <= 10.
+    SCHEMA_MAX_CATCH_UP_OCCURRENCES_CAP: int = 10
+
+    # CONFIGURABLE_RUNTIME_DEFAULT settings
+    recurring_scheduler_enabled: bool = False
+    scheduler_poll_interval_seconds: int = 15
+    scheduler_sweep_batch_size: int = 50
+    scheduler_minimum_interval_seconds: int = 60
+    scheduler_default_max_catch_up: int = 3
+    scheduler_pending_timeout_seconds: int = 120
+    scheduler_dispatch_timeout_seconds: int = 60
+    scheduler_max_dispatch_attempts: int = 3
+    scheduler_wait_timeout_seconds: int = 300
+    scheduler_max_payload_bytes: int = 65536
+
+    @field_validator("scheduler_minimum_interval_seconds")
+    @classmethod
+    def validate_scheduler_minimum_interval(cls, v: int) -> int:
+        if v < 60:
+            raise ValueError(
+                f"scheduler_minimum_interval_seconds ({v}) cannot be less than HARD_SCHEMA_SAFETY_BOUND (60)"
+            )
+        return v
+
+    @field_validator("scheduler_default_max_catch_up")
+    @classmethod
+    def validate_scheduler_default_max_catch_up(cls, v: int) -> int:
+        if v < 1 or v > 10:
+            raise ValueError(
+                f"scheduler_default_max_catch_up ({v}) must be between 1 and HARD_SCHEMA_SAFETY_BOUND (10)"
+            )
+        return v
 
     @field_validator("cors_origins", mode="before")
     @classmethod

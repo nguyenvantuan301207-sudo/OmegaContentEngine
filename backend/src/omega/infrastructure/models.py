@@ -21,6 +21,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     Numeric,
@@ -31,7 +32,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -5800,3 +5801,276 @@ class AutonomyLoopLatestPointer(Base):
 
     def __repr__(self) -> str:
         return f"<AutonomyLoopLatestPointer loop={self.loop_id} state={self.operational_state}>"
+
+
+from sqlalchemy.dialects.postgresql import ENUM as PG_ENUM
+from omega.domain.recurring_schedule import (
+    CatchUpPolicy,
+    DSTAmbiguousStrategy,
+    DSTNonexistentStrategy,
+    RecurringOccurrenceStatus,
+    RecurringScheduleStatus,
+    RecurringScheduleTargetType,
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# OMEGA-020 Durable Recurring Scheduler Models (P20-A)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class RecurringSchedule(Base):
+    """Authoritative recurring schedule entity and operational lifecycle."""
+
+    __tablename__ = "recurring_schedules"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(
+        PG_ENUM(RecurringScheduleStatus, name="recurring_schedule_status", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=RecurringScheduleStatus.DRAFT.value,
+        index=True,
+    )
+    current_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    start_time: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    end_time: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_run_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    next_run_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+        onupdate=func.clock_timestamp(),
+    )
+
+    current_version: Mapped[RecurringScheduleVersion | None] = relationship(
+        "RecurringScheduleVersion",
+        primaryjoin="foreign(RecurringSchedule.current_version_id) == RecurringScheduleVersion.id",
+        post_update=True,
+    )
+    versions: Mapped[list[RecurringScheduleVersion]] = relationship(
+        "RecurringScheduleVersion",
+        primaryjoin="RecurringSchedule.id == RecurringScheduleVersion.schedule_id",
+        foreign_keys="[RecurringScheduleVersion.schedule_id]",
+        back_populates="schedule",
+        cascade="all, delete-orphan",
+    )
+    occurrences: Mapped[list[RecurringScheduleOccurrence]] = relationship(
+        "RecurringScheduleOccurrence",
+        back_populates="schedule",
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["id", "current_version_id"],
+            ["recurring_schedule_versions.schedule_id", "recurring_schedule_versions.id"],
+            name="fk_recurring_schedules_current_version",
+            deferrable=True,
+            initially="DEFERRED",
+        ),
+        CheckConstraint("end_time IS NULL OR end_time > start_time", name="chk_schedule_end_after_start"),
+        CheckConstraint(
+            "status != 'ACTIVE' OR (current_version_id IS NOT NULL AND next_run_at IS NOT NULL)",
+            name="chk_schedule_active_executable",
+        ),
+        CheckConstraint("status != 'DRAFT' OR next_run_at IS NULL", name="chk_schedule_draft_no_run"),
+        CheckConstraint(
+            "status NOT IN ('COMPLETED', 'CANCELLED', 'ARCHIVED') OR next_run_at IS NULL",
+            name="chk_schedule_terminal_no_run",
+        ),
+        Index("ix_recurring_schedules_active_due", "status", "next_run_at", postgresql_where=text("status = 'ACTIVE'")),
+    )
+
+    def __repr__(self) -> str:
+        return f"<RecurringSchedule id={self.id} name={self.name!r} status={self.status}>"
+
+
+class RecurringScheduleVersion(Base):
+    """Immutable definition snapshot for a recurring schedule."""
+
+    __tablename__ = "recurring_schedule_versions"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    schedule_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("recurring_schedules.id", ondelete="CASCADE"), nullable=False
+    )
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    cron_expression: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    timezone: Mapped[str] = mapped_column(String(64), nullable=False, default="UTC")
+    dst_ambiguous_strategy: Mapped[str] = mapped_column(
+        PG_ENUM(DSTAmbiguousStrategy, name="dst_ambiguous_enum", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=DSTAmbiguousStrategy.FIRST.value,
+    )
+    dst_nonexistent_strategy: Mapped[str] = mapped_column(
+        PG_ENUM(DSTNonexistentStrategy, name="dst_nonexistent_enum", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=DSTNonexistentStrategy.NEXT_VALID.value,
+    )
+    catch_up_policy: Mapped[str] = mapped_column(
+        PG_ENUM(CatchUpPolicy, name="catch_up_policy_enum", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=CatchUpPolicy.SKIP_MISSED.value,
+    )
+    max_catch_up_occurrences: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    target_type: Mapped[str] = mapped_column(
+        PG_ENUM(RecurringScheduleTargetType, name="recurring_schedule_target_type", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+    )
+    target_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    payload_template: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+    schedule: Mapped[RecurringSchedule] = relationship(
+        "RecurringSchedule",
+        primaryjoin="RecurringScheduleVersion.schedule_id == RecurringSchedule.id",
+        foreign_keys="[RecurringScheduleVersion.schedule_id]",
+        back_populates="versions",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("schedule_id", "version_number", name="uq_schedule_version_number"),
+        UniqueConstraint("schedule_id", "id", name="uq_schedule_versions_identity"),
+        CheckConstraint("version_number >= 1", name="chk_version_number_positive"),
+        CheckConstraint(
+            "(cron_expression IS NOT NULL AND interval_seconds IS NULL) OR "
+            "(cron_expression IS NULL AND interval_seconds IS NOT NULL)",
+            name="chk_recurrence_rule",
+        ),
+        CheckConstraint("interval_seconds IS NULL OR interval_seconds >= 60", name="chk_interval_minimum"),
+        CheckConstraint(
+            "max_catch_up_occurrences >= 1 AND max_catch_up_occurrences <= 10",
+            name="chk_max_catch_up_range",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<RecurringScheduleVersion id={self.id} schedule_id={self.schedule_id} v={self.version_number}>"
+
+
+class RecurringScheduleOccurrence(Base):
+    """Authoritative logical occurrence ledger."""
+
+    __tablename__ = "recurring_schedule_occurrences"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    schedule_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("recurring_schedules.id", ondelete="RESTRICT"), nullable=False
+    )
+    schedule_version_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    occurrence_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[str] = mapped_column(
+        PG_ENUM(RecurringOccurrenceStatus, name="recurring_occurrence_status", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+        default=RecurringOccurrenceStatus.PENDING.value,
+        index=True,
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    downstream_target_type: Mapped[str] = mapped_column(
+        PG_ENUM(RecurringScheduleTargetType, name="recurring_schedule_target_type", create_type=False, values_callable=lambda x: [e.value for e in x]),
+        nullable=False,
+    )
+    downstream_target_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_attempt_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    wait_deadline_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+        onupdate=func.clock_timestamp(),
+    )
+
+    schedule: Mapped[RecurringSchedule] = relationship("RecurringSchedule", back_populates="occurrences")
+
+    __table_args__ = (
+        UniqueConstraint("schedule_id", "occurrence_at", name="uq_recurring_occurrence_schedule_time"),
+        UniqueConstraint("idempotency_key", name="uq_recurring_occurrence_idempotency_key"),
+        CheckConstraint("attempt_count >= 0", name="chk_attempt_count_positive"),
+        ForeignKeyConstraint(
+            ["schedule_id", "schedule_version_id"],
+            ["recurring_schedule_versions.schedule_id", "recurring_schedule_versions.id"],
+            name="fk_recurring_occurrences_version",
+            ondelete="RESTRICT",
+        ),
+        Index(
+            "ix_recurring_occurrences_pending",
+            "status",
+            "created_at",
+            postgresql_where=text("status IN ('PENDING', 'WAITING', 'DISPATCHING')"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<RecurringScheduleOccurrence id={self.id} time={self.occurrence_at} status={self.status}>"
+
+
+class RecurringScheduleMissionBinding(Base):
+    """Downstream atomic idempotency binding for Standalone Mission executions."""
+
+    __tablename__ = "recurring_schedule_mission_bindings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    occurrence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("recurring_schedule_occurrences.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    mission_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("missions.id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+    occurrence: Mapped[RecurringScheduleOccurrence] = relationship("RecurringScheduleOccurrence")
+    mission: Mapped[Mission] = relationship("Mission")
+
+    def __repr__(self) -> str:
+        return f"<RecurringScheduleMissionBinding occurrence={self.occurrence_id} mission={self.mission_id}>"
+
+
+class RecurringScheduleCampaignBinding(Base):
+    """Downstream atomic idempotency binding for Campaign lazy item admissions."""
+
+    __tablename__ = "recurring_schedule_campaign_bindings"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    occurrence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("recurring_schedule_occurrences.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    campaign_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("content_campaigns.id", ondelete="RESTRICT"), nullable=False
+    )
+    campaign_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_campaign_items.id", ondelete="RESTRICT"),
+        nullable=False,
+        unique=True,
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+
+    occurrence: Mapped[RecurringScheduleOccurrence] = relationship("RecurringScheduleOccurrence")
+    campaign: Mapped[ContentCampaign] = relationship("ContentCampaign")
+    campaign_item: Mapped[ContentCampaignItem] = relationship("ContentCampaignItem")
+
+    def __repr__(self) -> str:
+        return f"<RecurringScheduleCampaignBinding occurrence={self.occurrence_id} item={self.campaign_item_id}>"
+

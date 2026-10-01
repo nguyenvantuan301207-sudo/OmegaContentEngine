@@ -2299,3 +2299,51 @@ def production_dispatch_stall_reconciliation_task() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Production dispatch stall sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "candidates": 0, "redispatched": 0, "exhausted": 0, "skipped": 0}
+
+@celery_app.task(name="omega.scheduler.recurring_schedule_sweep")
+def recurring_schedule_sweep_task() -> dict[str, Any]:
+    """Evaluate due recurring schedules and dispatch occurrences."""
+    from omega.config import get_settings
+
+    settings = get_settings()
+    if not settings.recurring_scheduler_enabled:
+        return {"status": "disabled", "materialized": 0, "dispatched": 0}
+
+    import asyncio
+    from omega.application.scheduler.recurring_sweep_service import RecurringSweepService
+    from omega.infrastructure.database import AsyncWorkerSessionLocal
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncWorkerSessionLocal() as session:
+            return await RecurringSweepService.execute_due_sweep(session)
+
+    try:
+        return asyncio.run(_run())
+    except Exception as exc:
+        logger.error("Recurring schedule sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "error": str(exc), "materialized": 0, "dispatched": 0}
+
+
+@celery_app.task(name="omega.scheduler.recurring_reconcile_sweep")
+def recurring_reconcile_sweep_task() -> dict[str, Any]:
+    """Reconcile stale recurring schedule occurrences."""
+    from omega.config import get_settings
+
+    settings = get_settings()
+    if not settings.recurring_scheduler_enabled:
+        return {"status": "disabled", "recovered": 0, "skipped": 0, "failed": 0}
+
+    import asyncio
+    from omega.application.scheduler.recurring_sweep_service import RecurringSweepService
+    from omega.infrastructure.database import AsyncWorkerSessionLocal
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncWorkerSessionLocal() as session:
+            return await RecurringSweepService.reconcile_stale_occurrences(session)
+
+    try:
+        return asyncio.run(_run())
+    except Exception as exc:
+        logger.error("Recurring occurrence reconciliation sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "error": str(exc), "recovered": 0, "skipped": 0, "failed": 0}
+
