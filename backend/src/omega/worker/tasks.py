@@ -2346,3 +2346,36 @@ def recurring_reconcile_sweep_task() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Recurring occurrence reconciliation sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "error": str(exc), "recovered": 0, "skipped": 0, "failed": 0}
+
+
+@celery_app.task(name="omega.analytics.pipeline_rollup_sweep")
+def pipeline_rollup_sweep_task() -> dict[str, Any]:
+    """Execute periodic lookback rollups for pipeline analytics."""
+    from omega.config import get_settings
+
+    settings = get_settings()
+    if not settings.analytics_rollup_enabled:
+        return {"status": "disabled", "reason": "ANALYTICS_ROLLUP_ENABLED=false"}
+
+    import asyncio
+    from omega.application.analytics.rollup_service import RollupService
+    from omega.application.analytics.schema_capability import check_analytics_schema_capability
+    from omega.infrastructure.database import AsyncWorkerSessionLocal
+
+    async def _run() -> dict[str, Any]:
+        async with AsyncWorkerSessionLocal() as session:
+            capable, reason = await check_analytics_schema_capability(session)
+            if not capable:
+                logger.warning("Pipeline rollup sweep skipped: schema capability not satisfied", reason=reason)
+                return {"status": "skipped", "reason": f"schema_capability: {reason}"}
+
+            return await RollupService.run_lookback_rollups(
+                session, lookback_days=settings.analytics_rollup_lookback_days
+            )
+
+    try:
+        return asyncio.run(_run())
+    except Exception as exc:
+        logger.error("Pipeline rollup sweep failed", error=str(exc), exc_info=True)
+        return {"status": "error", "error": str(exc)}
+

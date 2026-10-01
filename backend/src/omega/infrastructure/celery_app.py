@@ -138,6 +138,11 @@ celery_app.conf.update(
             "schedule": 60.0,
             "options": {"expires": 120},
         },
+        "pipeline-analytics-rollup-sweep": {
+            "task": "omega.analytics.pipeline_rollup_sweep",
+            "schedule": float(settings.analytics_rollup_interval_seconds),
+            "options": {"expires": settings.analytics_rollup_interval_seconds * 2},
+        },
     },
 )
 

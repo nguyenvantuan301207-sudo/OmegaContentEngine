@@ -6073,3 +6073,73 @@ class RecurringScheduleCampaignBinding(Base):
 
     def __repr__(self) -> str:
         return f"<RecurringScheduleCampaignBinding occurrence={self.occurrence_id} item={self.campaign_item_id}>"
+
+
+# ── OMEGA P20-B Deterministic Pipeline Analytics Models ──
+
+
+class PipelineAnalyticsRollup(Base):
+    """Daily UTC aggregate rollup for internal pipeline execution and reliability."""
+
+    __tablename__ = "pipeline_analytics_rollups"
+    __table_args__ = (
+        UniqueConstraint(
+            "metric_family",
+            "dimension_type",
+            "dimension_value",
+            "bucket_start",
+            name="uq_pipeline_analytics_rollup_bucket",
+        ),
+        CheckConstraint("bucket_end = bucket_start + interval '1 day'", name="chk_rollup_daily_utc_bucket"),
+        CheckConstraint("sample_count >= 0", name="chk_rollup_sample_count"),
+        CheckConstraint("schema_version > 0", name="chk_rollup_schema_version"),
+        CheckConstraint(
+            "metric_family IN ('render_reliability', 'render_performance', 'scheduler_reliability', 'qa_quality')",
+            name="chk_rollup_metric_family",
+        ),
+        CheckConstraint(
+            "dimension_type IN ('GLOBAL', 'CHANNEL', 'VIDEO_CODEC', 'SCHEDULE_TARGET_TYPE')",
+            name="chk_rollup_dimension_type",
+        ),
+        CheckConstraint(
+            "(metric_family IN ('render_reliability', 'render_performance') AND dimension_type IN ('GLOBAL', 'CHANNEL', 'VIDEO_CODEC')) OR "
+            "(metric_family = 'scheduler_reliability' AND dimension_type IN ('GLOBAL', 'SCHEDULE_TARGET_TYPE')) OR "
+            "(metric_family = 'qa_quality' AND dimension_type IN ('GLOBAL', 'CHANNEL'))",
+            name="chk_rollup_family_dimension_matrix",
+        ),
+        Index(
+            "ix_pipeline_analytics_rollup_query",
+            "metric_family",
+            "dimension_type",
+            "dimension_value",
+            "bucket_start",
+            "bucket_end",
+        ),
+        Index("ix_pipeline_analytics_rollup_updated", "updated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    metric_family: Mapped[str] = mapped_column(String(64), nullable=False)
+    dimension_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    dimension_value: Mapped[str] = mapped_column(String(128), nullable=False)
+    bucket_start: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    bucket_end: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metrics: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.clock_timestamp()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.clock_timestamp(),
+        onupdate=func.clock_timestamp(),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<PipelineAnalyticsRollup id={self.id} family={self.metric_family} "
+            f"dim={self.dimension_type}:{self.dimension_value} start={self.bucket_start}>"
+        )
+

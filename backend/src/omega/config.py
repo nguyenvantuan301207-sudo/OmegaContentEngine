@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     scheduler_wait_timeout_seconds: int = 300
     scheduler_max_payload_bytes: int = 65536
 
+    # ── P20-B Deterministic Pipeline Analytics Foundation ──
+    analytics_api_enabled: bool = False
+    analytics_rollup_enabled: bool = False
+    analytics_rollup_lookback_days: int = 2
+    analytics_rollup_interval_seconds: int = 3600
+
     @field_validator("scheduler_minimum_interval_seconds")
     @classmethod
     def validate_scheduler_minimum_interval(cls, v: int) -> int:

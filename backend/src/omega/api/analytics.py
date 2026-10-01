@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 from uuid import UUID, uuid4
 
@@ -345,3 +345,166 @@ async def get_analytics_health(
         active_assets_count=active_count,
         quota_buckets=bucket_responses,
     )
+
+
+# ── P20-B Deterministic Pipeline Analytics Endpoints ─────────────────────────
+
+
+from omega.application.analytics.hybrid_query_engine import HybridQueryEngine
+from omega.application.analytics.metrics_engine import PipelineMetricsCalculationEngine
+from omega.application.analytics.schema_capability import check_analytics_schema_capability
+from omega.config import get_settings
+from omega.domain.pipeline_analytics import (
+    AnalyticsSummaryResponse,
+    DimensionType,
+    MetricFamily,
+    to_utc,
+    validate_family_and_dimension,
+)
+
+
+def _check_analytics_api_gate() -> None:
+    """Verify that analytics API feature gate is enabled."""
+    settings = get_settings()
+    if not settings.analytics_api_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Analytics API is disabled (ANALYTICS_API_ENABLED=false)",
+        )
+
+
+async def _check_schema_capability(session: AsyncSession) -> None:
+    """Verify that migration 026 schema capability is present."""
+    capable, reason = await check_analytics_schema_capability(session)
+    if not capable:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Analytics schema not ready: {reason}",
+        )
+
+
+@router.get("/summary", response_model=AnalyticsSummaryResponse)
+async def get_pipeline_analytics_summary(
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> AnalyticsSummaryResponse:
+    """Retrieve operational lifetime snapshot and data quality counters."""
+    _check_analytics_api_gate()
+    await _check_schema_capability(session)
+
+    counters = await PipelineMetricsCalculationEngine.compute_summary_counters(session)
+    return AnalyticsSummaryResponse.model_validate(counters)
+
+
+@router.get("/live")
+async def get_pipeline_analytics_live(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    start_time: datetime | None = None,
+    end_time: datetime | None = None,
+    family: str | None = None,
+    dimension_type: str = DimensionType.GLOBAL.value,
+    dimension_value: str = "ALL",
+) -> dict[str, Any]:
+    """Execute dynamic authoritative SQL over the requested half-open [start_time, end_time) window."""
+    _check_analytics_api_gate()
+    await _check_schema_capability(session)
+
+    now = datetime.now(UTC)
+    end_utc = to_utc(end_time) if end_time else now
+    start_utc = to_utc(start_time) if start_time else end_utc - timedelta(hours=24)
+
+    if end_utc <= start_utc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid time range: end_time ({end_utc}) must be strictly after start_time ({start_utc})",
+        )
+
+    families = [family] if family else [
+        MetricFamily.RENDER_RELIABILITY.value,
+        MetricFamily.RENDER_PERFORMANCE.value,
+        MetricFamily.SCHEDULER_RELIABILITY.value,
+        MetricFamily.QA_QUALITY.value,
+    ]
+
+    results: dict[str, Any] = {}
+    for f in families:
+        validate_family_and_dimension(f, dimension_type, dimension_value)
+        if f == MetricFamily.RENDER_RELIABILITY.value:
+            res = await PipelineMetricsCalculationEngine.compute_render_reliability(
+                session, start_utc, end_utc, dimension_type, dimension_value
+            )
+            results[f] = res.model_dump()
+        elif f == MetricFamily.RENDER_PERFORMANCE.value:
+            res, _ = await PipelineMetricsCalculationEngine.compute_render_performance(
+                session, start_utc, end_utc, dimension_type, dimension_value
+            )
+            results[f] = res.model_dump()
+        elif f == MetricFamily.SCHEDULER_RELIABILITY.value:
+            res = await PipelineMetricsCalculationEngine.compute_scheduler_reliability(
+                session, start_utc, end_utc, dimension_type, dimension_value
+            )
+            results[f] = res.model_dump()
+        elif f == MetricFamily.QA_QUALITY.value:
+            res = await PipelineMetricsCalculationEngine.compute_qa_quality(
+                session, start_utc, end_utc, dimension_type, dimension_value
+            )
+            results[f] = res.model_dump()
+
+    return {
+        "range": {
+            "start_time": start_utc.isoformat(),
+            "end_time": end_utc.isoformat(),
+        },
+        "dimension": {
+            "dimension_type": dimension_type,
+            "dimension_value": dimension_value,
+        },
+        "metrics": results,
+    }
+
+
+@router.get("/historical")
+async def get_pipeline_analytics_historical(
+    session: Annotated[AsyncSession, Depends(get_db)],
+    start_time: datetime,
+    end_time: datetime,
+    family: str = MetricFamily.RENDER_RELIABILITY.value,
+    dimension_type: str = DimensionType.GLOBAL.value,
+    dimension_value: str = "ALL",
+) -> dict[str, Any]:
+    """Execute hybrid query combining daily rollups with dynamic edge calculations."""
+    _check_analytics_api_gate()
+    await _check_schema_capability(session)
+
+    start_utc = to_utc(start_time)
+    end_utc = to_utc(end_time)
+
+    if end_utc <= start_utc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid time range: end_time ({end_utc}) must be strictly after start_time ({start_utc})",
+        )
+
+    validate_family_and_dimension(family, dimension_type, dimension_value)
+
+    series = await HybridQueryEngine.query_hybrid_series(
+        session,
+        family=family,
+        start_time=start_utc,
+        end_time=end_utc,
+        dimension_type=dimension_type,
+        dimension_value=dimension_value,
+    )
+
+    return {
+        "range": {
+            "start_time": start_utc.isoformat(),
+            "end_time": end_utc.isoformat(),
+        },
+        "metric_family": family,
+        "dimension": {
+            "dimension_type": dimension_type,
+            "dimension_value": dimension_value,
+        },
+        "series": series,
+    }
+
