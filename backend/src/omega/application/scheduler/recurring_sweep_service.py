@@ -210,6 +210,34 @@ class RecurringSweepService:
             ref = nxt
         return ticks
 
+    @staticmethod
+    def classify_campaign_admission_outcome(
+        reason: str,
+    ) -> tuple[RecurringOccurrenceStatus, str | None]:
+        """Classify canonical campaign admission reason into occurrence terminal/transient status.
+
+        Taxonomy:
+        - SUCCESS: ADMITTED, ALREADY_BOUND -> DISPATCHED
+        - TRANSIENT_WAIT: CAPACITY_FULL -> WAITING
+        - TERMINAL_SKIP: NO_PENDING_ITEMS, CAMPAIGN_NOT_RUNNING_* -> SKIPPED
+        - TERMINAL_FAILURE: CAMPAIGN_NOT_FOUND, MATERIALIZATION_FAILED, INVALID_* -> FAILED
+        - BUG/UNEXPECTED: any other reason -> FAILED (fails closed, never silently skipped)
+        """
+        if reason in ("ADMITTED", "ALREADY_BOUND"):
+            return RecurringOccurrenceStatus.DISPATCHED, None
+        if reason == "CAPACITY_FULL":
+            return RecurringOccurrenceStatus.WAITING, None
+        if reason == "NO_PENDING_ITEMS" or reason.startswith("CAMPAIGN_NOT_RUNNING"):
+            return RecurringOccurrenceStatus.SKIPPED, reason
+        if (
+            reason in ("CAMPAIGN_NOT_FOUND", "MATERIALIZATION_FAILED")
+            or reason.startswith("INVALID_ORCHESTRATION_MODE")
+            or reason.startswith("INVALID_STATUS")
+        ):
+            return RecurringOccurrenceStatus.FAILED, reason
+        # Unknown/unrecognized reasons fail closed as FAILED, never silently skipped
+        return RecurringOccurrenceStatus.FAILED, f"Unexpected campaign admission reason: {reason}"
+
     @classmethod
     async def _dispatch_pending_occurrences(cls, session: AsyncSession, batch_size: int) -> int:
         """Phase 2: Claim PENDING occurrences and dispatch to canonical target adapters."""
@@ -258,21 +286,25 @@ class RecurringSweepService:
                     mission, reason = await MissionScheduleTargetAdapter.dispatch(session, occ, version)
                     if reason in ("DISPATCHED", "ALREADY_BOUND"):
                         dispatched_count += 1
+                    else:
+                        occ.status = RecurringOccurrenceStatus.FAILED.value
+                        occ.error_message = f"Unexpected standalone mission reason: {reason}"
+                        await session.commit()
 
                 elif target_type == RecurringScheduleTargetType.CAMPAIGN_ADMISSION:
                     item, reason = await CampaignScheduleTargetAdapter.dispatch(session, occ, version)
-                    if reason in ("ADMITTED", "ALREADY_BOUND"):
+                    outcome_status, error_msg = cls.classify_campaign_admission_outcome(reason)
+                    if outcome_status == RecurringOccurrenceStatus.DISPATCHED:
                         dispatched_count += 1
-                    elif reason == "CAPACITY_FULL":
-                        # Transition to WAITING with deadline
+                    elif outcome_status == RecurringOccurrenceStatus.WAITING:
                         now = await cls._db_now(session)
                         occ.status = RecurringOccurrenceStatus.WAITING.value
                         occ.wait_deadline_at = now + timedelta(seconds=settings.scheduler_wait_timeout_seconds)
                         await session.commit()
                     else:
-                        # Non-runnable campaign or no pending items: transition occurrence to SKIPPED
-                        occ.status = RecurringOccurrenceStatus.SKIPPED.value
-                        occ.error_message = reason
+                        # SKIPPED or FAILED
+                        occ.status = outcome_status.value
+                        occ.error_message = error_msg
                         await session.commit()
 
             except Exception as exc:

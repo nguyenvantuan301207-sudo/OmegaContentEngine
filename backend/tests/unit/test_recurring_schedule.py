@@ -423,3 +423,74 @@ def test_recurring_schedule_create_validates_bounds() -> None:
             max_catch_up_occurrences=20,  # Above 10
             payload_template={"title": "Test", "objective": "Test"},
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Campaign Admission Reason Taxonomy & Outcome Classification
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_campaign_admission_reason_taxonomy_classification() -> None:
+    """Validate canonical taxonomy classification for all campaign admission reasons."""
+    from omega.application.scheduler.recurring_sweep_service import RecurringSweepService
+
+    # 1. SUCCESS: ADMITTED, ALREADY_BOUND -> DISPATCHED
+    assert RecurringSweepService.classify_campaign_admission_outcome("ADMITTED") == (
+        RecurringOccurrenceStatus.DISPATCHED,
+        None,
+    )
+    assert RecurringSweepService.classify_campaign_admission_outcome("ALREADY_BOUND") == (
+        RecurringOccurrenceStatus.DISPATCHED,
+        None,
+    )
+
+    # 2. TRANSIENT_WAIT: CAPACITY_FULL -> WAITING
+    assert RecurringSweepService.classify_campaign_admission_outcome("CAPACITY_FULL") == (
+        RecurringOccurrenceStatus.WAITING,
+        None,
+    )
+
+    # 3. TERMINAL_SKIP: NO_PENDING_ITEMS, CAMPAIGN_NOT_RUNNING_* -> SKIPPED
+    assert RecurringSweepService.classify_campaign_admission_outcome("NO_PENDING_ITEMS") == (
+        RecurringOccurrenceStatus.SKIPPED,
+        "NO_PENDING_ITEMS",
+    )
+    assert RecurringSweepService.classify_campaign_admission_outcome("CAMPAIGN_NOT_RUNNING_PAUSED") == (
+        RecurringOccurrenceStatus.SKIPPED,
+        "CAMPAIGN_NOT_RUNNING_PAUSED",
+    )
+    assert RecurringSweepService.classify_campaign_admission_outcome("CAMPAIGN_NOT_RUNNING_FAILED") == (
+        RecurringOccurrenceStatus.SKIPPED,
+        "CAMPAIGN_NOT_RUNNING_FAILED",
+    )
+    assert RecurringSweepService.classify_campaign_admission_outcome("CAMPAIGN_NOT_RUNNING_SUCCEEDED") == (
+        RecurringOccurrenceStatus.SKIPPED,
+        "CAMPAIGN_NOT_RUNNING_SUCCEEDED",
+    )
+    assert RecurringSweepService.classify_campaign_admission_outcome("CAMPAIGN_NOT_RUNNING_CANCELLED") == (
+        RecurringOccurrenceStatus.SKIPPED,
+        "CAMPAIGN_NOT_RUNNING_CANCELLED",
+    )
+
+    # 4. TERMINAL_FAILURE: CAMPAIGN_NOT_FOUND, MATERIALIZATION_FAILED, INVALID_* -> FAILED
+    assert RecurringSweepService.classify_campaign_admission_outcome("CAMPAIGN_NOT_FOUND") == (
+        RecurringOccurrenceStatus.FAILED,
+        "CAMPAIGN_NOT_FOUND",
+    )
+    assert RecurringSweepService.classify_campaign_admission_outcome("MATERIALIZATION_FAILED") == (
+        RecurringOccurrenceStatus.FAILED,
+        "MATERIALIZATION_FAILED",
+    )
+    assert RecurringSweepService.classify_campaign_admission_outcome("INVALID_ORCHESTRATION_MODE_LEGACY_UPFRONT") == (
+        RecurringOccurrenceStatus.FAILED,
+        "INVALID_ORCHESTRATION_MODE_LEGACY_UPFRONT",
+    )
+    assert RecurringSweepService.classify_campaign_admission_outcome("INVALID_STATUS_ARCHIVED") == (
+        RecurringOccurrenceStatus.FAILED,
+        "INVALID_STATUS_ARCHIVED",
+    )
+
+    # 5. BUG / UNEXPECTED: unknown reasons fail closed as FAILED, never silently skipped
+    status, err = RecurringSweepService.classify_campaign_admission_outcome("UNKNOWN_INFRA_ERROR")
+    assert status == RecurringOccurrenceStatus.FAILED
+    assert err == "Unexpected campaign admission reason: UNKNOWN_INFRA_ERROR"
+
