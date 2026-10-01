@@ -19,6 +19,7 @@ from omega.domain.recurring_schedule import (
     StandaloneMissionPayload,
     validate_target_payload,
 )
+from omega.logging import get_logger
 from omega.infrastructure.models import (
     Mission,
     RecurringScheduleMissionBinding,
@@ -26,7 +27,7 @@ from omega.infrastructure.models import (
     RecurringScheduleVersion,
 )
 
-logger = logging.getLogger("omega.scheduler.mission_adapter")
+logger = get_logger(service="omega-scheduler-mission-adapter")
 
 
 class MissionScheduleTargetAdapter:

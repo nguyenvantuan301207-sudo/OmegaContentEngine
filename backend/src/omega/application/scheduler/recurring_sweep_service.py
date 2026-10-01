@@ -24,6 +24,7 @@ from omega.domain.recurring_schedule import (
     calculate_next_occurrence,
     partition_catch_up_occurrences,
 )
+from omega.logging import get_logger
 from omega.infrastructure.models import (
     RecurringSchedule,
     RecurringScheduleCampaignBinding,
@@ -32,7 +33,7 @@ from omega.infrastructure.models import (
     RecurringScheduleVersion,
 )
 
-logger = logging.getLogger("omega.scheduler.recurring_sweep")
+logger = get_logger(service="omega-scheduler-recurring-sweep")
 
 
 class RecurringSweepService:
@@ -268,7 +269,8 @@ class RecurringSweepService:
                         occ.status = RecurringOccurrenceStatus.WAITING.value
                         occ.wait_deadline_at = now + timedelta(seconds=settings.scheduler_wait_timeout_seconds)
                         await session.commit()
-                    elif reason in ("CAMPAIGN_NOT_RUNNING", "NO_PENDING_ITEMS"):
+                    else:
+                        # Non-runnable campaign or no pending items: transition occurrence to SKIPPED
                         occ.status = RecurringOccurrenceStatus.SKIPPED.value
                         occ.error_message = reason
                         await session.commit()

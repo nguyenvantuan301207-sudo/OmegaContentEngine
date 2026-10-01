@@ -26,6 +26,7 @@ from omega.domain.recurring_schedule import (
     calculate_next_occurrence,
     validate_target_payload,
 )
+from omega.logging import get_logger
 from omega.infrastructure.models import (
     Channel,
     ContentCampaign,
@@ -33,7 +34,7 @@ from omega.infrastructure.models import (
     RecurringScheduleVersion,
 )
 
-logger = logging.getLogger("omega.scheduler.recurring_service")
+logger = get_logger(service="omega-scheduler-recurring-service")
 
 
 class SchedulerRuntimeError(ValueError):

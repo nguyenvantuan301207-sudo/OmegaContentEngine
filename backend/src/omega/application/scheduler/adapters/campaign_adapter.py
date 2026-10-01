@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.campaign_admission_service import admit_schedule_occurrence
+from omega.logging import get_logger
 from omega.infrastructure.models import (
     ContentCampaign,
     ContentCampaignItem,
@@ -16,7 +17,7 @@ from omega.infrastructure.models import (
     RecurringScheduleVersion,
 )
 
-logger = logging.getLogger("omega.scheduler.campaign_adapter")
+logger = get_logger(service="omega-scheduler-campaign-adapter")
 
 
 class CampaignScheduleTargetAdapter:
