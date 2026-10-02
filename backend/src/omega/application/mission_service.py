@@ -847,7 +847,9 @@ async def resume_mission(
     return MissionResponse.model_validate(fresh_res.scalar_one())
 
 
-async def cancel_mission(session: AsyncSession, mission_id: UUID) -> MissionResponse | None:
+async def cancel_mission(
+    session: AsyncSession, mission_id: UUID, commit: bool = True
+) -> MissionResponse | None:
     """Cancel a mission and all non-terminal tasks."""
     res = await session.execute(select(Mission).where(Mission.id == mission_id).with_for_update())
     mission = res.scalar_one_or_none()
@@ -912,7 +914,10 @@ async def cancel_mission(session: AsyncSession, mission_id: UUID) -> MissionResp
         )
     )
 
-    await session.commit()
+    if commit:
+        await session.commit()
+    else:
+        await session.flush()
     logger.info("Mission cancelled", mission_id=str(mission.id))
     return MissionResponse.model_validate(mission)
 

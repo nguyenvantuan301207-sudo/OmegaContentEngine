@@ -262,6 +262,7 @@ class PublishIntentService:
         intent_id: UUID,
         reason: str = "User cancelled intent",
         actor: str = "USER",
+        commit: bool = True,
     ) -> PublishIntent:
         """Cancel an active or approved PublishIntent."""
         stmt = select(PublishIntent).where(PublishIntent.id == intent_id).with_for_update()
@@ -283,6 +284,9 @@ class PublishIntentService:
             actor=actor,
         )
         session.add(trans)
-        await session.commit()
-        await session.refresh(intent)
+        if commit:
+            await session.commit()
+            await session.refresh(intent)
+        else:
+            await session.flush()
         return intent

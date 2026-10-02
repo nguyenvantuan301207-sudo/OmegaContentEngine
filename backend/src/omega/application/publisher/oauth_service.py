@@ -350,3 +350,34 @@ class OAuthService:
             account_id=str(account_id),
         )
         return account
+
+    @classmethod
+    async def revoke_account(
+        cls,
+        session: AsyncSession,
+        account_id: UUID,
+        reason: str = "Account revoked for security/dirty-data disposition",
+        commit: bool = True,
+    ) -> PlatformAccount:
+        """Revoke a connected platform account while preserving credentials for audit lineage."""
+        stmt = select(PlatformAccount).where(PlatformAccount.id == account_id).with_for_update()
+        res = await session.execute(stmt)
+        account = res.scalar_one_or_none()
+        if not account:
+            raise OAuthServiceError(f"PlatformAccount {account_id} not found.")
+
+        account.status = PlatformAccountStatus.REVOKED.value
+        account.updated_at = datetime.now(UTC)
+
+        if commit:
+            await session.commit()
+            await session.refresh(account)
+        else:
+            await session.flush()
+        logger.info(
+            "Platform account revoked (credentials preserved for audit)",
+            account_id=str(account_id),
+            reason=reason,
+        )
+        return account
+

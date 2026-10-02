@@ -93,6 +93,7 @@ class VaultKeyRotationService:
         execute: bool = False,
         platform_account_id: UUID | None = None,
         current_version: int | None = None,
+        excluded_vault_ids: set[UUID] | None = None,
     ) -> VaultRotationReport:
         """Evaluate (dry-run) or execute transactional key rotation for candidate vault entries.
 
@@ -101,6 +102,7 @@ class VaultKeyRotationService:
             execute: If True, commits rotated ciphertexts to DB. If False, runs read-only audit.
             platform_account_id: Optional filter targeting a single platform account.
             current_version: Optional filter targeting only entries with a specific key_version.
+            excluded_vault_ids: Optional set of vault entry UUIDs explicitly excluded from rotation.
 
         Returns:
             A VaultRotationReport summarizing the evaluation and outcomes.
@@ -133,6 +135,8 @@ class VaultKeyRotationService:
                 stmt = stmt.where(CredentialVault.platform_account_id == platform_account_id)
             if current_version:
                 stmt = stmt.where(CredentialVault.key_version == current_version)
+            if excluded_vault_ids:
+                stmt = stmt.where(~CredentialVault.id.in_(excluded_vault_ids))
 
             res = await session.execute(stmt)
             candidates = res.scalars().all()
@@ -180,6 +184,7 @@ class VaultKeyRotationService:
         target_version: int,
         platform_account_id: UUID | None = None,
         expected_total_count: int | None = None,
+        excluded_vault_ids: set[UUID] | None = None,
     ) -> VaultRotationReport:
         """Read-only verification that all candidate rows match target_version and decrypt correctly.
 
@@ -215,6 +220,8 @@ class VaultKeyRotationService:
             stmt = select(CredentialVault).order_by(CredentialVault.updated_at.asc())
             if platform_account_id:
                 stmt = stmt.where(CredentialVault.platform_account_id == platform_account_id)
+            if excluded_vault_ids:
+                stmt = stmt.where(~CredentialVault.id.in_(excluded_vault_ids))
 
             res = await session.execute(stmt)
             candidates = res.scalars().all()

@@ -70,6 +70,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Path to secret keyring JSON file.",
     )
+    parser.add_argument(
+        "--exclude-manifest",
+        type=str,
+        default=None,
+        help="Path to dirty data manifest JSON whose credential_vault_ids are excluded from rotation.",
+    )
     return parser.parse_args(args)
 
 
@@ -141,6 +147,26 @@ async def main_async(args: argparse.Namespace) -> int:
             )
             return 1
 
+    # Load excluded_vault_ids if manifest is provided
+    excluded_vault_ids: set[UUID] | None = None
+    if getattr(args, "exclude_manifest", None):
+        import json
+        from pathlib import Path
+        manifest_p = Path(args.exclude_manifest)
+        if not manifest_p.exists():
+            print(f"Error: Exclude manifest not found at {manifest_p}", file=sys.stderr)
+            return 1
+        try:
+            manifest_data = json.loads(manifest_p.read_text(encoding="utf-8"))
+            excluded_vault_ids = {
+                UUID(item["credential_vault_id"])
+                for item in manifest_data
+                if "credential_vault_id" in item
+            }
+        except Exception as exc:
+            print(f"Error reading exclude manifest: {exc}", file=sys.stderr)
+            return 1
+
     try:
         vault = CredentialVaultService(
             keyring_file=getattr(args, "keyring_file", None),
@@ -157,6 +183,7 @@ async def main_async(args: argparse.Namespace) -> int:
             report = await service.verify_keys(
                 target_version=args.target_version,
                 platform_account_id=platform_account_uuid,
+                excluded_vault_ids=excluded_vault_ids,
             )
             print(format_report(report))
             return 0 if report.failed_count == 0 else 1
@@ -173,6 +200,7 @@ async def main_async(args: argparse.Namespace) -> int:
             execute=execute_mode,
             platform_account_id=platform_account_uuid,
             current_version=args.current_version,
+            excluded_vault_ids=excluded_vault_ids,
         )
         print(format_report(report))
         return 0 if report.failed_count == 0 else 1
