@@ -239,6 +239,93 @@ def run_all_preflight(repo_root: Path) -> dict[str, Any]:
     }
 
 
+def check_rotation_preflight(
+    backup_path: Path | None = None,
+    expected_sha256: str | None = None,
+    compose_path: Path | None = None,
+    target_version: int | None = None,
+) -> dict[str, Any]:
+    """Fail-closed preflight for planned credential vault key rotation.
+
+    Verifies read-only:
+    1. Publisher remains absent.
+    2. All feature gates are off.
+    3. Production Compose enforces network containment and immutable lifecycle.
+    4. External verified DB backup exists and is readable.
+    5. Keyring configuration is structurally valid without leaking secrets.
+    """
+    results: dict[str, Any] = {
+        "check": "rotation_preflight",
+        "passed": True,
+        "details": {},
+        "violations": [],
+    }
+
+    # 1. Publisher absence
+    pub_res = check_publisher_absence()
+    results["details"]["publisher_absence"] = pub_res["passed"]
+    if not pub_res["passed"]:
+        results["passed"] = False
+        results["violations"].extend(pub_res.get("violations", []))
+
+    # 2. Deployment safety (feature gates & Compose invariants)
+    c_path = compose_path or Path("docker-compose.prod.yml")
+    if c_path.exists():
+        comp_res = verify_deployment_safety(c_path)
+        results["details"]["deployment_safety"] = comp_res["passed"]
+        if not comp_res["passed"]:
+            results["passed"] = False
+            results["violations"].extend(comp_res.get("violations", []))
+    else:
+        results["details"]["deployment_safety"] = "Skipped (compose file not found)"
+
+    # 3. Backup verification
+    if backup_path:
+        bak_res = verify_backup_readability(backup_path, expected_sha256=expected_sha256)
+        results["details"]["backup_verification"] = bak_res["passed"]
+        if not bak_res["passed"]:
+            results["passed"] = False
+            results["violations"].extend(bak_res.get("violations", []))
+    else:
+        results["passed"] = False
+        results["violations"].append("External backup file must be provided and verified before rotation")
+
+    # 4. Keyring structural validation (zero leak)
+    env_key = os.getenv("OMEGA_SECRET_ENCRYPTION_KEY")
+    env_keyring = os.getenv("OMEGA_KEYRING")
+
+    keyring_present = bool(env_key or env_keyring)
+    results["details"]["keyring_configured"] = keyring_present
+    if not keyring_present:
+        results["passed"] = False
+        results["violations"].append("Neither OMEGA_SECRET_ENCRYPTION_KEY nor OMEGA_KEYRING is configured")
+    else:
+        try:
+            import base64
+            from cryptography.fernet import Fernet
+            if env_key:
+                k_bytes = env_key.strip().encode("utf-8")
+                assert len(base64.urlsafe_b64decode(k_bytes)) == 32
+                Fernet(k_bytes)
+                results["details"]["single_key_valid"] = True
+            if env_keyring:
+                parsed = json.loads(env_keyring)
+                versions_avail = sorted(int(k) for k in parsed.keys())
+                results["details"]["keyring_versions_available"] = versions_avail
+                for k, v in parsed.items():
+                    k_b = str(v).strip().encode("utf-8")
+                    assert len(base64.urlsafe_b64decode(k_b)) == 32
+                    Fernet(k_b)
+                if target_version is not None and target_version not in versions_avail:
+                    results["passed"] = False
+                    results["violations"].append(f"Target version {target_version} not in configured keyring")
+        except Exception as exc:
+            results["passed"] = False
+            results["violations"].append(f"Keyring structural validation failed: {exc}")
+
+    return results
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="P20 Production Release & Acceptance Tool")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -255,6 +342,13 @@ def main() -> None:
     bak_parser = subparsers.add_parser("backup-check", help="Verify backup readability")
     bak_parser.add_argument("backup_path", help="Path to backup file")
     bak_parser.add_argument("--sha256", help="Expected SHA-256 checksum")
+
+    # rotation-preflight
+    rot_parser = subparsers.add_parser("rotation-preflight", help="Run rotation preflight checks")
+    rot_parser.add_argument("--backup-path", help="Path to external database backup")
+    rot_parser.add_argument("--sha256", help="Expected SHA-256 for backup")
+    rot_parser.add_argument("--compose-file", default="docker-compose.prod.yml", help="Path to compose file")
+    rot_parser.add_argument("--target-version", type=int, help="Target encryption key version")
 
     # preflight
     pre_parser = subparsers.add_parser("preflight", help="Run full preflight checks")
@@ -274,6 +368,17 @@ def main() -> None:
 
     elif args.command == "backup-check":
         res = verify_backup_readability(Path(args.backup_path), expected_sha256=args.sha256)
+        print(json.dumps(res, indent=2))
+        sys.exit(0 if res["passed"] else 1)
+
+    elif args.command == "rotation-preflight":
+        bak_path = Path(args.backup_path) if args.backup_path else None
+        res = check_rotation_preflight(
+            backup_path=bak_path,
+            expected_sha256=args.sha256,
+            compose_path=Path(args.compose_file),
+            target_version=args.target_version,
+        )
         print(json.dumps(res, indent=2))
         sys.exit(0 if res["passed"] else 1)
 

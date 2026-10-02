@@ -46,6 +46,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         help="Run in read-only verification mode without mutating the database.",
     )
     parser.add_argument(
+        "--verify",
+        action="store_true",
+        default=False,
+        help="Run in strict read-only verification mode asserting all rows match target_version and decrypt cleanly.",
+    )
+    parser.add_argument(
         "--platform-account-id",
         type=str,
         default=None,
@@ -73,13 +79,20 @@ def format_report(report: VaultRotationReport) -> str:
     lines.append(f"Filter Platform Account: {report.filter_platform_account_id or 'None'}")
     lines.append(f"Filter Current Version: {report.filter_current_version or 'None'}")
     lines.append("-" * 80)
-    lines.append(
-        f"Evaluated: {report.total_evaluated} | "
-        f"Eligible: {report.eligible_count} | "
-        f"Rotated: {report.rotated_count} | "
-        f"Already Current: {report.already_current_count} | "
-        f"Failed: {report.failed_count}"
-    )
+    if report.mode == "VERIFY":
+        lines.append(
+            f"Evaluated: {report.total_evaluated} | "
+            f"Verified: {report.already_current_count} | "
+            f"Failed: {report.failed_count}"
+        )
+    else:
+        lines.append(
+            f"Evaluated: {report.total_evaluated} | "
+            f"Eligible: {report.eligible_count} | "
+            f"Rotated: {report.rotated_count} | "
+            f"Already Current: {report.already_current_count} | "
+            f"Failed: {report.failed_count}"
+        )
     lines.append("-" * 80)
 
     if not report.entries:
@@ -118,10 +131,24 @@ async def main_async(args: argparse.Namespace) -> int:
             print(f"Error: Invalid UUID for --platform-account-id: '{args.platform_account_id}'", file=sys.stderr)
             return 1
 
-    # Determine execute mode: explicitly requires --execute and not --dry-run
+    service = VaultKeyRotationService()
+
+    # 1. Verification mode
+    if getattr(args, "verify", False):
+        try:
+            report = await service.verify_keys(
+                target_version=args.target_version,
+                platform_account_id=platform_account_uuid,
+            )
+            print(format_report(report))
+            return 0 if report.failed_count == 0 else 1
+        except Exception as exc:
+            print(f"Error executing key verification: {exc}", file=sys.stderr)
+            return 1
+
+    # 2. Rotation evaluation (dry-run) or execution mode
     execute_mode = args.execute and not args.dry_run
 
-    service = VaultKeyRotationService()
     try:
         report = await service.rotate_keys(
             target_version=args.target_version,

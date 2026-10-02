@@ -179,8 +179,8 @@ class OAuthService:
         auth_session.consumed_at = datetime.now(UTC)
         await session.commit()
 
-        # 2. Decrypt PKCE verifier
-        code_verifier = vault.decrypt(auth_session.encrypted_pkce_verifier, 1)
+        # 2. Decrypt PKCE verifier (multi-key keyring resolution)
+        code_verifier = vault.decrypt(auth_session.encrypted_pkce_verifier)
 
         # 3. Network Preflight for Google Token Endpoint (OMEGA-009)
         from omega.domain.network import NetworkPreflightRequest

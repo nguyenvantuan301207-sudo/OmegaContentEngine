@@ -106,29 +106,34 @@ class CredentialVaultService:
         raw_ciphertext = cipher.encrypt(plaintext.encode("utf-8"))
         return raw_ciphertext.decode("utf-8"), v
 
-    def decrypt(self, ciphertext: str, key_version: int) -> str:
-        """Decrypt base64 ciphertext using the exact stored key version."""
+    def decrypt(self, ciphertext: str, key_version: int | None = None) -> str:
+        """Decrypt base64 ciphertext using the specified key version or keyring fallback.
+        
+        If key_version is provided and present in the keyring, that key is tried first.
+        If key_version is None or fails authentication, decrypt falls back to trying all
+        keys in the configured keyring via MultiFernet, supporting seamless transitions.
+        """
         if not ciphertext:
             return ""
 
-        cipher = self._keyring.get(key_version)
-        if not cipher:
-            # Fall back to trying all keys via MultiFernet
-            all_fernet = MultiFernet(list(self._keyring.values()))
-            try:
-                decrypted_bytes = all_fernet.decrypt(ciphertext.encode("utf-8"))
-                return decrypted_bytes.decode("utf-8")
-            except InvalidToken as exc:
-                raise VaultDecryptionError(
-                    f"Decryption failed: key version {key_version} missing and no key in keyring matches."
-                ) from exc
+        if key_version is not None:
+            cipher = self._keyring.get(key_version)
+            if cipher is not None:
+                try:
+                    decrypted_bytes = cipher.decrypt(ciphertext.encode("utf-8"))
+                    return decrypted_bytes.decode("utf-8")
+                except InvalidToken:
+                    pass  # Fall through to MultiFernet across all configured keyring keys
 
+        # Multi-key read fallback across all configured keys in the keyring
+        all_fernet = MultiFernet(list(self._keyring.values()))
         try:
-            decrypted_bytes = cipher.decrypt(ciphertext.encode("utf-8"))
+            decrypted_bytes = all_fernet.decrypt(ciphertext.encode("utf-8"))
             return decrypted_bytes.decode("utf-8")
         except InvalidToken as exc:
+            v_desc = f"key version {key_version}" if key_version is not None else "any keyring key"
             raise VaultDecryptionError(
-                "Ciphertext integrity authentication failed or key mismatch."
+                f"Decryption failed: {v_desc} could not authenticate ciphertext."
             ) from exc
 
     def rotate_ciphertext(self, ciphertext: str, current_version: int) -> tuple[str, int]:

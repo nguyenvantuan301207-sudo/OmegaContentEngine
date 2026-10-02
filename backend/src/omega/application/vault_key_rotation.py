@@ -35,9 +35,12 @@ class VaultEntryRotationStatus(StrEnum):
     ROTATED = "ROTATED"
     ELIGIBLE = "ELIGIBLE"
     ALREADY_CURRENT = "ALREADY_CURRENT"
+    VERIFIED = "VERIFIED"
     DECRYPTION_FAILED = "DECRYPTION_FAILED"
     TARGET_KEY_UNAVAILABLE = "TARGET_KEY_UNAVAILABLE"
     ROTATION_VERIFICATION_FAILED = "ROTATION_VERIFICATION_FAILED"
+    VERSION_MISMATCH = "VERSION_MISMATCH"
+    CORRUPT_CIPHERTEXT = "CORRUPT_CIPHERTEXT"
     ERROR = "ERROR"
 
 
@@ -58,11 +61,11 @@ class VaultEntryResult:
 
 @dataclass
 class VaultRotationReport:
-    """Consolidated report of a vault key rotation dry-run or execution."""
+    """Consolidated report of a vault key rotation dry-run, execution, or verification."""
 
     target_version: int
     active_configured_version: int
-    mode: Literal["DRY_RUN", "EXECUTE"]
+    mode: Literal["DRY_RUN", "EXECUTE", "VERIFY"]
     filter_platform_account_id: UUID | None = None
     filter_current_version: int | None = None
     total_evaluated: int = 0
@@ -167,6 +170,190 @@ class VaultKeyRotationService:
                 "rotated": report.rotated_count,
                 "eligible": report.eligible_count,
                 "already_current": report.already_current_count,
+                "failed": report.failed_count,
+            },
+        )
+        return report
+
+    async def verify_keys(
+        self,
+        target_version: int,
+        platform_account_id: UUID | None = None,
+        expected_total_count: int | None = None,
+    ) -> VaultRotationReport:
+        """Read-only verification that all candidate rows match target_version and decrypt correctly.
+
+        Validates:
+        1. target_version is configured in the vault keyring.
+        2. Every candidate row has key_version == target_version.
+        3. Every encrypted_access_token is structurally valid Fernet ciphertext and decrypts cleanly.
+        4. Every encrypted_refresh_token (if non-null) is structurally valid Fernet ciphertext and decrypts cleanly.
+        5. Zero mutations are executed against the database.
+        6. If expected_total_count is provided, asserts exact match.
+        """
+        if target_version <= 0:
+            raise ValueError(f"Target key version must be > 0, got {target_version}")
+
+        target_key_available = target_version in self.vault._keyring
+
+        report = VaultRotationReport(
+            target_version=target_version,
+            active_configured_version=self.vault.active_version,
+            mode="VERIFY",
+            filter_platform_account_id=platform_account_id,
+        )
+
+        if not target_key_available:
+            logger.error(
+                "Verification failed: target key not in configured keyring",
+                extra={"target_version": target_version},
+            )
+            report.failed_count = 1
+            return report
+
+        async with self.session_factory() as session:
+            stmt = select(CredentialVault).order_by(CredentialVault.updated_at.asc())
+            if platform_account_id:
+                stmt = stmt.where(CredentialVault.platform_account_id == platform_account_id)
+
+            res = await session.execute(stmt)
+            candidates = res.scalars().all()
+            report.total_evaluated = len(candidates)
+
+            if expected_total_count is not None and report.total_evaluated != expected_total_count:
+                logger.error(
+                    "Verification failed: row count mismatch",
+                    extra={
+                        "expected": expected_total_count,
+                        "actual": report.total_evaluated,
+                    },
+                )
+
+            for candidate in candidates:
+                # 1. Verify key_version alignment
+                if candidate.key_version != target_version:
+                    report.failed_count += 1
+                    report.entries.append(
+                        VaultEntryResult(
+                            vault_id=candidate.id,
+                            platform_account_id=candidate.platform_account_id,
+                            current_key_version=candidate.key_version,
+                            target_key_version=target_version,
+                            access_token_decryptable=False,
+                            refresh_token_decryptable=None,
+                            eligible=False,
+                            status=VaultEntryRotationStatus.VERSION_MISMATCH,
+                            error_message=(
+                                f"Row key_version ({candidate.key_version}) does not match "
+                                f"target verification version ({target_version})"
+                            ),
+                        )
+                    )
+                    continue
+
+                # 2. Verify access token structure and decryptability
+                if not candidate.encrypted_access_token or not candidate.encrypted_access_token.startswith("gAAAAA"):
+                    report.failed_count += 1
+                    report.entries.append(
+                        VaultEntryResult(
+                            vault_id=candidate.id,
+                            platform_account_id=candidate.platform_account_id,
+                            current_key_version=candidate.key_version,
+                            target_key_version=target_version,
+                            access_token_decryptable=False,
+                            refresh_token_decryptable=None,
+                            eligible=False,
+                            status=VaultEntryRotationStatus.CORRUPT_CIPHERTEXT,
+                            error_message="Access token is not structurally valid Fernet ciphertext",
+                        )
+                    )
+                    continue
+
+                try:
+                    decrypted_access = self.vault.decrypt(candidate.encrypted_access_token, target_version)
+                    if not decrypted_access:
+                        raise ValueError("Decrypted access token is empty")
+                except Exception as exc:
+                    report.failed_count += 1
+                    report.entries.append(
+                        VaultEntryResult(
+                            vault_id=candidate.id,
+                            platform_account_id=candidate.platform_account_id,
+                            current_key_version=candidate.key_version,
+                            target_key_version=target_version,
+                            access_token_decryptable=False,
+                            refresh_token_decryptable=None,
+                            eligible=False,
+                            status=VaultEntryRotationStatus.DECRYPTION_FAILED,
+                            error_message=f"Access token decryption failed: {type(exc).__name__}",
+                        )
+                    )
+                    continue
+
+                # 3. Verify refresh token (if present)
+                refresh_decryptable: bool | None = None
+                if candidate.encrypted_refresh_token:
+                    if not candidate.encrypted_refresh_token.startswith("gAAAAA"):
+                        report.failed_count += 1
+                        report.entries.append(
+                            VaultEntryResult(
+                                vault_id=candidate.id,
+                                platform_account_id=candidate.platform_account_id,
+                                current_key_version=candidate.key_version,
+                                target_key_version=target_version,
+                                access_token_decryptable=True,
+                                refresh_token_decryptable=False,
+                                eligible=False,
+                                status=VaultEntryRotationStatus.CORRUPT_CIPHERTEXT,
+                                error_message="Refresh token is not structurally valid Fernet ciphertext",
+                            )
+                        )
+                        continue
+
+                    try:
+                        decrypted_refresh = self.vault.decrypt(candidate.encrypted_refresh_token, target_version)
+                        if not decrypted_refresh:
+                            raise ValueError("Decrypted refresh token is empty")
+                        refresh_decryptable = True
+                    except Exception as exc:
+                        report.failed_count += 1
+                        report.entries.append(
+                            VaultEntryResult(
+                                vault_id=candidate.id,
+                                platform_account_id=candidate.platform_account_id,
+                                current_key_version=candidate.key_version,
+                                target_key_version=target_version,
+                                access_token_decryptable=True,
+                                refresh_token_decryptable=False,
+                                eligible=False,
+                                status=VaultEntryRotationStatus.DECRYPTION_FAILED,
+                                error_message=f"Refresh token decryption failed: {type(exc).__name__}",
+                            )
+                        )
+                        continue
+
+                # Row passed verification
+                report.already_current_count += 1
+                report.entries.append(
+                    VaultEntryResult(
+                        vault_id=candidate.id,
+                        platform_account_id=candidate.platform_account_id,
+                        current_key_version=candidate.key_version,
+                        target_key_version=target_version,
+                        access_token_decryptable=True,
+                        refresh_token_decryptable=refresh_decryptable,
+                        eligible=False,
+                        status=VaultEntryRotationStatus.VERIFIED,
+                        error_message=None,
+                    )
+                )
+
+        logger.info(
+            "Vault key verification completed",
+            extra={
+                "target_version": report.target_version,
+                "total_evaluated": report.total_evaluated,
+                "verified": report.already_current_count,
                 "failed": report.failed_count,
             },
         )

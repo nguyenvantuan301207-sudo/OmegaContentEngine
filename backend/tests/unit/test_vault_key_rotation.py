@@ -245,3 +245,290 @@ async def test_vault_key_rotation_corrupted_ciphertext_fails_safely(deterministi
 
     assert report.failed_count == 1
     assert report.entries[0].status == VaultEntryRotationStatus.DECRYPTION_FAILED
+
+
+@pytest.mark.asyncio
+async def test_vault_key_rotation_execute_success(deterministic_keyring):
+    """Verify execution mode rotates candidate row and commits new ciphertext with target version."""
+    _, vault = deterministic_keyring
+    cipher_acc_v1, _ = vault.encrypt("my_access_secret", key_version=1)
+    cipher_ref_v1, _ = vault.encrypt("my_refresh_secret", key_version=1)
+
+    mock_entry = CredentialVault(
+        id=uuid4(),
+        platform_account_id=uuid4(),
+        encrypted_access_token=cipher_acc_v1,
+        encrypted_refresh_token=cipher_ref_v1,
+        key_version=1,
+    )
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [mock_entry]
+    mock_result.scalar_one_or_none.return_value = mock_entry
+    mock_session.execute.return_value = mock_result
+
+    class MockSessionFactory:
+        async def __aenter__(self):
+            return mock_session
+
+        async def __aexit__(self, *args):
+            pass
+
+    service = VaultKeyRotationService(session_factory=MockSessionFactory, vault=vault)
+    report = await service.rotate_keys(target_version=2, execute=True)
+
+    assert report.total_evaluated == 1
+    assert report.rotated_count == 1
+    assert report.failed_count == 0
+    assert mock_entry.key_version == 2
+    # Verify commit called
+    mock_session.commit.assert_called_once()
+    # Verify new ciphertext decrypts with target version 2
+    assert vault.decrypt(mock_entry.encrypted_access_token, 2) == "my_access_secret"
+    assert vault.decrypt(mock_entry.encrypted_refresh_token, 2) == "my_refresh_secret"
+
+
+@pytest.mark.asyncio
+async def test_vault_key_rotation_crash_rollback(deterministic_keyring):
+    """Verify rollback is called if a database exception occurs during execution."""
+    _, vault = deterministic_keyring
+    cipher_acc_v1, _ = vault.encrypt("my_access_secret", key_version=1)
+
+    mock_entry = CredentialVault(
+        id=uuid4(),
+        platform_account_id=uuid4(),
+        encrypted_access_token=cipher_acc_v1,
+        encrypted_refresh_token=None,
+        key_version=1,
+    )
+
+    mock_session = AsyncMock()
+    mock_result = MagicMock()
+    mock_result.scalars.return_value.all.return_value = [mock_entry]
+    mock_result.scalar_one_or_none.return_value = mock_entry
+    mock_session.execute.return_value = mock_result
+    # Force commit failure
+    mock_session.commit.side_effect = RuntimeError("Simulated DB connection drop")
+
+    class MockSessionFactory:
+        async def __aenter__(self):
+            return mock_session
+
+        async def __aexit__(self, *args):
+            pass
+
+    service = VaultKeyRotationService(session_factory=MockSessionFactory, vault=vault)
+    report = await service.rotate_keys(target_version=2, execute=True)
+
+    assert report.failed_count == 1
+    assert report.entries[0].status == VaultEntryRotationStatus.ERROR
+    mock_session.rollback.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_vault_key_rotation_resumability(deterministic_keyring):
+    """Verify resumability: already-rotated rows are skipped idempotently, unrotated rows are converted."""
+    _, vault = deterministic_keyring
+    cipher_acc_v2, _ = vault.encrypt("secret_already_v2", key_version=2)
+    cipher_acc_v1, _ = vault.encrypt("secret_still_v1", key_version=1)
+
+    row1_already_current = CredentialVault(
+        id=uuid4(),
+        platform_account_id=uuid4(),
+        encrypted_access_token=cipher_acc_v2,
+        encrypted_refresh_token=None,
+        key_version=2,
+    )
+    row2_needs_rotation = CredentialVault(
+        id=uuid4(),
+        platform_account_id=uuid4(),
+        encrypted_access_token=cipher_acc_v1,
+        encrypted_refresh_token=None,
+        key_version=1,
+    )
+
+    mock_session = AsyncMock()
+    mock_res_all = MagicMock()
+    mock_res_all.scalars.return_value.all.return_value = [row1_already_current, row2_needs_rotation]
+
+    mock_res_row2 = MagicMock()
+    mock_res_row2.scalar_one_or_none.return_value = row2_needs_rotation
+
+    mock_session.execute.side_effect = [mock_res_all, mock_res_row2]
+
+    class MockSessionFactory:
+        async def __aenter__(self):
+            return mock_session
+
+        async def __aexit__(self, *args):
+            pass
+
+    service = VaultKeyRotationService(session_factory=MockSessionFactory, vault=vault)
+    report = await service.rotate_keys(target_version=2, execute=True)
+
+    assert report.total_evaluated == 2
+    assert report.already_current_count == 1
+    assert report.rotated_count == 1
+    assert report.failed_count == 0
+    assert row2_needs_rotation.key_version == 2
+    # Only one commit for the unrotated row
+    assert mock_session.commit.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_vault_key_verify_mode_pass(deterministic_keyring):
+    """Verify strict read-only verify_keys passes when all rows are at target version and decrypt cleanly."""
+    _, vault = deterministic_keyring
+    cipher_acc_v2, _ = vault.encrypt("verified_secret", key_version=2)
+
+    row = CredentialVault(
+        id=uuid4(),
+        platform_account_id=uuid4(),
+        encrypted_access_token=cipher_acc_v2,
+        encrypted_refresh_token=None,
+        key_version=2,
+    )
+
+    mock_session = AsyncMock()
+    mock_res = MagicMock()
+    mock_res.scalars.return_value.all.return_value = [row]
+    mock_session.execute.return_value = mock_res
+
+    class MockSessionFactory:
+        async def __aenter__(self):
+            return mock_session
+
+        async def __aexit__(self, *args):
+            pass
+
+    service = VaultKeyRotationService(session_factory=MockSessionFactory, vault=vault)
+    report = await service.verify_keys(target_version=2)
+
+    assert report.mode == "VERIFY"
+    assert report.total_evaluated == 1
+    assert report.failed_count == 0
+    assert report.already_current_count == 1
+    assert report.entries[0].status == VaultEntryRotationStatus.VERIFIED
+
+
+@pytest.mark.asyncio
+async def test_vault_key_verify_mode_fails_on_version_mismatch(deterministic_keyring):
+    """Verify verify_keys detects version mismatch without DB mutation."""
+    _, vault = deterministic_keyring
+    cipher_acc_v1, _ = vault.encrypt("v1_secret", key_version=1)
+
+    row = CredentialVault(
+        id=uuid4(),
+        platform_account_id=uuid4(),
+        encrypted_access_token=cipher_acc_v1,
+        encrypted_refresh_token=None,
+        key_version=1,
+    )
+
+    mock_session = AsyncMock()
+    mock_res = MagicMock()
+    mock_res.scalars.return_value.all.return_value = [row]
+    mock_session.execute.return_value = mock_res
+
+    class MockSessionFactory:
+        async def __aenter__(self):
+            return mock_session
+
+        async def __aexit__(self, *args):
+            pass
+
+    service = VaultKeyRotationService(session_factory=MockSessionFactory, vault=vault)
+    report = await service.verify_keys(target_version=2)
+
+    assert report.failed_count == 1
+    assert report.entries[0].status == VaultEntryRotationStatus.VERSION_MISMATCH
+
+
+@pytest.mark.asyncio
+async def test_vault_key_verify_mode_fails_on_corrupt_ciphertext(deterministic_keyring):
+    """Verify verify_keys detects corrupted non-Fernet ciphertext."""
+    _, vault = deterministic_keyring
+
+    row = CredentialVault(
+        id=uuid4(),
+        platform_account_id=uuid4(),
+        encrypted_access_token="invalid_corrupt_ciphertext_bytes",
+        encrypted_refresh_token=None,
+        key_version=2,
+    )
+
+    mock_session = AsyncMock()
+    mock_res = MagicMock()
+    mock_res.scalars.return_value.all.return_value = [row]
+    mock_session.execute.return_value = mock_res
+
+    class MockSessionFactory:
+        async def __aenter__(self):
+            return mock_session
+
+        async def __aexit__(self, *args):
+            pass
+
+    service = VaultKeyRotationService(session_factory=MockSessionFactory, vault=vault)
+    report = await service.verify_keys(target_version=2)
+
+    assert report.failed_count == 1
+    assert report.entries[0].status == VaultEntryRotationStatus.CORRUPT_CIPHERTEXT
+
+
+def test_vault_multifernet_read_support():
+    """Verify CredentialVaultService decrypts across multi-key keyring with or without key_version."""
+    key1 = Fernet.generate_key().decode("utf-8")
+    key2 = Fernet.generate_key().decode("utf-8")
+
+    # Vault configured with both key 1 and key 2, active=2
+    vault = CredentialVaultService(keyring={1: key1, 2: key2}, active_version=2)
+
+    # Secret encrypted with key 1
+    f1 = Fernet(key1.encode("utf-8"))
+    c1 = f1.encrypt(b"token_encrypted_under_key1").decode("utf-8")
+
+    # Secret encrypted with key 2
+    f2 = Fernet(key2.encode("utf-8"))
+    c2 = f2.encrypt(b"token_encrypted_under_key2").decode("utf-8")
+
+    # Decrypt with exact key_version
+    assert vault.decrypt(c1, 1) == "token_encrypted_under_key1"
+    assert vault.decrypt(c2, 2) == "token_encrypted_under_key2"
+
+    # MultiFernet fallback: decrypt without key_version (e.g. OAuth PKCE verifier)
+    assert vault.decrypt(c1) == "token_encrypted_under_key1"
+    assert vault.decrypt(c2) == "token_encrypted_under_key2"
+
+
+def test_secret_redaction_guarantee():
+    """Verify that report output and exception formatting never expose raw encryption keys or tokens."""
+    vault_id = uuid4()
+    account_id = uuid4()
+    entry = VaultEntryResult(
+        vault_id=vault_id,
+        platform_account_id=account_id,
+        current_key_version=1,
+        target_key_version=2,
+        access_token_decryptable=False,
+        refresh_token_decryptable=None,
+        eligible=False,
+        status=VaultEntryRotationStatus.DECRYPTION_FAILED,
+        error_message="InvalidToken during authentication",
+    )
+    report = VaultRotationReport(
+        target_version=2,
+        active_configured_version=2,
+        mode="DRY_RUN",
+        total_evaluated=1,
+        failed_count=1,
+        entries=[entry],
+    )
+    report_text = format_report(report)
+
+    # Check for absence of secrets and key patterns
+    import re
+    assert not re.search(r"[A-Za-z0-9_-]{43}=", report_text)
+    assert "ya29." not in report_text
+    assert "1//" not in report_text
