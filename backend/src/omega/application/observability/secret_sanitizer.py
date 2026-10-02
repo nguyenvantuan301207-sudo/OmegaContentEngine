@@ -31,6 +31,7 @@ REDACT_KEYS = frozenset(
         "metrics_auth_token",
         "operator_auth_token",
         "omega_secret_encryption_key",
+        "omega_keyring",
         "pexels_api_key",
         "gemini_api_key",
         "google_client_secret",
@@ -57,7 +58,14 @@ def sanitize_string_value(val: str) -> str:
         val,
     )
     for key, secret in os.environ.items():
-        if secret and len(secret) >= 8 and any(marker in key.lower() for marker in REDACT_KEYS):
+        if (
+            secret
+            and len(secret) >= 8
+            and any(
+                key.lower() == marker if marker == "omega_keyring" else marker in key.lower()
+                for marker in REDACT_KEYS
+            )
+        ):
             val = val.replace(secret, "[REDACTED]")
     return val
 
@@ -72,7 +80,10 @@ def sanitize_event_dict(
         k_lower = str(k).lower()
 
         # Check if the key name is sensitive
-        if any(needle in k_lower for needle in REDACT_KEYS):
+        if any(
+            k_lower == needle if needle == "omega_keyring" else needle in k_lower
+            for needle in REDACT_KEYS
+        ):
             sanitized[k] = "[REDACTED]"
             continue
 

@@ -9,6 +9,7 @@
 *.pem
 *.key
 *.cert
+/secrets/omega_keyring.json
 
 # ── Python ──
 __pycache__/

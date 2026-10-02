@@ -19,6 +19,7 @@ from omega.application.vault_key_rotation import (
     VaultKeyRotationService,
     VaultRotationReport,
 )
+from omega.infrastructure.vault import CredentialVaultService, VaultConfigurationError
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
@@ -62,6 +63,12 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         type=int,
         default=None,
         help="Filter candidate rows by specific current key version.",
+    )
+    parser.add_argument(
+        "--keyring-file",
+        type=str,
+        default=None,
+        help="Path to secret keyring JSON file.",
     )
     return parser.parse_args(args)
 
@@ -128,10 +135,21 @@ async def main_async(args: argparse.Namespace) -> int:
         try:
             platform_account_uuid = UUID(args.platform_account_id)
         except ValueError:
-            print(f"Error: Invalid UUID for --platform-account-id: '{args.platform_account_id}'", file=sys.stderr)
+            print(
+                f"Error: Invalid UUID for --platform-account-id: '{args.platform_account_id}'",
+                file=sys.stderr,
+            )
             return 1
 
-    service = VaultKeyRotationService()
+    try:
+        vault = CredentialVaultService(
+            keyring_file=getattr(args, "keyring_file", None),
+        )
+    except VaultConfigurationError as exc:
+        print(f"Error initializing credential vault: {exc}", file=sys.stderr)
+        return 1
+
+    service = VaultKeyRotationService(vault=vault)
 
     # 1. Verification mode
     if getattr(args, "verify", False):
@@ -142,8 +160,8 @@ async def main_async(args: argparse.Namespace) -> int:
             )
             print(format_report(report))
             return 0 if report.failed_count == 0 else 1
-        except Exception as exc:
-            print(f"Error executing key verification: {exc}", file=sys.stderr)
+        except Exception:
+            print("Error executing key verification.", file=sys.stderr)
             return 1
 
     # 2. Rotation evaluation (dry-run) or execution mode
@@ -158,8 +176,8 @@ async def main_async(args: argparse.Namespace) -> int:
         )
         print(format_report(report))
         return 0 if report.failed_count == 0 else 1
-    except Exception as exc:
-        print(f"Error executing key rotation: {exc}", file=sys.stderr)
+    except Exception:
+        print("Error executing key rotation.", file=sys.stderr)
         return 1
 
 

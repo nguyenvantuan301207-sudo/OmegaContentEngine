@@ -39,7 +39,7 @@ The production target key (e.g., `key_version = 3`) and all historical encryptio
 - **Application Injection:**
   The container runtime receives the keyring via a read-only secret file mount or environment variable `OMEGA_KEYRING_FILE=/run/secrets/omega_keyring.json`.
 - **Active Key Version Configuration:**
-  `OMEGA_ACTIVE_KEY_VERSION=3`
+  `OMEGA_CURRENT_KEY_VERSION=3`
 - **Maintenance CLI Consumption:**
   The maintenance tool `python -m omega.maintenance.rotate_vault_keys` reads directly from the injected `CredentialVaultService` keyring without requiring command-line key arguments.
 - **Preflight Verification Without Echo:**
@@ -189,7 +189,7 @@ All steps require an offline maintenance window with the application stopped and
     ```
   - Assert exactly 1,630 rows verified; assert 125 dirty rows reported failed/excluded.
 - **Phase M8 — Promote Target Active Key:**
-  - Configure `OMEGA_ACTIVE_KEY_VERSION=3` in production configuration.
+  - Configure `OMEGA_CURRENT_KEY_VERSION=3` in production configuration.
 - **Phase M9 — Restart Application Services:**
   - Start `omega-api`, `omega-worker`, `omega-beat` with gates still OFF.
 - **Phase M10 — Application Canaries:**
@@ -201,3 +201,43 @@ All steps require an offline maintenance window with the application stopped and
   - Remove keys 1 and 2 from keyring configuration once all services stabilize.
 - **Phase M13 — Final Blocker B6 Closure Evidence:**
   - Persist signed disposition log and rotation verification manifest. Mark B6 CLOSED.
+
+
+## 8. PRE1 Secret-File Support and M9 Readiness Boundary
+
+The D1 implementation uses `load_keyring` in
+`backend/src/omega/infrastructure/vault.py` as the single resolution and
+validation authority. Runtime vault initialization, rotation CLI, and release
+rotation preflight consume it. New keyring Settings fields are intentionally
+absent; only the established legacy single-key Settings fallback remains for
+backward-compatible local `.env` configuration.
+
+Resolution order is explicit `OMEGA_KEYRING_FILE`, existing
+`/run/secrets/omega_keyring.json`, `OMEGA_KEYRING` JSON, then the legacy
+`OMEGA_SECRET_ENCRYPTION_KEY`. Configured invalid or empty sources fail closed.
+Only absence of the default file permits fallback. The loader rejects invalid
+UTF-8/JSON, non-object or empty keyrings, nonpositive/invalid versions, duplicate
+JSON or normalized versions, invalid Fernet material, absent active versions,
+nonregular files, POSIX world-writable files, and files over 64 KiB. Reads are
+bounded and never modify the source. Docker secret modes 0444 and 0440 are
+supported. Errors omit raw configuration values and parser exception details.
+
+The reviewed production Compose mounts the keyring only into API and worker.
+Beat schedules task messages and does not execute credential encryption; its
+scheduler and import paths do not initialize a vault. Beat therefore receives
+no encryption secret. Raw keyring and legacy encryption key variables are
+absent from this production Compose. This file has **not been deployed**.
+
+The current production image `omega:1ec61e14c01e84becd303119ef7546d0af15e5ed`
+has no keyring file loader and no entrypoint secret-file bridge. Its existing
+runtime keyring path consumes raw environment JSON. A process-environment
+wrapper or alternate startup mechanism would be a new compatibility mechanism
+requiring explicit architecture review; it is not an established M9 restart
+path. Implementing PRE1 on the D1 branch does not upgrade that image.
+
+`CURRENT_RUNTIME_SECRET_INJECTION_GAP = YES` and
+`M9_CURRENT_RUNTIME_SECURE_RESTART_PATH_PROVEN = NO`. Consequently
+`D1S_EXECUTION_READY = NO` until an explicit architecture decision authorizes
+and validates a minimal compatibility deployment before or inside D1S. The
+security contract is unchanged, and no production deployment or maintenance
+execution is authorized by this source patch.

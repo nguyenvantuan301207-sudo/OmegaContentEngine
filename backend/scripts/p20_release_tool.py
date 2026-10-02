@@ -19,6 +19,13 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Ensure omega source package is resolvable when run directly as a script
+_backend_src = Path(__file__).resolve().parent.parent / "src"
+if str(_backend_src) not in sys.path:
+    sys.path.insert(0, str(_backend_src))
+
+from omega.infrastructure.vault import VaultConfigurationError, load_keyring  # noqa: E402
+
 
 def check_publisher_absence(redis_url: str | None = None) -> dict[str, Any]:
     """Fail-closed assertion of publisher absence.
@@ -244,6 +251,7 @@ def check_rotation_preflight(
     expected_sha256: str | None = None,
     compose_path: Path | None = None,
     target_version: int | None = None,
+    keyring_file: Path | str | None = None,
 ) -> dict[str, Any]:
     """Fail-closed preflight for planned credential vault key rotation.
 
@@ -290,38 +298,31 @@ def check_rotation_preflight(
         results["passed"] = False
         results["violations"].append("External backup file must be provided and verified before rotation")
 
-    # 4. Keyring structural validation (zero leak)
-    env_key = os.getenv("OMEGA_SECRET_ENCRYPTION_KEY")
-    env_keyring = os.getenv("OMEGA_KEYRING")
-
-    keyring_present = bool(env_key or env_keyring)
-    results["details"]["keyring_configured"] = keyring_present
-    if not keyring_present:
-        results["passed"] = False
-        results["violations"].append("Neither OMEGA_SECRET_ENCRYPTION_KEY nor OMEGA_KEYRING is configured")
-    else:
-        try:
-            import base64
-            from cryptography.fernet import Fernet
-            if env_key:
-                k_bytes = env_key.strip().encode("utf-8")
-                assert len(base64.urlsafe_b64decode(k_bytes)) == 32
-                Fernet(k_bytes)
-                results["details"]["single_key_valid"] = True
-            if env_keyring:
-                parsed = json.loads(env_keyring)
-                versions_avail = sorted(int(k) for k in parsed.keys())
-                results["details"]["keyring_versions_available"] = versions_avail
-                for k, v in parsed.items():
-                    k_b = str(v).strip().encode("utf-8")
-                    assert len(base64.urlsafe_b64decode(k_b)) == 32
-                    Fernet(k_b)
-                if target_version is not None and target_version not in versions_avail:
-                    results["passed"] = False
-                    results["violations"].append(f"Target version {target_version} not in configured keyring")
-        except Exception as exc:
+    # 4. Keyring structural validation (zero leak, centralized authority)
+    try:
+        load_res = load_keyring(
+            keyring_file=str(keyring_file) if keyring_file is not None else None,
+        )
+        results["details"]["keyring_configured"] = True
+        results["details"]["keyring_source"] = load_res.source
+        results["details"]["keyring_source_path"] = load_res.source_path
+        results["details"]["key_versions_present"] = load_res.versions
+        results["details"]["keyring_versions_available"] = load_res.versions
+        results["details"]["active_key_version"] = load_res.active_version
+        results["details"]["keyring_valid"] = True
+        if target_version is not None and target_version not in load_res.versions:
             results["passed"] = False
-            results["violations"].append(f"Keyring structural validation failed: {exc}")
+            results["violations"].append(f"Target version {target_version} not in configured keyring")
+    except VaultConfigurationError as exc:
+        results["passed"] = False
+        results["details"]["keyring_configured"] = False
+        results["details"]["keyring_valid"] = False
+        results["violations"].append(f"Keyring validation failed: {exc}")
+    except Exception:
+        results["passed"] = False
+        results["details"]["keyring_configured"] = False
+        results["details"]["keyring_valid"] = False
+        results["violations"].append("Keyring structural validation failed.")
 
     return results
 
@@ -349,6 +350,7 @@ def main() -> None:
     rot_parser.add_argument("--sha256", help="Expected SHA-256 for backup")
     rot_parser.add_argument("--compose-file", default="docker-compose.prod.yml", help="Path to compose file")
     rot_parser.add_argument("--target-version", type=int, help="Target encryption key version")
+    rot_parser.add_argument("--keyring-file", help="Path to secret keyring file")
 
     # preflight
     pre_parser = subparsers.add_parser("preflight", help="Run full preflight checks")
@@ -378,6 +380,7 @@ def main() -> None:
             expected_sha256=args.sha256,
             compose_path=Path(args.compose_file),
             target_version=args.target_version,
+            keyring_file=args.keyring_file,
         )
         print(json.dumps(res, indent=2))
         sys.exit(0 if res["passed"] else 1)

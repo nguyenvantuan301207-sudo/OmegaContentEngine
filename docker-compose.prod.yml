@@ -62,6 +62,10 @@ services:
     command: uvicorn omega.main:app --host 0.0.0.0 --port 8000 --workers 1
     ports:
       - "${API_BIND_HOST:-127.0.0.1}:8000:8000"
+    secrets:
+      - source: omega_keyring
+        target: /run/secrets/omega_keyring.json
+        mode: 0440
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
@@ -71,7 +75,8 @@ services:
       AUTO_MIGRATE: "false"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
       MEDIA_STORAGE_ROOT: /app/data
-      OMEGA_SECRET_ENCRYPTION_KEY: ${OMEGA_SECRET_ENCRYPTION_KEY:?OMEGA_SECRET_ENCRYPTION_KEY is required}
+      OMEGA_KEYRING_FILE: /run/secrets/omega_keyring.json
+      OMEGA_CURRENT_KEY_VERSION: ${OMEGA_CURRENT_KEY_VERSION:-1}
       METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:?METRICS_AUTH_TOKEN required in production}
       OPERATOR_AUTH_TOKEN: ${OPERATOR_AUTH_TOKEN:?OPERATOR_AUTH_TOKEN required in production}
       RECURRING_SCHEDULER_ENABLED: ${RECURRING_SCHEDULER_ENABLED:-false}
@@ -117,6 +122,10 @@ services:
     image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set for production}}
     container_name: omega-worker
     command: celery -A omega.infrastructure.celery_app:celery_app worker --loglevel=info --concurrency=2 --queues=celery
+    secrets:
+      - source: omega_keyring
+        target: /run/secrets/omega_keyring.json
+        mode: 0440
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
@@ -125,7 +134,8 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       AUTO_MIGRATE: "false"
       MEDIA_STORAGE_ROOT: /app/data
-      OMEGA_SECRET_ENCRYPTION_KEY: ${OMEGA_SECRET_ENCRYPTION_KEY}
+      OMEGA_KEYRING_FILE: /run/secrets/omega_keyring.json
+      OMEGA_CURRENT_KEY_VERSION: ${OMEGA_CURRENT_KEY_VERSION:-1}
       RECURRING_SCHEDULER_ENABLED: ${RECURRING_SCHEDULER_ENABLED:-false}
       ANALYTICS_API_ENABLED: ${ANALYTICS_API_ENABLED:-false}
       ANALYTICS_ROLLUP_ENABLED: ${ANALYTICS_ROLLUP_ENABLED:-false}
@@ -203,3 +213,7 @@ volumes:
   omega-postgres-data:
   omega-media-data:
   omega-models:
+
+secrets:
+  omega_keyring:
+    file: ${OMEGA_KEYRING_FILE_HOST:-./secrets/omega_keyring.json}
