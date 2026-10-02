@@ -198,3 +198,78 @@ def test_02_migration_026_constraint_enforcement():
                 """),
                 {"id": uuid4(), "b_start": t_start, "b_end": t_end},
             )
+
+
+def test_03_utc_daily_bucket_dst_and_timezone_independence():
+    """Prove chk_rollup_daily_utc_bucket is strictly session-timezone independent across DST boundaries.
+
+    Tests both US Spring-Forward (2026-03-08) and Fall-Back (2026-11-01) boundaries under
+    'America/Los_Angeles' and 'UTC' session time zones.
+    """
+    engine = create_engine(ISOLATED_SYNC_URL)
+
+    test_zones = ["America/Los_Angeles", "UTC"]
+    dst_cases = [
+        ("spring_forward", datetime(2026, 3, 8, 0, 0, 0, tzinfo=UTC), datetime(2026, 3, 9, 0, 0, 0, tzinfo=UTC)),
+        ("fall_back", datetime(2026, 11, 1, 0, 0, 0, tzinfo=UTC), datetime(2026, 11, 2, 0, 0, 0, tzinfo=UTC)),
+    ]
+
+    for zone in test_zones:
+        with engine.connect() as conn:
+            conn.execute(text(f"SET TIME ZONE '{zone}';"))
+            current_tz = conn.execute(text("SHOW TIME ZONE;")).scalar()
+            assert current_tz == zone
+
+            for case_name, valid_start, valid_end in dst_cases:
+                # 1. Valid UTC midnight-to-midnight (24 wall-clock UTC hours) succeeds
+                with conn.begin_nested():
+                    conn.execute(text("DELETE FROM pipeline_analytics_rollups;"))
+                    conn.execute(
+                        text("""
+                            INSERT INTO pipeline_analytics_rollups
+                            (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
+                            VALUES
+                            (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start, :b_end, '{}', 0, 1);
+                        """),
+                        {"id": uuid4(), "b_start": valid_start, "b_end": valid_end},
+                    )
+
+                # 2. Invalid start: midday (12:00Z) fails
+                with pytest.raises(IntegrityError, match="chk_rollup_daily_utc_bucket"):
+                    with conn.begin_nested():
+                        conn.execute(
+                            text("""
+                                INSERT INTO pipeline_analytics_rollups
+                                (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
+                                VALUES
+                                (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start, :b_end, '{}', 0, 1);
+                            """),
+                            {"id": uuid4(), "b_start": valid_start + timedelta(hours=12), "b_end": valid_start + timedelta(hours=36)},
+                        )
+
+                # 3. Invalid end: 23-hour bucket (bucket_end at 23:00Z) fails
+                with pytest.raises(IntegrityError, match="chk_rollup_daily_utc_bucket"):
+                    with conn.begin_nested():
+                        conn.execute(
+                            text("""
+                                INSERT INTO pipeline_analytics_rollups
+                                (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
+                                VALUES
+                                (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start, :b_end, '{}', 0, 1);
+                            """),
+                            {"id": uuid4(), "b_start": valid_start, "b_end": valid_start + timedelta(hours=23)},
+                        )
+
+                # 4. Invalid end: 25-hour bucket (bucket_end at 01:00Z next day) fails
+                with pytest.raises(IntegrityError, match="chk_rollup_daily_utc_bucket"):
+                    with conn.begin_nested():
+                        conn.execute(
+                            text("""
+                                INSERT INTO pipeline_analytics_rollups
+                                (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
+                                VALUES
+                                (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start, :b_end, '{}', 0, 1);
+                            """),
+                            {"id": uuid4(), "b_start": valid_start, "b_end": valid_start + timedelta(hours=25)},
+                        )
+            conn.rollback()
