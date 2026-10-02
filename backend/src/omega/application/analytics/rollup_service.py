@@ -147,17 +147,21 @@ class RollupService:
         start_utc = to_utc(bucket_start)
         end_utc = to_utc(bucket_end)
 
-        # 1. Acquire transaction-level advisory lock to serialize concurrent replacements of (family, bucket_start)
-        try:
-            bind = session.get_bind()
-            if hasattr(bind, "dialect") and bind.dialect.name == "postgresql":
+        # 1. Acquire transaction-level advisory lock to serialize concurrent replacements of (family, bucket_start) (H4)
+        bind = session.get_bind()
+        if hasattr(bind, "dialect") and bind.dialect.name == "postgresql":
+            try:
                 lock_key = f"{family}:{start_utc.isoformat()}"
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
                     {"lock_key": lock_key},
                 )
-        except Exception as exc:
-            logger.warning("advisory_lock_skipped", family=family, error=str(exc))
+            except Exception as exc:
+                logger.error("advisory_lock_failed", family=family, error=str(exc))
+                raise RuntimeError(
+                    f"Failed to acquire PostgreSQL transaction advisory lock for rollup family '{family}' "
+                    f"at bucket '{start_utc.isoformat()}': {exc}"
+                ) from exc
 
         # 2. Delete prior rows for exact family + bucket_start
         try:

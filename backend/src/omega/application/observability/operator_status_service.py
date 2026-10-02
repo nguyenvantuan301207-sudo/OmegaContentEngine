@@ -20,6 +20,11 @@ async def collect_operator_status() -> dict:
         "timestamp_epoch": time.time(),
         "environment": settings.environment,
         "version": settings.app_version,
+        "provenance": {
+            "source_commit": settings.source_commit,
+            "image_tag": settings.image_tag,
+            "build_timestamp": settings.build_timestamp,
+        },
         "gates": {
             k: getattr(settings, k)
             for k in [

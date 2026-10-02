@@ -103,7 +103,3 @@ async def read_telemetry_counters() -> tuple[dict[str, int], bool]:
         return counters, True
     except Exception:
         return {}, False
-
-
-async def get_all_telemetry_counters() -> dict[str, int]:
-    return (await read_telemetry_counters())[0]

@@ -10,9 +10,9 @@ Merging code to `main` must never automatically alter running production contain
 
 ---
 
-## 2. Era 1: Transition Era (Current Production Decoupling)
+## 2. Era 1: Transition Era (COMPLETED on 2026-10-02)
 
-Currently, shared containers bind-mount `backend -> /app` and `omega-api` runs `uvicorn --reload` with `AUTO_MIGRATE=true`.
+The P20-C3 production decoupling operation is **COMPLETED**. Historically, shared containers bind-mounted `backend -> /app` and `omega-api` ran `uvicorn --reload` with `AUTO_MIGRATE=true`. On 2026-10-02 14:35 ICT, production was decoupled to immutable image `omega:1ec61e14c01e84becd303119ef7546d0af15e5ed` with zero bind mounts, reload OFF, and `AUTO_MIGRATE=false`.
 To prevent premature deployment upon merging P20-C, the following transition workflow is strictly required:
 
 ```mermaid

@@ -1,0 +1,36 @@
+# OMEGA - Publisher Worker Isolated Topology (Post-P20)
+# -----------------------------------------------------------------------------
+# IMPORTANT ARCHITECTURAL BOUNDARY:
+# This service is intentionally isolated from the primary production compose file.
+# It MUST NOT be included in default production deployments or bulk compose operations.
+# Publishing remains OUTSIDE P20 scope and must NOT be started during P20.
+# -----------------------------------------------------------------------------
+
+services:
+  omega-publisher-worker:
+    image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set}}
+    container_name: omega-publisher-worker
+    command: celery -A omega.infrastructure.celery_app:celery_app worker --loglevel=info --concurrency=1 --prefetch-multiplier=1 --queues=omega-publisher
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AUTO_MIGRATE: "false"
+      SERVICE_NAME: omega-publisher-worker
+    depends_on:
+      omega-postgres:
+        condition: service_healthy
+      omega-redis:
+        condition: service_healthy
+    volumes:
+      - omega-media-data:/app/data
+      - omega-models:/app/models
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"

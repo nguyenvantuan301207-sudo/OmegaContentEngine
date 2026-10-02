@@ -1,6 +1,5 @@
-# ──────────────────────────────────────────────────────────────
-# OMEGA — Production Docker Compose (Immutable Images Only)
-# ──────────────────────────────────────────────────────────────
+# OMEGA - Production Docker Compose (Immutable Images Only)
+# -----------------------------------------------------------------------------
 #
 # Production Rules:
 # 1. Immutable image tag required (IMAGE_TAG must be set; no mutable :latest)
@@ -8,11 +7,15 @@
 # 3. Zero uvicorn --reload
 # 4. AUTO_MIGRATE=false (migrations are explicit standalone steps)
 # 5. API workers = 1
-# 6. All feature gates default to false
-# ──────────────────────────────────────────────────────────────
+# 6. All feature gates default to false (${NAME:-false})
+# 7. Database and Redis are internal-only (no host port exposure)
+# 8. API port is bound to protected interface (${API_BIND_HOST:-127.0.0.1})
+# 9. Publisher worker is excluded from primary production topology (B6)
+# 10. Log rotation and graceful shutdown bounds are explicitly defined (H1)
+# -----------------------------------------------------------------------------
 
 services:
-  # ── PostgreSQL ──
+  # -- PostgreSQL (Internal Network Only - B3) --
   omega-postgres:
     image: postgres:16-alpine
     container_name: omega-postgres
@@ -20,8 +23,6 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-omega}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
       POSTGRES_DB: ${POSTGRES_DB:-omega}
-    ports:
-      - "5432:5432"
     volumes:
       - omega-postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -30,27 +31,37 @@ services:
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
-  # ── Redis ──
+  # -- Redis (Internal Network Only - B3) --
   omega-redis:
     image: redis:7-alpine
     container_name: omega-redis
-    ports:
-      - "6379:6379"
     healthcheck:
       test: [ "CMD", "redis-cli", "ping" ]
       interval: 10s
       timeout: 5s
       retries: 5
     restart: unless-stopped
+    stop_grace_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
-  # ── FastAPI Backend (Immutable) ──
+  # -- FastAPI Backend (Immutable) --
   omega-api:
     image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set for production}}
     container_name: omega-api
     command: uvicorn omega.main:app --host 0.0.0.0 --port 8000 --workers 1
     ports:
-      - "8000:8000"
+      - "${API_BIND_HOST:-127.0.0.1}:8000:8000"
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
       DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
@@ -63,12 +74,20 @@ services:
       OMEGA_SECRET_ENCRYPTION_KEY: ${OMEGA_SECRET_ENCRYPTION_KEY:?OMEGA_SECRET_ENCRYPTION_KEY is required}
       METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:?METRICS_AUTH_TOKEN required in production}
       OPERATOR_AUTH_TOKEN: ${OPERATOR_AUTH_TOKEN:?OPERATOR_AUTH_TOKEN required in production}
-      RECURRING_SCHEDULER_ENABLED: "false"
-      ANALYTICS_API_ENABLED: "false"
-      ANALYTICS_ROLLUP_ENABLED: "false"
-      CAMPAIGN_ORCHESTRATION_ENABLED: "false"
-      PRODUCTION_DISPATCH_RECOVERY_ENABLED: "false"
-      PRODUCTION_LEASE_SWEEP_ENABLED: "false"
+      RECURRING_SCHEDULER_ENABLED: ${RECURRING_SCHEDULER_ENABLED:-false}
+      ANALYTICS_API_ENABLED: ${ANALYTICS_API_ENABLED:-false}
+      ANALYTICS_ROLLUP_ENABLED: ${ANALYTICS_ROLLUP_ENABLED:-false}
+      CAMPAIGN_ORCHESTRATION_ENABLED: ${CAMPAIGN_ORCHESTRATION_ENABLED:-false}
+      PRODUCTION_DISPATCH_RECOVERY_ENABLED: ${PRODUCTION_DISPATCH_RECOVERY_ENABLED:-false}
+      PRODUCTION_LEASE_SWEEP_ENABLED: ${PRODUCTION_LEASE_SWEEP_ENABLED:-false}
+      PRODUCTION_DISPATCH_TIMEOUT_SECONDS: ${PRODUCTION_DISPATCH_TIMEOUT_SECONDS:-30}
+      CAMPAIGN_RECONCILIATION_INTERVAL_SECONDS: ${CAMPAIGN_RECONCILIATION_INTERVAL_SECONDS:-5}
+      PRODUCTION_LEASE_SWEEP_INTERVAL_SECONDS: ${PRODUCTION_LEASE_SWEEP_INTERVAL_SECONDS:-60}
+      PRODUCTION_LEASE_TIMEOUT_SECONDS: ${PRODUCTION_LEASE_TIMEOUT_SECONDS:-300}
+      RECURRING_SCHEDULER_INTERVAL_SECONDS: ${RECURRING_SCHEDULER_INTERVAL_SECONDS:-60}
+      RECURRING_SCHEDULER_CATCH_UP_CAP: ${RECURRING_SCHEDULER_CATCH_UP_CAP:-5}
+      ANALYTICS_ROLLUP_INTERVAL_MINUTES: ${ANALYTICS_ROLLUP_INTERVAL_MINUTES:-60}
+      ANALYTICS_ROLLUP_LOOKBACK_HOURS: ${ANALYTICS_ROLLUP_LOOKBACK_HOURS:-168}
       SERVICE_NAME: omega-api
     depends_on:
       omega-postgres:
@@ -86,8 +105,14 @@ services:
       retries: 5
       start_period: 15s
     restart: unless-stopped
+    stop_grace_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
-  # ── Celery Worker (Immutable) ──
+  # -- Celery Worker (Immutable) --
   omega-worker:
     image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set for production}}
     container_name: omega-worker
@@ -101,12 +126,16 @@ services:
       AUTO_MIGRATE: "false"
       MEDIA_STORAGE_ROOT: /app/data
       OMEGA_SECRET_ENCRYPTION_KEY: ${OMEGA_SECRET_ENCRYPTION_KEY}
-      RECURRING_SCHEDULER_ENABLED: "false"
-      ANALYTICS_API_ENABLED: "false"
-      ANALYTICS_ROLLUP_ENABLED: "false"
-      CAMPAIGN_ORCHESTRATION_ENABLED: "false"
-      PRODUCTION_DISPATCH_RECOVERY_ENABLED: "false"
-      PRODUCTION_LEASE_SWEEP_ENABLED: "false"
+      RECURRING_SCHEDULER_ENABLED: ${RECURRING_SCHEDULER_ENABLED:-false}
+      ANALYTICS_API_ENABLED: ${ANALYTICS_API_ENABLED:-false}
+      ANALYTICS_ROLLUP_ENABLED: ${ANALYTICS_ROLLUP_ENABLED:-false}
+      CAMPAIGN_ORCHESTRATION_ENABLED: ${CAMPAIGN_ORCHESTRATION_ENABLED:-false}
+      PRODUCTION_DISPATCH_RECOVERY_ENABLED: ${PRODUCTION_DISPATCH_RECOVERY_ENABLED:-false}
+      PRODUCTION_LEASE_SWEEP_ENABLED: ${PRODUCTION_LEASE_SWEEP_ENABLED:-false}
+      PRODUCTION_DISPATCH_TIMEOUT_SECONDS: ${PRODUCTION_DISPATCH_TIMEOUT_SECONDS:-30}
+      CAMPAIGN_RECONCILIATION_INTERVAL_SECONDS: ${CAMPAIGN_RECONCILIATION_INTERVAL_SECONDS:-5}
+      PRODUCTION_LEASE_SWEEP_INTERVAL_SECONDS: ${PRODUCTION_LEASE_SWEEP_INTERVAL_SECONDS:-60}
+      PRODUCTION_LEASE_TIMEOUT_SECONDS: ${PRODUCTION_LEASE_TIMEOUT_SECONDS:-300}
       SERVICE_NAME: omega-worker
     depends_on:
       omega-postgres:
@@ -123,8 +152,14 @@ services:
       timeout: 3s
       retries: 3
     restart: unless-stopped
+    stop_grace_period: 60s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
-  # ── Celery Beat Scheduler (Immutable) ──
+  # -- Celery Beat Scheduler (Immutable) --
   omega-beat:
     image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set for production}}
     container_name: omega-beat
@@ -136,12 +171,12 @@ services:
       ENVIRONMENT: production
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       AUTO_MIGRATE: "false"
-      RECURRING_SCHEDULER_ENABLED: "false"
-      ANALYTICS_API_ENABLED: "false"
-      ANALYTICS_ROLLUP_ENABLED: "false"
-      CAMPAIGN_ORCHESTRATION_ENABLED: "false"
-      PRODUCTION_DISPATCH_RECOVERY_ENABLED: "false"
-      PRODUCTION_LEASE_SWEEP_ENABLED: "false"
+      RECURRING_SCHEDULER_ENABLED: ${RECURRING_SCHEDULER_ENABLED:-false}
+      ANALYTICS_API_ENABLED: ${ANALYTICS_API_ENABLED:-false}
+      ANALYTICS_ROLLUP_ENABLED: ${ANALYTICS_ROLLUP_ENABLED:-false}
+      CAMPAIGN_ORCHESTRATION_ENABLED: ${CAMPAIGN_ORCHESTRATION_ENABLED:-false}
+      PRODUCTION_DISPATCH_RECOVERY_ENABLED: ${PRODUCTION_DISPATCH_RECOVERY_ENABLED:-false}
+      PRODUCTION_LEASE_SWEEP_ENABLED: ${PRODUCTION_LEASE_SWEEP_ENABLED:-false}
       SERVICE_NAME: omega-beat
     depends_on:
       omega-postgres:
@@ -157,30 +192,12 @@ services:
       timeout: 3s
       retries: 3
     restart: unless-stopped
-
-  # Opt-in publisher worker
-  omega-publisher-worker:
-    profiles: [ "publisher" ]
-    image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set for production}}
-    container_name: omega-publisher-worker
-    command: celery -A omega.infrastructure.celery_app:celery_app worker --loglevel=info --concurrency=1 --prefetch-multiplier=1 --queues=omega-publisher
-    environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
-      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
-      REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
-      ENVIRONMENT: production
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
-      AUTO_MIGRATE: "false"
-      SERVICE_NAME: omega-publisher-worker
-    depends_on:
-      omega-postgres:
-        condition: service_healthy
-      omega-redis:
-        condition: service_healthy
-    volumes:
-      - omega-media-data:/app/data
-      - omega-models:/app/models
-    restart: unless-stopped
+    stop_grace_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
 
 volumes:
   omega-postgres-data:
