@@ -1,0 +1,185 @@
+# ──────────────────────────────────────────────────────────────
+# OMEGA — Production Docker Compose (Immutable Images Only)
+# ──────────────────────────────────────────────────────────────
+#
+# Production Rules:
+# 1. Immutable image tag required (IMAGE_TAG must be set; no mutable :latest)
+# 2. Zero source code bind mounts to /app
+# 3. Zero uvicorn --reload
+# 4. AUTO_MIGRATE=false (migrations are explicit standalone steps)
+# 5. API workers = 1
+# 6. All feature gates default to false
+# ──────────────────────────────────────────────────────────────
+
+services:
+  # ── PostgreSQL ──
+  omega-postgres:
+    image: postgres:16-alpine
+    container_name: omega-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-omega}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in production}
+      POSTGRES_DB: ${POSTGRES_DB:-omega}
+    ports:
+      - "5432:5432"
+    volumes:
+      - omega-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-omega}" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── Redis ──
+  omega-redis:
+    image: redis:7-alpine
+    container_name: omega-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ── FastAPI Backend (Immutable) ──
+  omega-api:
+    image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set for production}}
+    container_name: omega-api
+    command: uvicorn omega.main:app --host 0.0.0.0 --port 8000 --workers 1
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AUTO_MIGRATE: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+      MEDIA_STORAGE_ROOT: /app/data
+      OMEGA_SECRET_ENCRYPTION_KEY: ${OMEGA_SECRET_ENCRYPTION_KEY:?OMEGA_SECRET_ENCRYPTION_KEY is required}
+      METRICS_AUTH_TOKEN: ${METRICS_AUTH_TOKEN:?METRICS_AUTH_TOKEN required in production}
+      OPERATOR_AUTH_TOKEN: ${OPERATOR_AUTH_TOKEN:?OPERATOR_AUTH_TOKEN required in production}
+      RECURRING_SCHEDULER_ENABLED: "false"
+      ANALYTICS_API_ENABLED: "false"
+      ANALYTICS_ROLLUP_ENABLED: "false"
+      CAMPAIGN_ORCHESTRATION_ENABLED: "false"
+      PRODUCTION_DISPATCH_RECOVERY_ENABLED: "false"
+      PRODUCTION_LEASE_SWEEP_ENABLED: "false"
+      SERVICE_NAME: omega-api
+    depends_on:
+      omega-postgres:
+        condition: service_healthy
+      omega-redis:
+        condition: service_healthy
+    volumes:
+      - omega-media-data:/app/data
+      - omega-models:/app/models
+    healthcheck:
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Celery Worker (Immutable) ──
+  omega-worker:
+    image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set for production}}
+    container_name: omega-worker
+    command: celery -A omega.infrastructure.celery_app:celery_app worker --loglevel=info --concurrency=2 --queues=celery
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AUTO_MIGRATE: "false"
+      MEDIA_STORAGE_ROOT: /app/data
+      OMEGA_SECRET_ENCRYPTION_KEY: ${OMEGA_SECRET_ENCRYPTION_KEY}
+      RECURRING_SCHEDULER_ENABLED: "false"
+      ANALYTICS_API_ENABLED: "false"
+      ANALYTICS_ROLLUP_ENABLED: "false"
+      CAMPAIGN_ORCHESTRATION_ENABLED: "false"
+      PRODUCTION_DISPATCH_RECOVERY_ENABLED: "false"
+      PRODUCTION_LEASE_SWEEP_ENABLED: "false"
+      SERVICE_NAME: omega-worker
+    depends_on:
+      omega-postgres:
+        condition: service_healthy
+      omega-redis:
+        condition: service_healthy
+    volumes:
+      - omega-media-data:/app/data
+      - omega-models:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-m", "omega.application.observability.process_health", "worker"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  # ── Celery Beat Scheduler (Immutable) ──
+  omega-beat:
+    image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set for production}}
+    container_name: omega-beat
+    command: celery -A omega.infrastructure.celery_app:celery_app beat --loglevel=info
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AUTO_MIGRATE: "false"
+      RECURRING_SCHEDULER_ENABLED: "false"
+      ANALYTICS_API_ENABLED: "false"
+      ANALYTICS_ROLLUP_ENABLED: "false"
+      CAMPAIGN_ORCHESTRATION_ENABLED: "false"
+      PRODUCTION_DISPATCH_RECOVERY_ENABLED: "false"
+      PRODUCTION_LEASE_SWEEP_ENABLED: "false"
+      SERVICE_NAME: omega-beat
+    depends_on:
+      omega-postgres:
+        condition: service_healthy
+      omega-redis:
+        condition: service_healthy
+    volumes:
+      - omega-media-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-m", "omega.application.observability.process_health", "beat"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    restart: unless-stopped
+
+  # Opt-in publisher worker
+  omega-publisher-worker:
+    profiles: [ "publisher" ]
+    image: ${OMEGA_IMAGE:-omega:${IMAGE_TAG:?IMAGE_TAG must be set for production}}
+    container_name: omega-publisher-worker
+    command: celery -A omega.infrastructure.celery_app:celery_app worker --loglevel=info --concurrency=1 --prefetch-multiplier=1 --queues=omega-publisher
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:${POSTGRES_PASSWORD}@omega-postgres:5432/omega}
+      REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
+      ENVIRONMENT: production
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      AUTO_MIGRATE: "false"
+      SERVICE_NAME: omega-publisher-worker
+    depends_on:
+      omega-postgres:
+        condition: service_healthy
+      omega-redis:
+        condition: service_healthy
+    volumes:
+      - omega-media-data:/app/data
+      - omega-models:/app/models
+    restart: unless-stopped
+
+volumes:
+  omega-postgres-data:
+  omega-media-data:
+  omega-models:

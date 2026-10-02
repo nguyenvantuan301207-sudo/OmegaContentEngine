@@ -283,6 +283,11 @@ class ProductionDispatchService:
                     "intent_id": str(new_intent.id),
                 },
             )
+            try:
+                from omega.application.observability.telemetry import increment_event_counter_async
+                await increment_event_counter_async("omega_render_redispatches_total", 1)
+            except Exception:
+                pass
             return {"action": "REDISPATCHED", "new_generation": new_gen, "job_id": str(job.id)}
 
         # Budget exhausted -> Monotonically fail job and parent request
@@ -307,6 +312,11 @@ class ProductionDispatchService:
             lock=False,  # Already locked in canonical order above!
         )
         await session.commit()
+        try:
+            from omega.application.observability.telemetry import increment_event_counter_async
+            await increment_event_counter_async("omega_render_dispatch_exhaustions_total", 1)
+        except Exception:
+            pass
 
         logger.error(
             "production_dispatch_delivery_exhausted",

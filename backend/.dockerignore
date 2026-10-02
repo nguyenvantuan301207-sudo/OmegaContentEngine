@@ -5,3 +5,38 @@ __pycache__/
 models/
 *.onnx
 *.bin
+
+# Secrets and local credentials
+.env
+.env.*
+*.pem
+*.key
+*.cert
+*.secret
+
+# Database dumps and backup artifacts
+*.dump
+*.sql
+*.tar
+*.gz
+
+# Media, storage, and scratch artifacts
+data/
+storage/
+scratch/
+media/
+*.mp4
+*.wav
+*.mp3
+
+# Version control
+.git/
+.gitignore
+
+# Test fixtures contain sentinel credentials; keep them out of runtime images.
+tests/
+scripts/
+.pytest_cache/
+.coverage*
+htmlcov/
+*.egg-info/

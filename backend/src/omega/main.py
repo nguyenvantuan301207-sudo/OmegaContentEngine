@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from omega.api.errors import register_error_handlers
-from omega.api.middleware import RequestIDMiddleware
+from omega.api.middleware import PrometheusMetricsMiddleware, RequestIDMiddleware
 from omega.api.router import api_router
 from omega.config import get_settings
 from omega.logging import get_logger, setup_logging
@@ -61,6 +61,7 @@ def create_app() -> FastAPI:
 
     # Request-ID middleware
     app.add_middleware(RequestIDMiddleware)
+    app.add_middleware(PrometheusMetricsMiddleware)
 
     # Error handlers
     register_error_handlers(app)

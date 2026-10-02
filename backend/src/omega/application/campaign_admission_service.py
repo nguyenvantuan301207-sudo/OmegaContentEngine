@@ -345,6 +345,13 @@ async def _reserve_one_in_transaction(
         campaign_active >= int(campaign.max_concurrent_missions or 0)
         or channel_active >= settings.campaign_channel_max_active_missions
     ):
+        try:
+            from omega.application.observability.telemetry import increment_event_counter_async
+            await increment_event_counter_async(
+                "omega_campaign_admissions_total", 1, {"status": "CAPACITY_FULL"}
+            )
+        except Exception:
+            pass
         return None, "CAPACITY_FULL"
     item = (
         await session.execute(

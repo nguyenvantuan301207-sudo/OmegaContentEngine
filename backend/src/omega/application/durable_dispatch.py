@@ -218,7 +218,18 @@ class DurableDispatchService:
             .values(state=RETRY, claimed_at=None, claim_token=None, next_attempt_at=now)
         )
         session.commit()
-        return int((dead_result.rowcount or 0) + (retry_result.rowcount or 0))
+        dead_count = int(dead_result.rowcount or 0)
+        retry_count = int(retry_result.rowcount or 0)
+        try:
+            if dead_count > 0:
+                from omega.application.observability.telemetry import increment_event_counter_sync
+                increment_event_counter_sync("omega_dispatch_outbox_dead_letters_total", dead_count)
+            if retry_count > 0:
+                from omega.application.observability.telemetry import increment_event_counter_sync
+                increment_event_counter_sync("omega_dispatch_outbox_retries_total", retry_count)
+        except Exception:
+            pass
+        return dead_count + retry_count
 
     @staticmethod
     def claim_batch(session: Session, *, limit: int = 25) -> list[DurableDispatchIntent]:
@@ -289,6 +300,12 @@ class DurableDispatchService:
         intent.claimed_at = None
         intent.claim_token = None
         session.commit()
+        try:
+            from omega.application.observability.telemetry import increment_event_counter_sync
+            metric = "omega_dispatch_outbox_dead_letters_total" if intent.state == DEAD_LETTER else "omega_dispatch_outbox_retries_total"
+            increment_event_counter_sync(metric, 1)
+        except Exception:
+            pass
         return intent.state
 
     @classmethod

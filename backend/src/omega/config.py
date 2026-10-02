@@ -102,6 +102,26 @@ class Settings(BaseSettings):
     analytics_rollup_lookback_days: int = 2
     analytics_rollup_interval_seconds: int = 3600
 
+    # ── P20-C Observability & Production Operations ──
+    # Configurable probe timeouts & cache thresholds (CONFIGURABLE_UNTUNED)
+    observability_db_collector_cache_ttl_seconds: int = 5
+    db_health_timeout_seconds: float = 1.0
+    redis_health_timeout_seconds: float = 1.0
+    beat_health_threshold_seconds: float = 30.0
+
+    # Production access control: Fail-closed in production if None
+    metrics_auth_token: str | None = None
+    operator_auth_token: str | None = None
+
+    @field_validator("observability_db_collector_cache_ttl_seconds")
+    @classmethod
+    def validate_observability_db_collector_cache_ttl(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(
+                f"observability_db_collector_cache_ttl_seconds ({v}) must be greater than 0"
+            )
+        return v
+
     @field_validator("analytics_rollup_lookback_days")
     @classmethod
     def validate_analytics_rollup_lookback_days(cls, v: int) -> int:

@@ -6,6 +6,10 @@ Uses Redis as both broker and result backend.
 from __future__ import annotations
 
 from celery import Celery
+import time
+from typing import Any
+from celery.beat import PersistentScheduler
+from celery.signals import task_postrun, task_prerun, setup_logging as celery_setup_logging
 from kombu import Queue
 
 from omega.config import get_settings
@@ -21,6 +25,57 @@ PUBLISHER_WORKER_CONCURRENCY_DEFAULT = 1
 PUBLISHER_WORKER_PREFETCH_MULTIPLIER = 1
 PUBLISHER_TASK_ACKS_LATE = True
 PUBLISHER_TASK_REJECT_ON_WORKER_LOST = True
+
+class OmegaBeatScheduler(PersistentScheduler):
+    """Custom Beat scheduler with process-local liveness and Redis loop advancement signals."""
+
+    def tick(self, *args: Any, **kwargs: Any) -> float:
+        # 1. Process-local liveness touchfile (zero external dependency)
+        try:
+            with open("/tmp/beat_heartbeat", "w", encoding="utf-8") as f:
+                f.write(str(time.time()))
+        except Exception:
+            pass
+
+        # 2. Redis loop advancement telemetry (best-effort, fail-safe)
+        try:
+            import redis
+            sync_redis = redis.Redis.from_url(settings.redis_url, socket_timeout=0.2, socket_connect_timeout=0.2)
+            sync_redis.set("omega:beat:last_tick", str(time.time()), ex=120)
+            sync_redis.close()
+        except Exception:
+            pass
+
+        return super().tick(*args, **kwargs)
+
+
+@celery_setup_logging.connect
+def configure_worker_logging(**kwargs: Any) -> None:
+    from omega.logging import setup_logging
+    setup_logging(settings.log_level)
+
+
+@task_prerun.connect
+def on_task_prerun(task_id: str, task: Any, *args: Any, **kwargs: Any) -> None:
+    try:
+        from omega.application.observability.logging_context import bind_correlation_context, clear_correlation_context
+        clear_correlation_context()
+        bind_correlation_context(task_id=task_id, task_name=getattr(task, "name", None), **{k:v for k,v in (kwargs.get("kwargs") or {}).items() if k not in {"task_id", "task_name"}})
+        with open("/tmp/worker_heartbeat", "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+    except Exception:
+        pass
+
+
+@task_postrun.connect
+def on_task_postrun(task_id: str, task: Any, *args: Any, **kwargs: Any) -> None:
+    from omega.application.observability.logging_context import clear_correlation_context
+
+    try:
+        clear_correlation_context()
+    except Exception:
+        pass
+
 
 celery_app = Celery(
     "omega",
@@ -42,6 +97,8 @@ celery_app.conf.update(
     task_create_missing_queues=False,
     worker_hijack_root_logger=False,
     broker_connection_retry_on_startup=True,
+    beat_scheduler=OmegaBeatScheduler,
+    beat_max_loop_interval=5.0,
     beat_schedule={
         "durable-dispatch-relay": {
             "task": "omega.dispatch.relay",
