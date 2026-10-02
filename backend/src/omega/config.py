@@ -102,6 +102,20 @@ class Settings(BaseSettings):
     analytics_rollup_lookback_days: int = 2
     analytics_rollup_interval_seconds: int = 3600
 
+    @field_validator("analytics_rollup_lookback_days")
+    @classmethod
+    def validate_analytics_rollup_lookback_days(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"analytics_rollup_lookback_days ({v}) must be greater than 0")
+        return v
+
+    @field_validator("analytics_rollup_interval_seconds")
+    @classmethod
+    def validate_analytics_rollup_interval_seconds(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError(f"analytics_rollup_interval_seconds ({v}) must be greater than 0")
+        return v
+
     @field_validator("scheduler_minimum_interval_seconds")
     @classmethod
     def validate_scheduler_minimum_interval(cls, v: int) -> int:

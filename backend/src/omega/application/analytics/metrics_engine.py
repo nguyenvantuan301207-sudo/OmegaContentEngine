@@ -75,6 +75,8 @@ class PipelineMetricsCalculationEngine:
         Attribution: Strictly completed_at.
         Rows missing completed_at are NEVER attributed to a daily bucket (NO_SYNTHETIC_TERMINAL_TIMESTAMP).
         Denominator: SUCCEEDED + FAILED. CANCELLED is reported separately and excluded from rate denominator.
+        Dispatch Exhaustion: Counts strictly terminal jobs with state == FAILED AND error_code == DISPATCH_DELIVERY_EXHAUSTED.
+        Does NOT infer exhaustion merely from attempt >= max_attempts (DISPATCH_EXHAUSTION_METRIC_SEMANTICS_CORRECT = YES).
         """
         start_utc = to_utc(start_time)
         end_utc = to_utc(end_time)
@@ -166,6 +168,12 @@ class PipelineMetricsCalculationEngine:
         """Compute latency percentiles over half-open [start_time, end_time).
 
         Filters only RenderJob dispatch intents (RENDER_DISPATCH_INTENT_FILTER_VERIFIED = YES).
+        Broker Send Latency Population: Defined as each broker send attempt for render dispatch intents
+        (task_name='omega.production.render', purpose='PRODUCTION_RENDER_DISPATCH', render_job_id IS NOT NULL,
+        sent_at in window).
+        No Join Duplication: DurableDispatchIntent is queried independently and never joined to
+        ProductionRenderJob in other latency queries, guaranteeing no join multiplication occurs on render metrics
+        (BROKER_LATENCY_POPULATION_DEFINED = YES, BROKER_LATENCY_NO_JOIN_MULTIPLICATION = YES).
         Excludes negative latencies from percentiles and returns anomaly count.
         """
         start_utc = to_utc(start_time)

@@ -2378,4 +2378,3 @@ def pipeline_rollup_sweep_task() -> dict[str, Any]:
     except Exception as exc:
         logger.error("Pipeline rollup sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "error": str(exc)}
-

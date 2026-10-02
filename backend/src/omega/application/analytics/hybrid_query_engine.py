@@ -176,10 +176,11 @@ class HybridQueryEngine:
         end_time: datetime,
         dimension_type: str = DimensionType.GLOBAL.value,
         dimension_value: str = "ALL",
+        now_utc: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """Query a continuous time series over [start_time, end_time) with hybrid rollups and live fallback."""
         validate_family_and_dimension(family, dimension_type, dimension_value)
-        partitions = cls.partition_query_intervals(start_time, end_time)
+        partitions = cls.partition_query_intervals(start_time, end_time, now_utc=now_utc)
 
         results: list[dict[str, Any]] = []
 

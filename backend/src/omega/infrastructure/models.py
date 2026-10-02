@@ -6090,7 +6090,10 @@ class PipelineAnalyticsRollup(Base):
             "bucket_start",
             name="uq_pipeline_analytics_rollup_bucket",
         ),
-        CheckConstraint("bucket_end = bucket_start + interval '1 day'", name="chk_rollup_daily_utc_bucket"),
+        CheckConstraint(
+            "timezone('UTC', bucket_start) = date_trunc('day', timezone('UTC', bucket_start)) AND bucket_end = bucket_start + interval '1 day'",
+            name="chk_rollup_daily_utc_bucket",
+        ),
         CheckConstraint("sample_count >= 0", name="chk_rollup_sample_count"),
         CheckConstraint("schema_version > 0", name="chk_rollup_schema_version"),
         CheckConstraint(
@@ -6142,4 +6145,3 @@ class PipelineAnalyticsRollup(Base):
             f"<PipelineAnalyticsRollup id={self.id} family={self.metric_family} "
             f"dim={self.dimension_type}:{self.dimension_value} start={self.bucket_start}>"
         )
-

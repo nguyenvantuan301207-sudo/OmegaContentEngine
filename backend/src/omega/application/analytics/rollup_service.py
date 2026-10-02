@@ -11,7 +11,7 @@ from datetime import UTC, datetime, time, timedelta
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application.analytics.metrics_engine import PipelineMetricsCalculationEngine
@@ -147,7 +147,19 @@ class RollupService:
         start_utc = to_utc(bucket_start)
         end_utc = to_utc(bucket_end)
 
-        # 1. Delete prior rows for exact family + bucket_start
+        # 1. Acquire transaction-level advisory lock to serialize concurrent replacements of (family, bucket_start)
+        try:
+            bind = session.get_bind()
+            if hasattr(bind, "dialect") and bind.dialect.name == "postgresql":
+                lock_key = f"{family}:{start_utc.isoformat()}"
+                await session.execute(
+                    text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                    {"lock_key": lock_key},
+                )
+        except Exception as exc:
+            logger.warning("advisory_lock_skipped", family=family, error=str(exc))
+
+        # 2. Delete prior rows for exact family + bucket_start
         try:
             delete_stmt = delete(PipelineAnalyticsRollup).where(
                 PipelineAnalyticsRollup.metric_family == family,
@@ -155,7 +167,7 @@ class RollupService:
             )
             await session.execute(delete_stmt)
 
-            # 2. Insert complete replacement snapshot
+            # 3. Insert complete replacement snapshot
             new_objects = [
                 PipelineAnalyticsRollup(
                     metric_family=row["metric_family"],

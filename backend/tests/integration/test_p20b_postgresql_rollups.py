@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, time, timedelta
+from pathlib import Path
+import sys
 import uuid
 from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+backend_dir = Path(__file__).resolve().parent.parent.parent
+if str(backend_dir) not in sys.path:
+    sys.path.insert(0, str(backend_dir))
+from scripts.backfill_analytics_rollups import run_backfill
 
 from omega.application.analytics.hybrid_query_engine import HybridQueryEngine
 from omega.application.analytics.metrics_engine import PipelineMetricsCalculationEngine
@@ -403,13 +410,17 @@ async def test_06_concurrent_duplicate_rollup_workers_converge(db_session: Async
     session.add_all([plan, job])
     await session.commit()
 
-    # Recompute twice in sequence / concurrency simulation
-    await RollupService.recompute_and_replace_bucket(
-        session, MetricFamily.RENDER_RELIABILITY.value, t_start, t_end
-    )
-    await RollupService.recompute_and_replace_bucket(
-        session, MetricFamily.RENDER_RELIABILITY.value, t_start, t_end
-    )
+    # Truly concurrent recomputation workers on separate sessions
+    session_maker = async_sessionmaker(session.bind, expire_on_commit=False)
+
+    async def _worker():
+        async with session_maker() as s:
+            return await RollupService.recompute_and_replace_bucket(
+                s, MetricFamily.RENDER_RELIABILITY.value, t_start, t_end
+            )
+
+    results = await asyncio.gather(_worker(), _worker())
+    assert all(r > 0 for r in results)
 
     stmt = select(PipelineAnalyticsRollup).where(
         PipelineAnalyticsRollup.metric_family == MetricFamily.RENDER_RELIABILITY.value,
@@ -476,3 +487,330 @@ async def test_07_partial_day_does_not_overcount_and_no_mutation(db_session: Asy
     assert refetched_am is not None and refetched_am.state == "SUCCEEDED"
     assert refetched_pm is not None and refetched_pm.state == "SUCCEEDED"
 
+
+@pytest.mark.asyncio
+async def test_08_true_hybrid_rollup_plus_dynamic(db_session: AsyncSession):
+    """Prove true hybrid execution with dynamic first segment, rollup middle segment, and dynamic final segment.
+
+    Range:
+    - start = Day D 12:00 UTC
+    - complete middle day = Day D+1 00:00 -> D+2 00:00 UTC
+    - end = current/open Day D+2 12:00 UTC
+
+    Execution paths:
+    - [D 12:00, D+1 00:00) -> dynamic authoritative SQL (is_rollup=False, is_live=False)
+    - [D+1 00:00, D+2 00:00) -> persisted DAILY ROLLUP (is_rollup=True, is_live=False)
+    - [D+2 00:00, D+2 12:00) -> dynamic authoritative SQL (is_rollup=False, is_live=True)
+
+    Seed distinguishable counts in each segment:
+    - Segment 1: 1 succeeded job
+    - Segment 2: 2 succeeded jobs
+    - Segment 3: 3 succeeded jobs
+
+    Verify exact final aggregate:
+    - 0 overlap, 0 gap, 0 double counting
+    - Total succeeded = 6, total terminal = 6
+    """
+    session = db_session
+    day_d = datetime(2026, 10, 1, 0, 0, tzinfo=UTC)
+    t_start = day_d + timedelta(hours=12)          # D 12:00 UTC
+    d_plus_1 = day_d + timedelta(days=1)           # D+1 00:00 UTC
+    d_plus_2 = day_d + timedelta(days=2)           # D+2 00:00 UTC
+    t_end = day_d + timedelta(days=2, hours=12)    # D+2 12:00 UTC
+
+    ch, req = await _create_test_hierarchy(session)
+    plan = RenderPlan(id=uuid4(), production_request_id=req.id, version=1, video_codec="h264")
+
+    # Segment 1 job: D 15:00 UTC (1 job)
+    j_seg1 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-seg1-1",
+        state="SUCCEEDED",
+        completed_at=day_d + timedelta(hours=15),
+    )
+
+    # Segment 2 jobs: D+1 06:00 and D+1 18:00 UTC (2 jobs)
+    j_seg2_1 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-seg2-1",
+        state="SUCCEEDED",
+        completed_at=d_plus_1 + timedelta(hours=6),
+    )
+    j_seg2_2 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-seg2-2",
+        state="SUCCEEDED",
+        completed_at=d_plus_1 + timedelta(hours=18),
+    )
+
+    # Segment 3 jobs: D+2 03:00, D+2 06:00, D+2 09:00 UTC (3 jobs)
+    j_seg3_1 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-seg3-1",
+        state="SUCCEEDED",
+        completed_at=d_plus_2 + timedelta(hours=3),
+    )
+    j_seg3_2 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-seg3-2",
+        state="SUCCEEDED",
+        completed_at=d_plus_2 + timedelta(hours=6),
+    )
+    j_seg3_3 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-seg3-3",
+        state="SUCCEEDED",
+        completed_at=d_plus_2 + timedelta(hours=9),
+    )
+
+    session.add_all([plan, j_seg1, j_seg2_1, j_seg2_2, j_seg3_1, j_seg3_2, j_seg3_3])
+    await session.commit()
+
+    # Pre-populate rollup ONLY for middle complete day [D+1 00:00, D+2 00:00)
+    await RollupService.recompute_and_replace_bucket(
+        session, MetricFamily.RENDER_RELIABILITY.value, d_plus_1, d_plus_2
+    )
+
+    # Query hybrid series with now_utc = t_end (simulating current open day at D+2 12:00)
+    series = await HybridQueryEngine.query_hybrid_series(
+        session,
+        family=MetricFamily.RENDER_RELIABILITY.value,
+        start_time=t_start,
+        end_time=t_end,
+        now_utc=t_end,
+    )
+
+    assert len(series) == 3
+
+    # Segment 1: [D 12:00, D+1 00:00) -> dynamic SQL
+    seg1 = series[0]
+    assert seg1["bucket_start"] == t_start
+    assert seg1["bucket_end"] == d_plus_1
+    assert seg1["is_rollup"] is False
+    assert seg1["is_live"] is False
+    assert seg1["metrics"]["succeeded_jobs"] == 1
+    assert seg1["metrics"]["total_terminal_jobs"] == 1
+
+    # Segment 2: [D+1 00:00, D+2 00:00) -> persisted DAILY ROLLUP
+    seg2 = series[1]
+    assert seg2["bucket_start"] == d_plus_1
+    assert seg2["bucket_end"] == d_plus_2
+    assert seg2["is_rollup"] is True
+    assert seg2["is_live"] is False
+    assert seg2["metrics"]["succeeded_jobs"] == 2
+    assert seg2["metrics"]["total_terminal_jobs"] == 2
+
+    # Segment 3: [D+2 00:00, D+2 12:00) -> dynamic live SQL
+    seg3 = series[2]
+    assert seg3["bucket_start"] == d_plus_2
+    assert seg3["bucket_end"] == t_end
+    assert seg3["is_rollup"] is False
+    assert seg3["is_live"] is True
+    assert seg3["metrics"]["succeeded_jobs"] == 3
+    assert seg3["metrics"]["total_terminal_jobs"] == 3
+
+    total_succeeded = sum(s["metrics"]["succeeded_jobs"] for s in series)
+    total_terminal = sum(s["metrics"]["total_terminal_jobs"] for s in series)
+    assert total_succeeded == 6
+    assert total_terminal == 6
+
+
+@pytest.mark.asyncio
+async def test_09_hybrid_missing_rollup_fallback(db_session: AsyncSession):
+    """When the middle closed-day rollup is missing/deleted, verify clean fallback to dynamic SQL with identical aggregates."""
+    session = db_session
+    day_d = datetime(2026, 10, 1, 0, 0, tzinfo=UTC)
+    t_start = day_d + timedelta(hours=12)
+    d_plus_1 = day_d + timedelta(days=1)
+    d_plus_2 = day_d + timedelta(days=2)
+    t_end = day_d + timedelta(days=2, hours=12)
+
+    ch, req = await _create_test_hierarchy(session)
+    plan = RenderPlan(id=uuid4(), production_request_id=req.id, version=1, video_codec="h264")
+
+    # Segment 1 job: 1 job
+    j_seg1 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-fb-1",
+        state="SUCCEEDED",
+        completed_at=day_d + timedelta(hours=15),
+    )
+    # Segment 2 jobs: 2 jobs
+    j_seg2_1 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-fb-2",
+        state="SUCCEEDED",
+        completed_at=d_plus_1 + timedelta(hours=6),
+    )
+    j_seg2_2 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-fb-3",
+        state="SUCCEEDED",
+        completed_at=d_plus_1 + timedelta(hours=18),
+    )
+    # Segment 3 jobs: 3 jobs
+    j_seg3_1 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-fb-4",
+        state="SUCCEEDED",
+        completed_at=d_plus_2 + timedelta(hours=3),
+    )
+    j_seg3_2 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-fb-5",
+        state="SUCCEEDED",
+        completed_at=d_plus_2 + timedelta(hours=6),
+    )
+    j_seg3_3 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-fb-6",
+        state="SUCCEEDED",
+        completed_at=d_plus_2 + timedelta(hours=9),
+    )
+
+    session.add_all([plan, j_seg1, j_seg2_1, j_seg2_2, j_seg3_1, j_seg3_2, j_seg3_3])
+    await session.commit()
+
+    # Pre-populate rollup for middle day
+    await RollupService.recompute_and_replace_bucket(
+        session, MetricFamily.RENDER_RELIABILITY.value, d_plus_1, d_plus_2
+    )
+
+    # 1. Query with rollup present
+    series_with_rollup = await HybridQueryEngine.query_hybrid_series(
+        session,
+        family=MetricFamily.RENDER_RELIABILITY.value,
+        start_time=t_start,
+        end_time=t_end,
+        now_utc=t_end,
+    )
+    assert series_with_rollup[1]["is_rollup"] is True
+
+    # 2. Delete the middle rollup row to make it unavailable
+    del_stmt = text(
+        "DELETE FROM pipeline_analytics_rollups WHERE metric_family = :fam AND bucket_start = :b_start"
+    )
+    await session.execute(del_stmt, {"fam": MetricFamily.RENDER_RELIABILITY.value, "b_start": d_plus_1})
+    await session.commit()
+
+    # 3. Re-run identical query
+    series_without_rollup = await HybridQueryEngine.query_hybrid_series(
+        session,
+        family=MetricFamily.RENDER_RELIABILITY.value,
+        start_time=t_start,
+        end_time=t_end,
+        now_utc=t_end,
+    )
+
+    assert len(series_without_rollup) == 3
+    # Middle segment fell back to authoritative dynamic SQL
+    assert series_without_rollup[1]["is_rollup"] is False
+    assert series_without_rollup[1]["metrics"]["succeeded_jobs"] == 2
+    assert series_without_rollup[1]["metrics"]["total_terminal_jobs"] == 2
+
+    # Exact final metrics match prior request
+    for i in range(3):
+        assert series_without_rollup[i]["metrics"] == series_with_rollup[i]["metrics"]
+        assert series_without_rollup[i]["sample_count"] == series_with_rollup[i]["sample_count"]
+
+
+@pytest.mark.asyncio
+async def test_10_backfill_vs_periodic_rollup_parity(db_session: AsyncSession):
+    """Prove canonical rowset parity between periodic RollupService computation and backfill CLI."""
+    session = db_session
+    t_start = datetime(2026, 10, 1, 0, 0, tzinfo=UTC)
+    t_end = datetime(2026, 10, 2, 0, 0, tzinfo=UTC)
+
+    ch, req = await _create_test_hierarchy(session)
+    plan = RenderPlan(id=uuid4(), production_request_id=req.id, version=1, video_codec="h264")
+    j1 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-parity-1",
+        state="SUCCEEDED",
+        completed_at=t_start + timedelta(hours=5),
+    )
+    j2 = ProductionRenderJob(
+        id=uuid4(),
+        production_request_id=req.id,
+        render_plan_id=plan.id,
+        idempotency_key="j-parity-2",
+        state="FAILED",
+        error_code="WORKER_LEASE_EXPIRED",
+        completed_at=t_start + timedelta(hours=10),
+    )
+    session.add_all([plan, j1, j2])
+    await session.commit()
+
+    # A. Generate rollup via RollupService for all families
+    for fam in [
+        MetricFamily.RENDER_RELIABILITY.value,
+        MetricFamily.RENDER_PERFORMANCE.value,
+        MetricFamily.SCHEDULER_RELIABILITY.value,
+        MetricFamily.QA_QUALITY.value,
+    ]:
+        await RollupService.recompute_and_replace_bucket(session, fam, t_start, t_end)
+
+    # Capture canonical rows
+    stmt = (
+        select(
+            PipelineAnalyticsRollup.metric_family,
+            PipelineAnalyticsRollup.dimension_type,
+            PipelineAnalyticsRollup.dimension_value,
+            PipelineAnalyticsRollup.sample_count,
+            PipelineAnalyticsRollup.metrics,
+        )
+        .where(PipelineAnalyticsRollup.bucket_start == t_start)
+        .order_by(
+            PipelineAnalyticsRollup.metric_family,
+            PipelineAnalyticsRollup.dimension_type,
+            PipelineAnalyticsRollup.dimension_value,
+        )
+    )
+    periodic_rows = (await session.execute(stmt)).fetchall()
+    assert len(periodic_rows) > 0
+
+    # B. Clear derived rollup rows for that day
+    del_stmt = text("DELETE FROM pipeline_analytics_rollups WHERE bucket_start = :b_start")
+    await session.execute(del_stmt, {"b_start": t_start})
+    await session.commit()
+
+    # C. Generate using backfill CLI
+    rows_written = await run_backfill(t_start, t_end, session=session)
+    assert rows_written == len(periodic_rows)
+
+    # Compare complete canonical rowsets
+    backfill_rows = (await session.execute(stmt)).fetchall()
+    assert len(backfill_rows) == len(periodic_rows)
+
+    for p_row, b_row in zip(periodic_rows, backfill_rows, strict=True):
+        assert p_row.metric_family == b_row.metric_family
+        assert p_row.dimension_type == b_row.dimension_type
+        assert p_row.dimension_value == b_row.dimension_value
+        assert p_row.sample_count == b_row.sample_count
+        assert p_row.metrics == b_row.metrics

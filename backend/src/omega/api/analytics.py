@@ -507,4 +507,3 @@ async def get_pipeline_analytics_historical(
         },
         "series": series,
     }
-

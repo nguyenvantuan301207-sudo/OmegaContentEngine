@@ -188,3 +188,36 @@ async def test_qa_quality_distribution():
     assert metrics.passed_with_warnings_count == 1
     assert metrics.blocked_count == 1
     assert metrics.pass_rate == round(2 / 3, 4)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_delivery_exhaustion_canonical_semantics():
+    """Verify dispatch_delivery_exhaustions counts strictly FAILED + DISPATCH_DELIVERY_EXHAUSTED.
+
+    - FAILED + DISPATCH_DELIVERY_EXHAUSTED -> counted
+    - FAILED with another error (e.g. WORKER_LEASE_EXPIRED) at max attempts -> NOT counted
+    - SUCCEEDED at high attempt count / generation -> NOT counted
+    """
+    t_start = datetime(2026, 10, 1, 0, 0, tzinfo=UTC)
+    t_end = datetime(2026, 10, 2, 0, 0, tzinfo=UTC)
+
+    simulated_rows = [
+        ("FAILED", "DISPATCH_DELIVERY_EXHAUSTED", 3),  # Counted
+        ("FAILED", "WORKER_LEASE_EXPIRED", 3),          # NOT counted as dispatch exhaustion
+        ("FAILED", "RENDER_CRASH_SEGFAULT", 5),        # NOT counted as dispatch exhaustion
+        ("SUCCEEDED", None, 4),                        # High attempt/generation, NOT counted
+        ("CANCELLED", None, 3),                        # Cancelled, NOT counted
+    ]
+
+    session = MockAsyncSession(execute_fn=lambda stmt: MockResult(rows=simulated_rows))
+
+    metrics = await PipelineMetricsCalculationEngine.compute_render_reliability(
+        session, t_start, t_end, DimensionType.GLOBAL.value, "ALL"
+    )
+
+    assert metrics.total_terminal_jobs == 5
+    assert metrics.succeeded_jobs == 1
+    assert metrics.failed_jobs == 3
+    assert metrics.cancelled_jobs == 1
+    assert metrics.dispatch_delivery_exhaustions == 1
+    assert metrics.lease_expiry_terminal_failures == 1

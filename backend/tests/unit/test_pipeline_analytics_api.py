@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from omega.api.dependencies import get_db
 from omega.main import create_app
 
 
@@ -109,3 +110,29 @@ async def test_analytics_api_summary_success(app, monkeypatch: pytest.MonkeyPatc
             assert data["current_waiting_occurrences"] == 3
             assert data["legacy_unattributed_terminal_jobs"] == 12
             assert data["data_quality"]["negative_latency_anomalies"] == 0
+
+
+@pytest.mark.asyncio
+async def test_preexisting_analytics_routes_remain_ungated(app, monkeypatch: pytest.MonkeyPatch):
+    """Pre-existing analytics endpoints must NOT be gated behind ANALYTICS_API_ENABLED=false."""
+    monkeypatch.setenv("ANALYTICS_API_ENABLED", "false")
+
+    mock_session = AsyncMock()
+    mock_result_scalar = MagicMock()
+    mock_result_scalar.scalar.return_value = 0
+    mock_result_scalars = MagicMock()
+    mock_result_scalars.scalars.return_value.all.return_value = []
+    mock_session.execute.side_effect = [mock_result_scalar, mock_result_scalars]
+
+    async def _override_db():
+        yield mock_session
+
+    app.dependency_overrides[get_db] = _override_db
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            r_health = await client.get("/api/v1/analytics/health")
+            # Pre-existing health route must succeed with 200, NOT 503!
+            assert r_health.status_code == 200
+            assert r_health.json()["status"] == "healthy"
+    finally:
+        app.dependency_overrides.clear()

@@ -53,7 +53,7 @@ def upgrade() -> None:
             name="uq_pipeline_analytics_rollup_bucket",
         ),
         sa.CheckConstraint(
-            "bucket_end = bucket_start + interval '1 day'",
+            "timezone('UTC', bucket_start) = date_trunc('day', timezone('UTC', bucket_start)) AND bucket_end = bucket_start + interval '1 day'",
             name="chk_rollup_daily_utc_bucket",
         ),
         sa.CheckConstraint("sample_count >= 0", name="chk_rollup_sample_count"),

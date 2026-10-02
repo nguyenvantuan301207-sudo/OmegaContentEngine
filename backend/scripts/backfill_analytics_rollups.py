@@ -22,6 +22,8 @@ from omega.domain.pipeline_analytics import (
     get_daily_utc_buckets_for_range,
     to_utc,
 )
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from omega.infrastructure.database import AsyncWorkerSessionLocal
 from omega.logging import get_logger
 
@@ -41,6 +43,7 @@ async def run_backfill(
     from_dt: datetime,
     to_dt: datetime,
     family: str | None = None,
+    session: AsyncSession | None = None,
 ) -> int:
     """Execute bounded backfill across specified daily buckets."""
     buckets = get_daily_utc_buckets_for_range(from_dt, to_dt)
@@ -55,27 +58,32 @@ async def run_backfill(
         MetricFamily.QA_QUALITY.value,
     ]
 
-    total_rows = 0
-    async with AsyncWorkerSessionLocal() as session:
+    async def _execute_with_session(sess: AsyncSession) -> int:
         # 1. Verify schema capability
-        capable, reason = await check_analytics_schema_capability(session)
+        capable, reason = await check_analytics_schema_capability(sess)
         if not capable:
             print(f"ERROR: Cannot run backfill: {reason}")
             sys.exit(1)
 
         print(f"Starting analytics backfill: {len(buckets)} days x {len(families)} families...")
-
+        rows_total = 0
         for b_start, b_end in buckets:
             day_str = b_start.strftime("%Y-%m-%d")
             for f in families:
                 rows_written = await RollupService.recompute_and_replace_bucket(
-                    session, f, b_start, b_end
+                    sess, f, b_start, b_end
                 )
-                total_rows += rows_written
+                rows_total += rows_written
                 print(f"  [{day_str}] {f:25} -> {rows_written} dimension rows written")
 
-    print(f"Backfill complete: {total_rows} total rows replaced across {len(buckets)} days.")
-    return total_rows
+        print(f"Backfill complete: {rows_total} total rows replaced across {len(buckets)} days.")
+        return rows_total
+
+    if session is not None:
+        return await _execute_with_session(session)
+
+    async with AsyncWorkerSessionLocal() as sess:
+        return await _execute_with_session(sess)
 
 
 def main() -> None:

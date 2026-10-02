@@ -22,6 +22,7 @@ def get_alembic_config() -> Config:
     cfg = Config(ini_path)
     cfg.set_main_option("sqlalchemy.url", ISOLATED_SYNC_URL)
     cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+    os.environ["DATABASE_URL_SYNC"] = ISOLATED_SYNC_URL
     return cfg
 
 
@@ -82,9 +83,9 @@ def test_02_migration_026_constraint_enforcement():
     with engine.begin() as conn:
         conn.execute(
             text("""
-                INSERT INTO pipeline_analytics_rollups 
+                INSERT INTO pipeline_analytics_rollups
                 (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
-                VALUES 
+                VALUES
                 (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start, :b_end, '{"total_terminal_jobs": 10}', 10, 1);
             """),
             {"id": uuid4(), "b_start": t_start, "b_end": t_end},
@@ -95,9 +96,9 @@ def test_02_migration_026_constraint_enforcement():
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO pipeline_analytics_rollups 
+                    INSERT INTO pipeline_analytics_rollups
                     (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
-                    VALUES 
+                    VALUES
                     (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start, :b_end, '{"total_terminal_jobs": 5}', 5, 1);
                 """),
                 {"id": uuid4(), "b_start": t_start, "b_end": t_end},
@@ -108,9 +109,9 @@ def test_02_migration_026_constraint_enforcement():
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO pipeline_analytics_rollups 
+                    INSERT INTO pipeline_analytics_rollups
                     (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
-                    VALUES 
+                    VALUES
                     (:id, 'invalid_family', 'GLOBAL', 'ALL', :b_start, :b_end, '{}', 0, 1);
                 """),
                 {"id": uuid4(), "b_start": t_start, "b_end": t_end},
@@ -121,9 +122,9 @@ def test_02_migration_026_constraint_enforcement():
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO pipeline_analytics_rollups 
+                    INSERT INTO pipeline_analytics_rollups
                     (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
-                    VALUES 
+                    VALUES
                     (:id, 'render_reliability', 'INVALID_DIM', 'ALL', :b_start, :b_end, '{}', 0, 1);
                 """),
                 {"id": uuid4(), "b_start": t_start, "b_end": t_end},
@@ -134,9 +135,9 @@ def test_02_migration_026_constraint_enforcement():
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO pipeline_analytics_rollups 
+                    INSERT INTO pipeline_analytics_rollups
                     (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
-                    VALUES 
+                    VALUES
                     (:id, 'scheduler_reliability', 'VIDEO_CODEC', 'h264', :b_start, :b_end, '{}', 0, 1);
                 """),
                 {"id": uuid4(), "b_start": t_start, "b_end": t_end},
@@ -147,35 +148,52 @@ def test_02_migration_026_constraint_enforcement():
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO pipeline_analytics_rollups 
+                    INSERT INTO pipeline_analytics_rollups
                     (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
-                    VALUES 
+                    VALUES
                     (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start, :b_end_2d, '{}', 0, 1);
                 """),
                 {"id": uuid4(), "b_start": t_start, "b_end_2d": t_start + timedelta(days=2)},
             )
 
-    # 7. Negative sample count fails
+    # 7. Non-midnight start (e.g. 12:00 UTC) fails daily UTC constraint
+    with pytest.raises(IntegrityError, match="chk_rollup_daily_utc_bucket"):
+        with engine.begin() as conn:
+            conn.execute(
+                text("""
+                    INSERT INTO pipeline_analytics_rollups
+                    (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
+                    VALUES
+                    (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start_noon, :b_end_noon, '{}', 0, 1);
+                """),
+                {
+                    "id": uuid4(),
+                    "b_start_noon": t_start + timedelta(hours=12),
+                    "b_end_noon": t_start + timedelta(hours=36),
+                },
+            )
+
+    # 8. Negative sample count fails
     with pytest.raises(IntegrityError, match="chk_rollup_sample_count"):
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO pipeline_analytics_rollups 
+                    INSERT INTO pipeline_analytics_rollups
                     (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
-                    VALUES 
+                    VALUES
                     (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start, :b_end, '{}', -1, 1);
                 """),
                 {"id": uuid4(), "b_start": t_start, "b_end": t_end},
             )
 
-    # 8. Schema version <= 0 fails
+    # 9. Schema version <= 0 fails
     with pytest.raises(IntegrityError, match="chk_rollup_schema_version"):
         with engine.begin() as conn:
             conn.execute(
                 text("""
-                    INSERT INTO pipeline_analytics_rollups 
+                    INSERT INTO pipeline_analytics_rollups
                     (id, metric_family, dimension_type, dimension_value, bucket_start, bucket_end, metrics, sample_count, schema_version)
-                    VALUES 
+                    VALUES
                     (:id, 'render_reliability', 'GLOBAL', 'ALL', :b_start, :b_end, '{}', 0, 0);
                 """),
                 {"id": uuid4(), "b_start": t_start, "b_end": t_end},
