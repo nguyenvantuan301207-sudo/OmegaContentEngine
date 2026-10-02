@@ -26,6 +26,19 @@ from omega.logging import get_logger
 logger = get_logger(service="omega-worker")
 
 
+def _record_operational_event(
+    metric_name: str, *, status: str | None = None, amount: int = 1
+) -> None:
+    """Record one bounded operational event without affecting task authority."""
+    try:
+        from omega.application.observability.telemetry import increment_event_counter_sync
+
+        labels = {"status": status} if status is not None else None
+        increment_event_counter_sync(metric_name, amount, labels)
+    except Exception:
+        pass
+
+
 def _sanitize_task_error(error: Exception) -> str:
     """Return a sanitized error message safe for database persistence.
 
@@ -2307,6 +2320,7 @@ def recurring_schedule_sweep_task() -> dict[str, Any]:
 
     settings = get_settings()
     if not settings.recurring_scheduler_enabled:
+        _record_operational_event("omega_scheduler_sweeps_total", status="DISABLED")
         return {"status": "disabled", "materialized": 0, "dispatched": 0}
 
     import asyncio
@@ -2318,8 +2332,11 @@ def recurring_schedule_sweep_task() -> dict[str, Any]:
             return await RecurringSweepService.execute_due_sweep(session)
 
     try:
-        return asyncio.run(_run())
+        result = asyncio.run(_run())
+        _record_operational_event("omega_scheduler_sweeps_total", status="OK")
+        return result
     except Exception as exc:
+        _record_operational_event("omega_scheduler_sweeps_total", status="ERROR")
         logger.error("Recurring schedule sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "error": str(exc), "materialized": 0, "dispatched": 0}
 
@@ -2331,6 +2348,7 @@ def recurring_reconcile_sweep_task() -> dict[str, Any]:
 
     settings = get_settings()
     if not settings.recurring_scheduler_enabled:
+        _record_operational_event("omega_scheduler_sweeps_total", status="DISABLED")
         return {"status": "disabled", "recovered": 0, "skipped": 0, "failed": 0}
 
     import asyncio
@@ -2342,8 +2360,11 @@ def recurring_reconcile_sweep_task() -> dict[str, Any]:
             return await RecurringSweepService.reconcile_stale_occurrences(session)
 
     try:
-        return asyncio.run(_run())
+        result = asyncio.run(_run())
+        _record_operational_event("omega_scheduler_sweeps_total", status="OK")
+        return result
     except Exception as exc:
+        _record_operational_event("omega_scheduler_sweeps_total", status="ERROR")
         logger.error("Recurring occurrence reconciliation sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "error": str(exc), "recovered": 0, "skipped": 0, "failed": 0}
 
@@ -2355,6 +2376,7 @@ def pipeline_rollup_sweep_task() -> dict[str, Any]:
 
     settings = get_settings()
     if not settings.analytics_rollup_enabled:
+        _record_operational_event("omega_analytics_rollups_total", status="DISABLED")
         return {"status": "disabled", "reason": "ANALYTICS_ROLLUP_ENABLED=false"}
 
     import asyncio
@@ -2374,7 +2396,11 @@ def pipeline_rollup_sweep_task() -> dict[str, Any]:
             )
 
     try:
-        return asyncio.run(_run())
+        result = asyncio.run(_run())
+        status = "ERROR" if result.get("status") in {"error", "skipped"} else "OK"
+        _record_operational_event("omega_analytics_rollups_total", status=status)
+        return result
     except Exception as exc:
+        _record_operational_event("omega_analytics_rollups_total", status="ERROR")
         logger.error("Pipeline rollup sweep failed", error=str(exc), exc_info=True)
         return {"status": "error", "error": str(exc)}

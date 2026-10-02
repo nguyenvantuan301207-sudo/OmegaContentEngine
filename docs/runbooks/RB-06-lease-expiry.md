@@ -24,10 +24,9 @@
 
 ## 4. Safe Recovery
 1. The authoritative reconciliation is automatically handled by `ProductionLifecycleService.reconcile_expired_leases` running in periodic sweep `production-orphan-reconciliation-sweep`.
-2. Ensure `PRODUCTION_LEASE_SWEEP_ENABLED=true` if gated, or invoke reconciliation safely via Celery task:
-   ```bash
-   docker exec omega-api python -c "from omega.application.production_lifecycle_service import ProductionLifecycleService; from omega.infrastructure.database import async_engine, AsyncSession; import asyncio; asyncio.run(ProductionLifecycleService.reconcile_expired_leases(AsyncSession(async_engine)))"
-   ```
+2. If the production lease sweep gate is already enabled under an approved rollout, confirm
+   the scheduled reconciliation is progressing. If it is disabled, stop and request a separate
+   gate-activation authorization; do not enable it or invoke the task ad hoc from this runbook.
 3. Verify expired jobs transition monotonically to FAILED with `RenderErrorCode.WORKER_LEASE_EXPIRED`.
 
 ## 5. Escalation

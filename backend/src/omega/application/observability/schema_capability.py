@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 CORE_COLUMNS = {
@@ -64,12 +64,13 @@ async def _check(session: AsyncSession, required: dict[str, set[str]]) -> tuple[
                 rows = (await session.execute(text(f"PRAGMA table_info({table})"))).all()
                 found[table] = {row[1] for row in rows}
         else:
+            statement = text(
+                "SELECT table_name, column_name "
+                "FROM information_schema.columns "
+                "WHERE table_schema='public' AND table_name IN :table_names"
+            ).bindparams(bindparam("table_names", expanding=True))
             rows = (
-                await session.execute(
-                    text(
-                        "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema='public'"
-                    )
-                )
+                await session.execute(statement, {"table_names": sorted(required)})
             ).all()
             for table, column in rows:
                 if table in required:

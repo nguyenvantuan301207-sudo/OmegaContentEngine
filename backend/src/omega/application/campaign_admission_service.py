@@ -381,6 +381,16 @@ async def reserve_one(
     item, _ = await _reserve_one_in_transaction(session, campaign)
     if item is not None:
         await session.commit()
+        try:
+            from omega.application.observability.telemetry import (
+                increment_event_counter_async,
+            )
+
+            await increment_event_counter_async(
+                "omega_campaign_admissions_total", 1, {"status": "ADMITTED"}
+            )
+        except Exception:
+            pass
     return item
 
 
@@ -482,6 +492,16 @@ async def admit_schedule_occurrence(
 
         # 10. Single atomic commit for reservation + materialization + mission start + schedule binding + occurrence DISPATCHED
         await session.commit()
+        try:
+            from omega.application.observability.telemetry import (
+                increment_event_counter_async,
+            )
+
+            await increment_event_counter_async(
+                "omega_campaign_admissions_total", 1, {"status": "ADMITTED"}
+            )
+        except Exception:
+            pass
         return item, "ADMITTED"
     except Exception as exc:
         await session.rollback()

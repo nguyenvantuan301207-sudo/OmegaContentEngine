@@ -360,6 +360,16 @@ class ProductionRenderLeaseService:
                     "fencing_token": fencing_token,
                 },
             )
+            try:
+                from omega.application.observability.telemetry import (
+                    increment_event_counter_async,
+                )
+
+                await increment_event_counter_async(
+                    "omega_render_fence_rejections_total", 1
+                )
+            except Exception:
+                pass
             return False, "LEASE_FENCE_LOST_OR_EXPIRED"
 
         return True, "VALID"

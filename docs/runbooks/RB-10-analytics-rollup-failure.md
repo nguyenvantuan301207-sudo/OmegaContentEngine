@@ -8,7 +8,7 @@
 - Worker logs report error in `pipeline-analytics-rollup-sweep`.
 
 ## 2. Signals
-- Telemetry counter `omega_analytics_rollups_total{status="error"}` > 0.
+- Telemetry counter `omega_analytics_rollups_total{status="ERROR"}` > 0.
 - Gap in daily intervals in `pipeline_analytics_rollups`.
 - `check_analytics_schema_capability` returns `table_missing` or `columns_missing`.
 
@@ -27,14 +27,11 @@
    ```
 
 ## 4. Safe Recovery
-1. If migration 026 is missing, execute migration before enabling rollup gate:
-   ```bash
-   docker compose -p omegacontentengine -f docker-compose.prod.yml run --rm --no-deps omega-api alembic upgrade 026
-   ```
-2. Trigger manual lookback rollup sweep safely:
-   ```bash
-   docker exec omega-api python -c "from omega.application.analytics.rollup_service import RollupService; from omega.infrastructure.database import async_engine, AsyncSession; import asyncio; asyncio.run(RollupService.run_lookback_rollups(AsyncSession(async_engine), lookback_days=3))"
-   ```
+1. If migration 026 is missing, keep analytics gates off and stop. Migration 026 requires a
+   separately reviewed deployment authorization and must not be run as incident recovery.
+2. If schema 026 and the rollup gate were already deployed under an approved rollout, trigger
+   the documented bounded lookback sweep through the normal task interface under incident
+   commander authorization. Do not call the service directly from an API shell.
 3. Verify rollups populate deterministically with sample counts.
 
 ## 5. Escalation

@@ -28,7 +28,8 @@
 
 ## 4. Safe Recovery
 1. Verify Celery Beat is healthy and advancing (`RB-03`).
-2. Verify `RECURRING_SCHEDULER_ENABLED=true` in environment.
+2. Read the `RECURRING_SCHEDULER_ENABLED` setting. If it is false, stop and request a
+   separately authorized feature activation; do not change the gate during routine recovery.
 3. The periodic sweep `recurring-stale-reconciliation-sweep` automatically executes `RecurringSweepService.reconcile_stale_occurrences`.
 4. Stale `DISPATCHING` occurrences check downstream bindings and converge safely to `DISPATCHED` (if binding was committed) or reset to `PENDING` (if attempts remain).
 5. Expired `WAITING` occurrences are reconciled through scheduler policy; inspect the resulting canonical state.

@@ -747,6 +747,18 @@ class ProductionLifecycleService:
                     exc_info=True,
                 )
 
+        if expired_count:
+            try:
+                from omega.application.observability.telemetry import (
+                    increment_event_counter_async,
+                )
+
+                await increment_event_counter_async(
+                    "omega_render_leases_expired_total", expired_count
+                )
+            except Exception:
+                pass
+
         return {"scanned": scanned, "expired": expired_count}
 
     # ──────────────────────────────────────────────────────────────────────

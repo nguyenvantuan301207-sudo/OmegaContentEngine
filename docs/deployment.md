@@ -27,21 +27,37 @@ Before any command, verify the exact existing Compose project, networks, and
 volume mappings and inspect the effective target configuration. Preserve existing
 PostgreSQL data volumes; never create a new database as a side effect of decoupling.
 Run this procedure only after C2 approval and separate C3 authorization.
-1. **Build Immutable Base Image**:
-   Build immutable image from current approved base `1ec61e14c01e84becd303119ef7546d0af15e5ed`:
+1. **Create and verify an isolated base checkout**:
+   Never build the C3 runtime from the P20-C feature worktree or from the repository root
+   after its ref changes. Create a detached checkout at the full approved commit and verify it:
    ```bash
-   docker build -t omega:1ec61e14 ./backend
+   git worktree add --detach /tmp/OmegaContentEngine-p20-c3-base 1ec61e14c01e84becd303119ef7546d0af15e5ed
+   test "$(git -C /tmp/OmegaContentEngine-p20-c3-base rev-parse HEAD)" = "1ec61e14c01e84becd303119ef7546d0af15e5ed"
    ```
-2. **Switch Shared Production to Immutable Compose**:
-   Deploy using `docker-compose.prod.yml` with `IMAGE_TAG=1ec61e14`.
+2. **Build and identify the immutable base image**:
+   Build only from that verified checkout. Record the resulting image ID before cutover:
+   ```bash
+   docker build -t omega:1ec61e14c01e84becd303119ef7546d0af15e5ed /tmp/OmegaContentEngine-p20-c3-base/backend
+   docker image inspect omega:1ec61e14c01e84becd303119ef7546d0af15e5ed --format '{{.Id}}'
+   ```
+3. **Switch Shared Production to Immutable Compose**:
+   Use the reviewed P20-C2 `docker-compose.prod.yml` only as topology configuration and set
+   `OMEGA_IMAGE=omega:1ec61e14c01e84becd303119ef7546d0af15e5ed`. The application image itself
+   must be the verified base image above. Do not build from, mount, or deploy P20-C feature
+   source. Inspect `docker compose config` and verify that the existing PostgreSQL volume is
+   preserved before any recreate.
    Verify:
    - Zero host bind mounts to `/app`.
    - `AUTO_MIGRATE=false`.
    - `uvicorn --workers 1` (no `--reload`).
    - Feature gates remain `false`.
-3. **Verify Operational Health**:
-   Verify database is revision 025 and `/health` returns 200.
-4. **Authorize Merge (P20-C4)**:
+   - No migration command is run; revision 026 remains undeployed and DB stays at 025.
+   - The running application image ID equals the recorded base image ID.
+4. **Verify Operational Health**:
+   Verify database remains revision 025, `pipeline_analytics_rollups` remains absent, and
+   `/health` returns 200. The base runtime does not expose P20-C `/health/live`, `/metrics`,
+   or `/ops/status`; their absence during C3 is expected and proves feature code was not deployed.
+5. **Authorize Merge (P20-C4)**:
    Fast-forward merge P20-C into `main` and push. Production containers remain on immutable image `1ec61e14` without hot-reloading code.
 
 ---

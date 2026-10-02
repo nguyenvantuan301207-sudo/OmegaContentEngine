@@ -79,7 +79,8 @@ services:
       - omega-media-data:/app/data
       - omega-models:/app/models
     healthcheck:
-      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/live')" ]
+      # /health exists in both the approved base runtime and P20-C.
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -116,7 +117,8 @@ services:
       - omega-media-data:/app/data
       - omega-models:/app/models
     healthcheck:
-      test: ["CMD", "python", "-m", "omega.application.observability.process_health", "worker"]
+      # entrypoint.sh execs Celery as PID 1; this remains compatible with the approved base runtime.
+      test: ["CMD-SHELL", "kill -0 1"]
       interval: 10s
       timeout: 3s
       retries: 3
@@ -149,7 +151,8 @@ services:
     volumes:
       - omega-media-data:/app/data
     healthcheck:
-      test: ["CMD", "python", "-m", "omega.application.observability.process_health", "beat"]
+      # entrypoint.sh execs Celery as PID 1; Beat loop freshness is a separate readiness signal after P20-C deploys.
+      test: ["CMD-SHELL", "kill -0 1"]
       interval: 10s
       timeout: 3s
       retries: 3
