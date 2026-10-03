@@ -125,6 +125,57 @@ Channel DNA v2 extends the immutable revision model with rich, typed, and inspec
 
 ### P24 Seams and Future Downstream Phases
 
-- **P24-B Creative Style Director**: Consumes `ResolvedChannelDNA` to synthesize concrete visual styles, color palettes, and typographic scales tailored to the channel.
-- **P24-C Packaging**: Consumes `ResolvedPackagingSpec` (via `channel_dna.resolve_packaging(...)`) to generate titles, descriptions, chapters, and thumbnail briefs.
+- **P24-B Creative Style Director**: Consumes `ResolvedChannelDNA` and production context to synthesize a production-specific `CreativeStylePlan`.
+- **P24-C Packaging**: Consumes `PackagingStyleHints` and `ResolvedPackagingSpec` to generate titles, descriptions, chapters, and thumbnail briefs.
 - **P24-D Creative QA**: Validates generated narrative, visual, audio, and packaging artifacts against the channel's `HardConstraints` and `AvoidPatterns`.
+
+## P24-B Creative Style Director
+
+`CreativeStyleDirector` is the coordination layer that answers: *How should THIS production express the pinned Channel DNA?*
+
+### Authority Boundaries
+
+- Canonical identity authority remains strictly `ChannelDNARevision`.
+- `CreativeStylePlan` is **derived**, **production-specific**, **recomputable**, and **pinned to one ChannelDNARevision**.
+- It never becomes a second editable channel root.
+- It does not rewrite `NarrativePlan`, emit raw FFmpeg commands, generate titles or thumbnails, publish media, or perform final brand QA.
+
+### Hard Constraint Propagation & Soft Preference Resolution
+
+- **Hard Constraints**: Channel DNA v2 hard constraints (`no_fabricated_claims`, `no_misleading_clickbait`, `no_unsupported_medical_claims`, `no_profanity`, custom prohibitions) are strictly copied into `hard_constraints_binding`. They can never be weakened or overridden by format adaptations or creative choices.
+- **Soft Preferences**: Evaluated contextually against format and production needs. For example, `prefer_cinematic_visuals` sets composition character to `CINEMATIC` while keeping graphic complexity bounded.
+
+### Modality Directions
+
+1. **Narrative Style (`NarrativeStyleDirection`)**:
+   - Synthesizes `hook_intensity`, `context_depth`, `explanation_density`, `editorial_energy`, `payoff_emphasis`, `cta_intensity`, `formality`, `technicality`, `expressiveness`.
+   - Clamps hook intensity when truthful, non-sensational rules are binding.
+2. **Visual Style (`VisualStyleDirection`)**:
+   - Derives `visual_density`, `evidence_emphasis`, `b_roll_tendency`, `diagram_tendency`, `document_treatment`, `comparison_treatment`, `motion_intensity`, `camera_restraint`, `transition_restraint`, `composition_character`.
+3. **Camera Style (`CameraStyleDirection`)**:
+   - Emits bounded camera intent (`STATIC_RESTRAINED`, `SUBTLE_MOTION`, `MODERATE_EDITORIAL_MOTION`, `ENERGETIC_MOTION`) and energy ceiling for P22-B without emitting renderer transforms.
+4. **Graphic Style (`GraphicStyleDirection`)**:
+   - Coordinates P22-C explanatory diagrams (`graphic_mode`, `annotation_density`).
+5. **Audio Style (`AudioStyleDirection`)**:
+   - Governs music usage tendency, target energy, energy bounds, vocal policy (`INSTRUMENTAL_ONLY`), SFX density, and silence tolerance.
+
+### Cross-Modal Coherence & Style Continuity
+
+- **Cross-Modal Coherence**: Evaluates relationships across modalities. Detects and flags conflicting combinations:
+  - `CALM_NARRATION_HYPERACTIVE_CAMERA`: Calm voice paired with energetic camera motion.
+  - `CALM_NARRATION_OVERACTIVE_AUDIO`: Calm voice paired with overpowered music or dense SFX.
+  - `HIGH_ENERGY_HOOK_INERT_VISUALS`: High energy hook paired with static, low-density visuals.
+  - `HARD_CONSTRAINT_STYLE_VIOLATION`: Any style hint that contradicts binding hard constraints.
+- **Creative Intensity Model**: Normalizes modal energies (`narrative_energy`, `visual_energy`, `camera_energy`, `music_energy`, `sfx_energy`, `graphic_density`) into bounded [0.0, 1.0] scales.
+- **Creative Arc (`CreativeArc`)**: Maps progressive style evolution across sections (`HOOK` -> `CONTEXT` -> `DEVELOPMENT` -> `ESCALATION` -> `PAYOFF` -> `TAKEAWAY` -> `CLOSING`), tracking justified escalation vs accidental drift (`StyleDriftCode`).
+- **Bounded Variation Without Brand Drift**: Variations adapt deterministically to active content pillar, format profile (`SHORT`, `MEDIUM`, `LONG`), and narrative complexity.
+- **Inspectable Provenance**: Every major stylistic adaptation is logged in `style_rationale` entries.
+
+### Handoff Projections
+
+- **P21 Handoff (`.to_p21_style_projection()`)**: Exposes voice dimensions, hook intensity, context depth, and narrative energy.
+- **P22 Handoff (`.to_p22_style_projection()`)**: Exposes visual density, camera motion intent, max camera energy, transition restraint, and document treatment.
+- **P23 Handoff (`.to_p23_style_projection()`)**: Exposes music tendency, energy ranges, vocal policy, SFX density, and restraint flags.
+- **P24-C Packaging Seam (`.to_p24c_packaging_hints()`)**: Exposes title tone, title restraint, length tendency, thumbnail density, thumbnail text policy, and zero-tolerance clickbait constraints without generating text or images.
+- **P24-D QA Context (`.to_p24d_qa_context()`)**: Exposes full lineage, binding constraints, coherence findings, and consistency findings for final acceptance evaluation.
+
