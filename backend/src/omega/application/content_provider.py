@@ -431,7 +431,7 @@ class TemplateContentProvider:
                 [
                     ("Let us now evaluate the empirical evidence and performance benchmarks under rigorous synthetic stress tests.", ContentStatementType.TRANSITION, None, []),
                     (
-                        f"Research confirms: {verified_claims[0]['text']}" if verified_claims else f"Controlled benchmark testing reveals {topic_title} achieves superior request throughput with sub-millisecond response baselines.",
+                        f"Research confirms: {verified_claims[0].get('text') or verified_claims[0].get('claim_text', '')}" if verified_claims else f"Controlled benchmark testing reveals {topic_title} achieves superior request throughput with sub-millisecond response baselines.",
                         ContentStatementType.FACTUAL,
                         None,
                         [

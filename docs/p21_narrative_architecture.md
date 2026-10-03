@@ -187,12 +187,83 @@ ResearchBrief & TopicCandidate
 
 ---
 
-## 10. Extension Seams for P21-B, P21-C, P21-D
+## 10. P21-B Narrative Director Specification
 
-1. **P21-B (AI Narrative Director)**:
-   - Uses `NarrativePlanService.create_plan()` and `NarrativePlanScriptAdapter.prepare_generation_context()`.
-   - The Director will generate `NarrativePlan` instances from research insights before calling script generation.
-2. **P21-C (Pacing & Retention Intelligence)**:
-   - Extends section-level `target_information_density`, `open_loop_intent`, and duration distributions.
-3. **P21-D (Narrative QA & Policy Verification)**:
-   - Extends `NarrativePlanValidator` rules and adds Guardian checkpoints for narrative structure prior to script generation.
+### 10.1 NarrativeDirector Contract
+`NarrativeDirectorProtocol` defines the application boundary:
+```python
+class NarrativeDirectorProtocol(Protocol):
+    def generate_candidates(
+        self,
+        content_request_id: UUID,
+        channel_dna: dict[str, Any],
+        research_brief: dict[str, Any],
+        content_intent: dict[str, Any],
+        topic_title: str,
+        format_profile: NarrativeFormatProfile,
+        target_duration_seconds: int,
+        topic_summary: str | None = None,
+        candidate_count: int = 3,
+    ) -> list[NarrativePlanDraft]: ...
+```
+The Director produces transient `NarrativePlanDraft` instances and **never persists directly**, preserving authority boundaries with `NarrativePlanService` and `NarrativePlanValidator`.
+
+### 10.2 NarrativeStrategy Taxonomy
+Ten typed story structures in `STRATEGY_CATALOG`:
+1. `HOW_IT_WORKS`: Technical mechanism deconstruction into sequential functional mechanics.
+2. `MYTH_REALITY`: Challenges widespread misconceptions with empirical counter-proofs.
+3. `PROBLEM_SOLUTION`: Establishes a critical pain point/bottleneck, evaluates failures, presents the optimal solution.
+4. `MYSTERY_REVEAL`: Opens a compelling paradox or anomaly, delays resolution with clues, resolves in a surprising payoff.
+5. `QUESTION_ANSWER`: Direct authoritative answer to a fundamental question supported by factual evidence.
+6. `CAUSE_EFFECT`: Traces causal mechanisms and cascading downstream consequences.
+7. `CHRONOLOGICAL`: Timeline progression, historical origins, milestone events, and modern culmination.
+8. `CONTRAST_COMPARISON`: Evaluates trade-offs between competing paradigms or technologies across objective dimensions.
+9. `ESCALATION_PAYOFF`: Progressively raises stakes or technical tension until a dramatic breakthrough.
+10. `CASE_STUDY`: Analyzes real-world incident/outage postmortems to extract engineering principles.
+
+### 10.3 Layered Strategy Selection
+`NarrativeStrategySelector` evaluates strategies across:
+1. **Deterministic Eligibility**: Filters out strategies whose bounds disallow the requested format profile.
+2. **Topic & Intent Matching**: Regex keyword matching on title/summary and semantic intent signals.
+3. **Research Shape Alignment**: Rewards `MYTH_REALITY` and `CONTRAST_COMPARISON` when research briefs contain contradictions; rewards `HOW_IT_WORKS` when central question or title queries system mechanics.
+4. **Channel DNA Influence**: Adds bounded preference weight based on pinned `ChannelDNARevision` without overriding research truth.
+
+### 10.4 Candidate Generation & Selection
+- Multi-candidate generation produces up to N transient `NarrativePlanDraft` candidates.
+- `CandidateSelectionEngine` runs `NarrativePlanValidator` against all candidates. Invalid candidates are disqualified.
+- Scored deterministically based on:
+  - Grounding coverage (factual claim citations).
+  - Promise/payoff loop coherence.
+  - Duration fidelity (proximity of section sum to target duration).
+- Exactly **one** winning candidate is selected and persisted as the authoritative current revision in PostgreSQL.
+
+### 10.5 Research Grounding & Lineage
+- Factual sections (`CONTEXT`, `DEVELOPMENT`, `PAYOFF`) carry explicit `GroundingReference` citations to verified claims in `ResearchBrief`.
+- Uncertain claims and unverified evidence are excluded from factual citations.
+- Invented IDs are forbidden; citations point directly to existing `ResearchClaim`, `ClaimEvidence`, and `ResearchSource` IDs.
+
+### 10.6 Promise → Payoff Open Loops
+- Strategies with `has_open_loop=True` open an explicit viewer contract via `promise_id` in early sections (`HOOK` or `PROMISE`).
+- The loop is resolved in a subsequent `PAYOFF` section referencing `payoff_reference = promise_id`.
+- The selection engine and validator guarantee no unresolved promises or orphan payoffs.
+
+### 10.7 Fallback & Bounded Retry
+- `NarrativePlanningService` encapsulates bounded retries (default 2 attempts) for candidate generation failures (timeouts, schema mismatches).
+- If retries are exhausted, the service engages a deterministic fallback strategy (`DeterministicNarrativeDirector`), which constructs a compliant plan guaranteed to pass P21-A validation.
+
+### 10.8 Script Generation Handoff
+- Once persisted, `NarrativePlanScriptAdapter.prepare_generation_context` packages the authoritative plan, channel DNA, research brief, and content intent into `ScriptGenerationContext`.
+- `map_plan_to_script_outline` translates the plan into structured outlines consumed by script generators, preserving roles and open loops.
+- Resulting `ScriptVersion` records `narrative_plan_id` in PostgreSQL.
+
+---
+
+## 11. Extension Seams for P21-C and P21-D
+
+1. **P21-C (Retention & Pacing Intelligence)**:
+   - Dynamic narrative tension curves and retention drop-off risk mitigation.
+   - Intelligent pacing allocation across section durations based on cognitive load and viewer drop-off analytics.
+   - Multi-tier nested curiosity loops for longform profiles.
+2. **P21-D (Narrative QA & Policy Verification)**:
+   - Automated editorial tone consistency verification against channel DNA.
+   - Guardian validation for narrative coherence and claim fidelity prior to script generation.

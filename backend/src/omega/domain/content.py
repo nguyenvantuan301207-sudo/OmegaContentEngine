@@ -376,6 +376,7 @@ class ContentRunPayload(BaseModel):
     """Payload to execute content generation pipeline."""
 
     idempotency_key: str | None = Field(default=None, max_length=100)
+    narrative_plan_id: UUID | None = Field(default=None, description="Optional pinned NarrativePlan authority")
 
 
 class ContentGenerationRequestResponse(BaseModel):

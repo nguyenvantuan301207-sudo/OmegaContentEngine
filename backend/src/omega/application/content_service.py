@@ -55,6 +55,8 @@ from omega.infrastructure.models import (
     ContentOutline,
     ContentQAResult,
     MissionExecution,
+    NarrativePlan as NarrativePlanModel,
+    NarrativeSection as NarrativeSectionModel,
     ResearchBrief,
     ScriptSection,
     ScriptStatement,
@@ -332,14 +334,52 @@ async def generate_content(
         (h for h in hooks_data if h.get("selected")), hooks_data[0] if hooks_data else None
     )
 
-    outline_data = provider.generate_outline(
-        topic_title=topic_title,
-        brief_dict=brief_dict,
-        dna_dict=dna_dict,
-        intent_dict=intent_data,
-        selected_hook=selected_hook,
-        target_duration_seconds=req.target_duration_seconds,
-    )
+    # Check if a NarrativePlan is specified or active for this request
+    target_plan_id: UUID | None = getattr(payload, "narrative_plan_id", None)
+    narrative_plan_model = None
+    if target_plan_id:
+        np_stmt = (
+            select(NarrativePlanModel)
+            .where(NarrativePlanModel.id == target_plan_id)
+            .options(
+                selectinload(NarrativePlanModel.sections).selectinload(
+                    NarrativeSectionModel.grounding_citations
+                )
+            )
+        )
+        narrative_plan_model = (await session.execute(np_stmt)).scalar_one_or_none()
+    else:
+        np_stmt = (
+            select(NarrativePlanModel)
+            .where(
+                NarrativePlanModel.content_generation_request_id == request_id,
+                NarrativePlanModel.is_current.is_(True),
+            )
+            .options(
+                selectinload(NarrativePlanModel.sections).selectinload(
+                    NarrativeSectionModel.grounding_citations
+                )
+            )
+        )
+        narrative_plan_model = (await session.execute(np_stmt)).scalar_one_or_none()
+
+    if narrative_plan_model:
+        from omega.application.narrative_plan_service import _orm_to_domain
+        from omega.application.narrative_script_adapter import NarrativePlanScriptAdapter
+
+        domain_plan = _orm_to_domain(narrative_plan_model)
+        outline_data = NarrativePlanScriptAdapter.map_plan_to_script_outline(domain_plan)
+        attached_narrative_plan_id = narrative_plan_model.id
+    else:
+        outline_data = provider.generate_outline(
+            topic_title=topic_title,
+            brief_dict=brief_dict,
+            dna_dict=dna_dict,
+            intent_dict=intent_data,
+            selected_hook=selected_hook,
+            target_duration_seconds=req.target_duration_seconds,
+        )
+        attached_narrative_plan_id = None
 
     raw_script_data = provider.generate_script(
         topic_title=topic_title,
@@ -531,6 +571,7 @@ async def generate_content(
         estimated_duration_seconds=raw_script_data["estimated_duration_seconds"],
         qa_status=qa_status.value,
         style_snapshot=raw_script_data["style_snapshot"],
+        narrative_plan_id=attached_narrative_plan_id,
     )
     session.add(script_version)
     await session.flush()
