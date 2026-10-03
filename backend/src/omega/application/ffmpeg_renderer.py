@@ -10,6 +10,9 @@ from pathlib import Path
 
 DEFAULT_RENDER_TIMEOUT_SECONDS = 180
 FINAL_MASTER_SAMPLE_RATE_HZ = 48_000
+FINAL_MASTER_CHANNELS = 2
+FINAL_MASTER_CHANNEL_LAYOUT = "stereo"
+FINAL_MASTER_TRUE_PEAK_DBTP = -1.5
 
 # Canonical generated-content final concatenation timeout policy bounds
 FINAL_CONCAT_MIN_TIMEOUT_SECONDS = 300
@@ -563,6 +566,10 @@ class FFmpegRenderer:
         background_music_fade_in_ms: int = 0,
         background_music_fade_out_ms: int = 0,
         sfx_inputs: list[SFXMixInput] | None = None,
+        narration_ducking_enabled: bool = True,
+        ducking_attack_ms: int = 80,
+        ducking_release_ms: int = 350,
+        peak_ceiling_dbtp: float = FINAL_MASTER_TRUE_PEAK_DBTP,
         timeout_seconds: int = DEFAULT_RENDER_TIMEOUT_SECONDS,
     ) -> None:
         """Mix foreground narration with optional background music and SFX."""
@@ -583,7 +590,18 @@ class FFmpegRenderer:
 
         inputs = ["-y", "-i", str(v_p)]
         filter_complex = []
-        amix_inputs = ["[0:a:0]"]
+        if has_music and narration_ducking_enabled:
+            filter_complex.append(
+                f"[0:a:0]aresample={FINAL_MASTER_SAMPLE_RATE_HZ},"
+                f"aformat=sample_fmts=fltp:channel_layouts={FINAL_MASTER_CHANNEL_LAYOUT},"
+                "asplit=2[narr][narrkey]"
+            )
+        else:
+            filter_complex.append(
+                f"[0:a:0]aresample={FINAL_MASTER_SAMPLE_RATE_HZ},"
+                f"aformat=sample_fmts=fltp:channel_layouts={FINAL_MASTER_CHANNEL_LAYOUT}[narr]"
+            )
+        amix_inputs = ["[narr]"]
         input_idx = 1
 
         if has_music:
@@ -600,7 +618,11 @@ class FFmpegRenderer:
             else:
                 inputs.extend(["-i", str(m_p)])
 
-            m_filters = [f"volume={background_music_gain_db}dB"]
+            m_filters = [
+                f"aresample={FINAL_MASTER_SAMPLE_RATE_HZ}",
+                f"aformat=sample_fmts=fltp:channel_layouts={FINAL_MASTER_CHANNEL_LAYOUT}",
+                f"volume={background_music_gain_db}dB",
+            ]
             target_sec = target_duration_ms / 1000.0
             m_filters.append(f"atrim=0:{target_sec}")
             if background_music_fade_in_ms > 0:
@@ -611,7 +633,13 @@ class FFmpegRenderer:
                 st_sec = target_sec - fout_sec
                 m_filters.append(f"afade=t=out:st={st_sec}:d={fout_sec}")
 
-            filter_complex.append(f"[{input_idx}:a:0]{','.join(m_filters)}[bgm]")
+            music_label = "bgmraw" if narration_ducking_enabled else "bgm"
+            filter_complex.append(f"[{input_idx}:a:0]{','.join(m_filters)}[{music_label}]")
+            if narration_ducking_enabled:
+                filter_complex.append(
+                    f"[bgmraw][narrkey]sidechaincompress=threshold=0.01:ratio=12:"
+                    f"attack={ducking_attack_ms}:release={ducking_release_ms}:makeup=1[bgm]"
+                )
             amix_inputs.append("[bgm]")
             input_idx += 1
 
@@ -631,6 +659,8 @@ class FFmpegRenderer:
             dur_sec = sfx.duration_ms / 1000.0
             delay_ms = sfx.start_ms
             s_filters = [
+                f"aresample={FINAL_MASTER_SAMPLE_RATE_HZ}",
+                f"aformat=sample_fmts=fltp:channel_layouts={FINAL_MASTER_CHANNEL_LAYOUT}",
                 f"atrim=0:{dur_sec}",
                 f"volume={sfx.gain_db}dB",
                 f"adelay={delay_ms}|{delay_ms}",
@@ -640,7 +670,16 @@ class FFmpegRenderer:
             input_idx += 1
 
         num_inputs = len(amix_inputs)
-        amix_str = "".join(amix_inputs) + f"amix=inputs={num_inputs}:duration=first:dropout_transition=0[aout]"
+        if not 5 <= ducking_attack_ms <= 500 or not 20 <= ducking_release_ms <= 2000:
+            raise ValueError("ducking attack/release outside supported bounds")
+        if not math.isfinite(peak_ceiling_dbtp) or not -6.0 <= peak_ceiling_dbtp <= -0.1:
+            raise ValueError("peak_ceiling_dbtp outside supported bounds")
+        limit = 10 ** (peak_ceiling_dbtp / 20.0)
+        amix_str = (
+            "".join(amix_inputs)
+            + f"amix=inputs={num_inputs}:duration=first:dropout_transition=0[premaster];"
+            + f"[premaster]alimiter=limit={limit:.6f}:attack=5:release=50[aout]"
+        )
         filter_complex.append(amix_str)
 
         out_p.parent.mkdir(parents=True, exist_ok=True)
@@ -655,6 +694,8 @@ class FFmpegRenderer:
             "-c:v", "copy",
             "-c:a", "aac",
             "-b:a", "192k",
+            "-ar", str(FINAL_MASTER_SAMPLE_RATE_HZ),
+            "-ac", str(FINAL_MASTER_CHANNELS),
             "-t", f"{target_sec:.3f}",
             str(out_p),
         ]
@@ -725,6 +766,7 @@ class FFmpegRenderer:
             audio_bitrate,
             "-ar",
             str(sample_rate_hz),
+            "-shortest",
             str(out_p),
         ]
 

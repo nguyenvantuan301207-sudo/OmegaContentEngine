@@ -20,6 +20,7 @@ from omega.application.audio_mix_policy import (
     build_background_music_plan,
     build_sfx_event_plan,
 )
+from omega.application.audio_mix_v2_service import AudioMixPlanner
 from omega.application.beat_asset_executor import BeatAssetExecutor
 from omega.application.beat_clip_assembler import BeatClipAssembler
 from omega.application.beat_visual_renderer import (
@@ -62,6 +63,7 @@ from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import VisualAssetKind, VisualDirector
 from omega.application.visual_template_renderer import VisualTemplateRenderer
 from omega.domain.attribution_delivery import AttributionDeliveryChannel
+from omega.domain.audio_mix import AudioStem, AudioStemRole
 from omega.domain.channel_dna import BrandFormat, resolve_production_brand_spec
 from omega.domain.channel_style import ChannelStyleProfile, extract_channel_style_profile
 from omega.domain.production import (
@@ -201,7 +203,7 @@ def _canonical_render_semantics_identity(
     )
     return (
         f"canonical-render-semantics-v{render_semantics_version}:"
-        f"mastering-policy-v1:i={target_i:.1f}:tp={target_tp:.1f}:"
+        f"mastering-policy-v2:i={target_i:.1f}:tp={target_tp:.1f}:"
         f"lra={target_lra:.1f}:sample_rate={sample_rate_hz}"
     )
 
@@ -1540,7 +1542,7 @@ class VisualProductionV2Service:
                     })
                 audio_mix_fp["sfx_events"] = sfx_fp_list
 
-            fingerprint_input += ":audio-mix-v1:" + json.dumps(audio_mix_fp, sort_keys=True)
+            fingerprint_input += ":audio-mix-v2:" + json.dumps(audio_mix_fp, sort_keys=True)
 
         # Subtitle semantics affect the physical burned output.  Never reinterpret,
         # rewrite, or delete an incompatible cached render.  If an incompatible
@@ -2336,7 +2338,10 @@ class VisualProductionV2Service:
                         )
                         sfx_plans.append(plan)
                     except Exception as e:
-                        raise VerticalSliceError(f"SFX plan failed for {sfx.event_id}: {self._sanitize_error(e)}") from e
+                        raise VerticalSliceError(
+                            f"SFX plan failed for {sfx.event_id}: "
+                            f"{self._sanitize_error(e)}"
+                        ) from e
 
                 try:
                     mix_plan = build_audio_mix_plan(
@@ -2345,7 +2350,70 @@ class VisualProductionV2Service:
                         sfx_events=sfx_plans,
                     )
                 except Exception as e:
-                    raise VerticalSliceError(f"Audio mix plan failed: {self._sanitize_error(e)}") from e
+                    raise VerticalSliceError(
+                        f"Audio mix plan failed: {self._sanitize_error(e)}"
+                    ) from e
+
+                narration_intervals = tuple(
+                    (segment.start_ms, segment.end_ms)
+                    for segment in runtime_narration_segments
+                )
+                p23_stems = [
+                    AudioStem(
+                        stem_id="canonical-narration",
+                        role=AudioStemRole.NARRATION,
+                        source_artifact=str(generated_content_mp4),
+                        source_identity="assembled-canonical-narration",
+                        source_sha256=self._compute_streaming_sha(generated_content_mp4),
+                        start_ms=0,
+                        end_ms=audio_mix_target_duration_ms,
+                        gain_db=0.0,
+                        priority=100,
+                        lineage={"script_version_id": str(script_version.id)},
+                    )
+                ]
+                if background_music is not None and bgm_sha is not None:
+                    p23_stems.append(
+                        AudioStem(
+                            stem_id="supplied-music",
+                            role=AudioStemRole.MUSIC,
+                            source_artifact=str(Path(background_music.audio_path).resolve()),
+                            source_identity=bgm_sha,
+                            source_sha256=bgm_sha,
+                            start_ms=0,
+                            end_ms=audio_mix_target_duration_ms,
+                            gain_db=background_music.gain_db,
+                            fade_in_ms=bgm_plan.fade_in_ms if bgm_plan else 0,
+                            fade_out_ms=bgm_plan.fade_out_ms if bgm_plan else 0,
+                            priority=30,
+                            optional=True,
+                        )
+                    )
+                for sfx, s_sha, sfx_path in normalized_sfx:
+                    p23_stems.append(
+                        AudioStem(
+                            stem_id=f"sfx-{sfx.event_id}",
+                            role=AudioStemRole.SFX,
+                            source_artifact=str(sfx_path),
+                            source_identity=s_sha,
+                            source_sha256=s_sha,
+                            start_ms=sfx.start_ms,
+                            end_ms=sfx.start_ms + sfx.duration_ms,
+                            gain_db=sfx.gain_db,
+                            priority=60,
+                            optional=True,
+                        )
+                    )
+                try:
+                    p23_mix_plan = AudioMixPlanner.plan(
+                        timeline_duration_ms=audio_mix_target_duration_ms,
+                        stems=p23_stems,
+                        narration_intervals_ms=narration_intervals,
+                    )
+                except Exception as e:
+                    raise VerticalSliceError(
+                        f"Audio Mixing v2 plan failed: {self._sanitize_error(e)}"
+                    ) from e
 
                 bgm_path = None
                 bgm_gain = 0.0
@@ -2362,12 +2430,16 @@ class VisualProductionV2Service:
 
                 sfx_mix_inputs = []
                 for i, p_event in enumerate(mix_plan.sfx_events):
+                    p23_sfx = next(
+                        stem for stem in p23_mix_plan.stems
+                        if stem.stem_id == f"sfx-{p_event.event_id}"
+                    )
                     sfx_mix_inputs.append(
                         FFmpegRenderer.SFXMixInput(
                             audio_path=normalized_sfx[i][2],
                             start_ms=p_event.start_ms,
                             duration_ms=p_event.duration_ms,
-                            gain_db=p_event.gain_db,
+                            gain_db=p23_sfx.gain_db,
                         )
                     )
 
@@ -2383,9 +2455,15 @@ class VisualProductionV2Service:
                         background_music_fade_in_ms=bgm_fade_in,
                         background_music_fade_out_ms=bgm_fade_out,
                         sfx_inputs=sfx_mix_inputs,
+                        narration_ducking_enabled=p23_mix_plan.ducking.enabled,
+                        ducking_attack_ms=p23_mix_plan.ducking.attack_ms,
+                        ducking_release_ms=p23_mix_plan.ducking.release_ms,
+                        peak_ceiling_dbtp=p23_mix_plan.loudness.true_peak_dbtp,
                     )
                 except Exception as e:
-                    raise VerticalSliceError(f"Master audio mix failed: {self._sanitize_error(e)}") from e
+                    raise VerticalSliceError(
+                        f"Master audio mix failed: {self._sanitize_error(e)}"
+                    ) from e
 
                 if not mixed_content_mp4.is_file() or mixed_content_mp4.stat().st_size <= 0:
                     raise VerticalSliceError("Mixed MP4 missing or empty")
@@ -2400,15 +2478,32 @@ class VisualProductionV2Service:
                 audio_mix_manifest = {
                     "audio_mix_enabled": True,
                     "background_music_enabled": mix_plan.background_music is not None,
-                    "background_music_attribution_required": mix_plan.background_music.attribution_required if mix_plan.background_music else False,
+                    "background_music_attribution_required": (
+                        mix_plan.background_music.attribution_required
+                        if mix_plan.background_music
+                        else False
+                    ),
                     "sfx_event_count": len(mix_plan.sfx_events),
-                    "sfx_attribution_required_count": sum(1 for e in mix_plan.sfx_events if e.attribution_required),
+                    "sfx_attribution_required_count": sum(
+                        1 for e in mix_plan.sfx_events if e.attribution_required
+                    ),
                     "audio_mix_target_duration_ms": audio_mix_target_duration_ms,
                 }
                 runtime_audio_mix = {
                     "enabled": True,
+                    "plan_version": p23_mix_plan.version,
+                    "renderer_version": "ffmpeg-audio-mix-v2",
                     "narration_applied": bool(self._narration_provider),
                     "target_duration_ms": audio_mix_target_duration_ms,
+                    "sample_rate_hz": p23_mix_plan.sample_rate_hz,
+                    "channel_layout": p23_mix_plan.channel_layout,
+                    "loudness_policy": p23_mix_plan.loudness.model_dump(mode="json"),
+                    "ducking_policy": p23_mix_plan.ducking.model_dump(mode="json"),
+                    "mastering_chain": [
+                        "trim_align", "per_stem_gain", "narration_ducking",
+                        "stem_sum", "peak_limiter", "final_loudness_normalization",
+                    ],
+                    "master_intermediate_sha256": self._compute_streaming_sha(mixed_content_mp4),
                     "background_music": (
                         {
                             "content_sha256": bgm_sha,
