@@ -143,3 +143,16 @@ class VisualDirector:
             motion_profile=motion_profile,
             rationale=rationale
         )
+
+    def resolve_beat(
+        self,
+        scene: StoryboardScene,
+        beat: Any,
+        continuity_decision: Any = None,
+    ) -> VisualDirection:
+        """Resolve visual direction for a single VisualBeat with continuity context."""
+        from omega.application.visual_continuity_director import VisualDirectorBeatAdapter
+
+        adapter = VisualDirectorBeatAdapter(self)
+        return adapter.resolve_beat_direction(scene, beat, continuity_decision)
+
