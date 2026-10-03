@@ -299,7 +299,7 @@ async def test_06_local_template_rejects_external_assets(tmp_path: Path):
         kind=VisualAssetKind.BROLL,
         mime_type="video/mp4",
         content_sha256="0" * 64,
-        local_path=Path("/tmp/fake.mp4"),
+        local_path=Path("/tmp/fake.mp4").resolve(),
         duration_seconds=5.0,
         width=1920,
         height=1080,
