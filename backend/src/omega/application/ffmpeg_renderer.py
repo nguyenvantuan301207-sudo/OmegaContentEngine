@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -747,8 +748,87 @@ class FFmpegRenderer:
         out_p = Path(output_path).resolve()
         out_p.parent.mkdir(parents=True, exist_ok=True)
 
+        analysis_filter = (
+            f"loudnorm=I={target_i:.1f}:TP={target_tp:.1f}:LRA={target_lra:.1f}:"
+            "print_format=json"
+        )
+        analysis_cmd = [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(in_p),
+            "-map",
+            "0:a:0",
+            "-af",
+            analysis_filter,
+            "-f",
+            "null",
+            "-",
+        ]
+
+        analysis_proc = await asyncio.create_subprocess_exec(
+            *analysis_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, analysis_stderr = await asyncio.wait_for(
+                analysis_proc.communicate(), timeout=timeout_seconds
+            )
+        except TimeoutError as exc:
+            analysis_proc.kill()
+            await analysis_proc.wait()
+            raise FFmpegExecutionError(
+                f"FFmpeg master audio analysis timed out after {timeout_seconds}s."
+            ) from exc
+
+        if analysis_proc.returncode != 0:
+            err_msg = (
+                analysis_stderr.decode("utf-8", errors="replace")[-500:]
+                if analysis_stderr
+                else "Unknown error"
+            )
+            raise FFmpegExecutionError(
+                f"FFmpeg master audio analysis failed (code {analysis_proc.returncode}): "
+                f"{err_msg}"
+            )
+
+        analysis_text = analysis_stderr.decode("utf-8", errors="replace")
+        json_start = analysis_text.rfind("{")
+        json_end = analysis_text.find("}", json_start)
+        if json_start < 0 or json_end < 0:
+            raise FFmpegExecutionError(
+                "FFmpeg master audio analysis did not return loudness measurements."
+            )
+        try:
+            measurements = json.loads(analysis_text[json_start : json_end + 1])
+            measured_values = {
+                key: float(measurements[key])
+                for key in (
+                    "input_i",
+                    "input_tp",
+                    "input_lra",
+                    "input_thresh",
+                    "target_offset",
+                )
+            }
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise FFmpegExecutionError(
+                "FFmpeg master audio analysis returned invalid loudness measurements."
+            ) from exc
+        if not all(math.isfinite(value) for value in measured_values.values()):
+            raise FFmpegExecutionError(
+                "FFmpeg master audio analysis returned non-finite loudness measurements."
+            )
+
         loudnorm_filter = (
-            f"loudnorm=I={target_i:.1f}:TP={target_tp:.1f}:LRA={target_lra:.1f}:linear=true"
+            f"loudnorm=I={target_i:.1f}:TP={target_tp:.1f}:LRA={target_lra:.1f}:"
+            f"measured_I={measured_values['input_i']}:"
+            f"measured_TP={measured_values['input_tp']}:"
+            f"measured_LRA={measured_values['input_lra']}:"
+            f"measured_thresh={measured_values['input_thresh']}:"
+            f"offset={measured_values['target_offset']}:linear=true:print_format=summary"
         )
 
         cmd = [
@@ -766,7 +846,6 @@ class FFmpegRenderer:
             audio_bitrate,
             "-ar",
             str(sample_rate_hz),
-            "-shortest",
             str(out_p),
         ]
 
