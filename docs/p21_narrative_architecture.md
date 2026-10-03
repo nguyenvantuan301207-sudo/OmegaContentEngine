@@ -288,12 +288,74 @@ Ten typed story structures in `STRATEGY_CATALOG`:
 
 ---
 
-## 11. Extension Seams for P21-C and P21-D
+## 11. P21-C Retention & Pacing Intelligence Specification
 
-1. **P21-C (Retention & Pacing Intelligence)**:
-   - Dynamic narrative tension curves and retention drop-off risk mitigation.
-   - Intelligent pacing allocation across section durations based on cognitive load and viewer drop-off analytics.
-   - Multi-tier nested curiosity loops for longform profiles.
-2. **P21-D (Narrative QA & Policy Verification)**:
+### 11.1 Purpose & Architectural Role
+While P21-B decides **WHAT** narrative strategy and structure to employ, P21-C decides **HOW** that story structure unfolds over time. It governs narrative velocity, information density, curiosity loop lifetimes, reveal cadence, dead-zone prevention, and escalation progression.
+
+```text
+NarrativePlan (v1)
+       ↓
+Retention & Pacing Intelligence (RetentionPacingService)
+       ↓
+PacingPlan (Derived Analysis & Diagnostics)
+       ↓
+Optimized NarrativePlan Revision (v2, transactional schema027 authority)
+       ↓
+NarrativePlanScriptAdapter
+       ↓
+ScriptVersion Lineage
+```
+
+### 11.2 PacingProfile
+Channel and format-driven pacing profiles:
+- `FAST`: High information density, tighter section durations, aggressive context budgeting (<=12%), rapid loop resolution, narrative compression.
+- `BALANCED`: Default educational cadence, proportional context allocation (<=20%), steady escalation building.
+- `DELIBERATE`: Technical deep-dive cadence, expanded context allowance (<=30%), staged reveals, elongated open loops.
+
+### 11.3 PacingPlan Derived Artifact
+`PacingPlan` is an immutable, derived diagnostic artifact providing full observability into pacing mechanics:
+- `section_timings`: Per-section duration, target density, reveal stage, and normalized intensity score.
+- `open_loop_metrics`: Tracking promise/payoff spans, elapsed seconds, and timing status (`OPTIMAL`, `TOO_FAST`, `TOO_SLOW`, `UNRESOLVED`).
+- `findings`: Structured diagnostic observations (`PacingFindingCode`) with explicit severities (`INFO`, `WARNING`, `BLOCKING`).
+- `recommended_adjustments`: Concrete duration deltas and density overrides.
+- `escalation_curve`: Vector of normalized intensity scores mapping narrative tension progression.
+
+`PacingPlan` does NOT compete with `NarrativePlan`; `NarrativePlan` remains the canonical persisted authority.
+
+### 11.4 Core Pacing Engines
+1. **Section Timing Engine (`SectionTimingEngine`)**:
+   - Computes format-aware duration allocations per role and profile.
+   - Enforces front-loaded hooks (<=10s for SHORT, <=30s for MEDIUM, <=45s for LONG), bounded context, generous development budgets, and robust payoff allocations.
+   - Guarantees exact total duration sum normalization within target tolerances.
+2. **Information Density Model (`InformationDensityEngine`)**:
+   - Evaluates factual claim citations and key information density per unit time.
+   - Assigns `LOW`, `MEDIUM`, or `HIGH` density; detects `DENSITY_OVERLOADED` and `DENSITY_UNDERLOADED` sections.
+3. **Open-Loop Timing Engine (`OpenLoopTimingEngine`)**:
+   - Enforces format-aware acceptable loop lifetime boundaries (SHORT: 10-35s; MEDIUM: 45-240s; LONG: 120-900s).
+   - Detects `LOOP_RESOLVED_TOO_QUICKLY`, `LOOP_HELD_TOO_LONG`, and `MULTIPLE_UNRESOLVED_LOOPS`.
+4. **Reveal Timing Engine (`RevealTimingEngine`)**:
+   - Maps sections across 5 reveal stages: `SETUP` → `PARTIAL_REVEAL` → `EVIDENCE_PROGRESSION` → `MAJOR_REVEAL` → `FINAL_PAYOFF`.
+   - Flags `PREMATURE_REVEAL` (major reveal before evidence accumulation) and `DELAYED_REVEAL`.
+5. **Dead-Zone Detector (`DeadZoneDetector`)**:
+   - Identifies intervals lacking narrative progression: `DEAD_SECTION` (no claims, no loops, <=1 point), `LOW_INFORMATION_PROGRESS` (>25s with 0 claims), `OVERLONG_CONTEXT`, and `STALLED_DEVELOPMENT`.
+6. **Redundancy Detector (`RedundancyDetector`)**:
+   - Detects `REPEATED_CLAIM` (duplicate claim IDs across sections), `REPEATED_OBJECTIVE` (semantic similarity > 0.8), duplicate promises, and verbatim takeaway repetition.
+7. **Escalation Curve Engine (`EscalationCurveEngine`)**:
+   - Tracks narrative tension building from setup through escalation and payoff.
+   - Detects `FLAT_ESCALATION` and `REVERSED_ESCALATION`.
+
+### 11.5 Revision-Based Pacing Optimization
+When pacing adjustments are approved, `RetentionPacingService.optimize_plan`:
+- Generates a new `NarrativePlan` revision (v2) via `NarrativePlanService.create_revision`.
+- Supersedes v1 (`is_current=False`, `status=SUPERSEDED`) and installs v2 as current (`is_current=True`, `version=2`, `supersedes_plan_id=v1.id`).
+- Strictly enforces historical revision immutability and database partial unique constraints.
+
+---
+
+## 12. Extension Seams for P21-D
+
+1. **P21-D (Narrative QA & Policy Verification)**:
    - Automated editorial tone consistency verification against channel DNA.
-   - Guardian validation for narrative coherence and claim fidelity prior to script generation.
+   - Guardian policy verification for claim fidelity, ethical constraints, and narrative coherence prior to downstream script generation.
+   - Verification of script generation output conformance against the authoritative NarrativePlan.
