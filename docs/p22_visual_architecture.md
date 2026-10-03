@@ -1,155 +1,98 @@
-# P22-A Visual Continuity & Editorial Beat Architecture
+# P22-A Visual Beat Authority and Continuity Architecture
 
-## 1. Architectural Overview
+## Authority model
 
-P22-A introduces editorial visual continuity and typed beat planning between `Storyboard` and `VisualDirector`/renderer.
+P22-A uses `EDITORIAL_TO_VISUAL`. `EditorialBeatSpec` and `VisualBeat` are not peer authorities:
+
+- `EditorialBeatPlanner` is the only component that creates semantic/editorial beat units and the only component that allocates their physical timing.
+- `EditorialBeatSpec` is the canonical semantic unit: narration span, source statement references, semantic role, visual-strategy intent, asset-reuse intent, motion intent, and transition intent.
+- `VisualBeatProjector` does not split narration or allocate timing. It projects `EditorialBeatPlan` plus `MaterializedBeatTimingPlan` into continuity-aware `VisualBeat` intervals.
+- `VisualBeat` is a derived visual enrichment: visual role, information goal, motif, reuse policy, overlay intent, and continuity decision.
+
+The planner at `omega.application.editorial_beat_planner.EditorialBeatPlanner` is the single canonical planner. There is no second `EditorialBeatPlanner` in the continuity module.
+
+## Canonical pipeline
 
 ```mermaid
 flowchart TD
-    ScriptVersion["ScriptVersion (P21)"] --> Storyboard["StoryboardEngine"]
-    Storyboard --> BeatPlanner["EditorialBeatPlanner (P22-A)"]
-    BeatPlanner --> VisualBeatSeq["VisualBeat Sequence"]
-    VisualBeatSeq --> ContinuityDirector["VisualContinuityDirector (P22-A)"]
-    ContinuityDirector --> Seam["VisualDirectorBeatAdapter"]
-    Seam --> VisualDirector["VisualDirector (Existing)"]
-    VisualDirector --> Renderer["Renderer (V2 Beat Assembler)"]
+    Narrative["Accepted NarrativePlan revision"] --> Script["ScriptVersion"]
+    Script --> Storyboard["StoryboardScene"]
+    Storyboard --> Planner["EditorialBeatPlanner"]
+    Planner --> Editorial["EditorialBeatPlan"]
+    Editorial --> Timing["MaterializedBeatTimingPlan"]
+    Editorial --> Projector["VisualBeatProjector"]
+    Timing --> Projector
+    Projector --> Visual["VisualBeatSequence"]
+    Visual --> Continuity["VisualContinuityDirector"]
+    Editorial --> Direction["BeatVisualDirector"]
+    Continuity --> Adapter["VisualDirectorBeatAdapter"]
+    Direction --> Adapter
+    Adapter --> AssetPolicy["BeatAssetPolicy"]
+    AssetPolicy --> RenderAdapter["BeatRenderAdapter"]
+    RenderAdapter --> Renderer["BeatVisualRenderer"]
+    Renderer --> Assembler["BeatClipAssembler"]
 ```
 
-P22-A answers:
-- **WHAT should visually change during a scene?** Informational beats derived from factual claims, transitions, and explanation milestones.
-- **WHAT visual information should persist across beats?** Continuity motifs, primary documents, and stable comparison frames.
-- **WHEN should an asset be reused versus replaced?** Explicit `AssetReusePolicy` governing intentional reuse, continuity anchors, callbacks, and avoiding accidental repeats.
-- **HOW should adjacent visual beats remain semantically coherent?** Directed by `VisualContinuityDirector` with typed continuity decisions.
+`CanonicalBeatPreparationService` executes this path. The continuity adapter adds continuity metadata to the canonical `BeatVisualDirector` output; it does not independently select a competing render mode, template, semantic role, camera intent, transition intent, or asset requirement.
 
----
+`VisualDirector.resolve(scene)` remains the legacy scene-level API. `VisualDirector.resolve_beat(scene, visual_beat)` remains a compatibility view for callers that only need a standard `VisualDirection`; it is not the final beat-render direction authority. The renderer path uses the enriched `BeatVisualDirection` produced from the canonical `BeatVisualDirector` result.
 
-## 2. Core Domain Models
+## Lineage and timing
 
-### EditorialBeat / VisualBeat
-A typed domain model (`omega.domain.visual_beat.VisualBeat`) representing an editorial visual beat within a parent `StoryboardScene`:
-- `id`: Unique UUID identifier.
-- `scene_id` & `parent_scene_index`: Identifies the parent Storyboard scene.
-- `beat_index`: 0-indexed position within the scene.
-- `start_offset_ms` & `end_offset_ms` & `duration_ms`: Timeline slice relative to scene start.
-- `narrative_section_role`: Semantic role inherited from `NarrativePlan`.
-- `script_statement_ids`: Source statement lineage references.
-- `narration_text`: Verbatim narration span.
-- `visual_intent` & `information_goal`: What the viewer sees and what point is delivered.
-- `visual_role`: Editorial purpose classification (`VisualRole`).
-- `continuity_group_id`: Explicit motif or continuity group identifier.
-- `preferred_asset_type`: Target asset category (`IMAGE`, `BROLL`, `SCREENSHOT`, `DIAGRAM`, `DATA_CARD`, `DOCUMENT`).
-- `asset_reuse_policy`: Explicit reuse semantics (`AssetReusePolicy`).
-- `text_overlay_intent`: Proposed graphic or stat callout.
-- `grounding_references`: Verified claim citations backing the beat.
-- `importance`: Editorial weight.
-- `continuity_decision`: Continuity decision relative to previous beat (`ContinuityDecisionType`).
+Every projected interval records `VisualBeat.source_editorial_beat_indices`. These indices are copied directly from `EditorialBeatTiming.source_beat_indices`.
 
-### VisualRole Taxonomy
-Typed taxonomy classifying WHY visual content exists:
-- `ESTABLISH`: Hook and atmospheric baseline setup.
-- `EXPLAIN`: Core conceptual explanation.
-- `EVIDENCE`: Factual proof backing claims.
-- `COMPARE`: Evaluation of two opposing entities/approaches.
-- `EMPHASIZE`: High-impact verbal or visual emphasis.
-- `REVEAL`: Thematic payoff or surprising insight.
-- `CONTEXTUALIZE`: Environmental or background setting.
-- `DOCUMENT`: Inspection of primary documents, whitepapers, or SEC filings.
-- `DATA`: Quantitative metrics and statistical proof points.
-- `DIAGRAM`: System architecture, protocol flow, or mechanism illustration.
-- `BROLL`: Ambient cutaway footage.
-- `QUOTE`: Direct testimony or excerpt.
-- `SUMMARY`: Synthesis of takeaways.
-- `CTA`: Viewer call to action.
+This is intentionally plural. The canonical timing allocator can merge short editorial beats into one materialized interval. In that case, one `VisualBeat` contains all contributing editorial indices, the ordered union of their source statement references, and their ordered narration spans. The projector never invents fallback offsets for editorial beats merged out of the timing plan.
 
-### Continuity Decisions (`ContinuityDecisionType`)
-Directives between adjacent visual beats:
-- `KEEP`: Continue current visual subject with no state change.
-- `REUSE`: Intentionally preserve existing visual asset for deeper explanation.
-- `REFRAME_LATER`: Maintain visual anchor with intent for camera reframing in P22-B.
-- `REPLACE`: Contextual shift requiring a fresh visual asset.
-- `RETURN_TO_MOTIF`: Deliberate return to an earlier established motif anchor.
-- `PROGRESS_DOCUMENT`: Advance deeper into a primary document (Overview → Section → Detail).
-- `PROGRESS_DIAGRAM`: Advance diagram explanation by revealing subsequent stages.
-- `SWITCH_CONTEXT`: Transition to an unrelated subject or scene.
+The trace is therefore deterministic:
 
----
+```text
+VisualBeat
+  -> EditorialBeatSpec index/indices
+  -> StoryboardScene and source statement references
+  -> ScriptVersion
+  -> accepted NarrativePlan revision
+```
 
-## 3. Continuity Policies & Tracking
+Visual beat UUIDs are deterministically derived from scene identity, source editorial indices, and narration. No database persistence or migration is required for this derived lineage.
 
-### Asset Reuse Policy (`AssetReusePolicy`)
-Distinguishes intentional continuity from accidental repetition:
-- `INTENTIONAL_REUSE`: Asset deliberately maintained across adjacent beats.
-- `ACCIDENTAL_REPEAT`: Same asset or query repeated across disparate topics without motif justification (detected and flagged).
-- `CONCEPTUAL_VARIATION`: Same conceptual entity illustrated from an alternate angle or representation.
-- `CONTINUITY_ANCHOR`: Primary asset established as the visual anchor for a motif.
-- `CALLBACK_VISUAL`: Explicit callback to an earlier scene's visual asset.
-- `NEW_ACQUISITION`: Fresh external asset required.
+Merged timing remains an explicit renderer eligibility boundary: `BeatRenderAdapter` returns `MERGED_BEAT_TIMING_UNSUPPORTED` rather than silently fabricating a one-to-one render plan. One-to-one materialized beats flow through `BeatVisualRenderer` and `BeatClipAssembler`, which support multiple ordered visual states within one parent scene.
 
-### Motif & Continuity Groups (`ContinuityGroup`)
-Inspectable continuity motifs binding related visual beats across the video:
-- Types: `ENTITY`, `MAP`, `DOCUMENT`, `DIAGRAM`, `COMPARISON`.
-- Tracks `primary_subject`, `active_section_orders`, and `anchor_asset_id`.
+## Visual continuity responsibilities
 
-### Document & Evidence Continuity (`DocumentContinuityState`)
-Preserves document identity and governs four-stage semantic progression:
-1. `OVERVIEW`: Broad document establishment (title, cover, layout).
-2. `SECTION`: Specific page or chapter focus.
-3. `DETAIL`: Highlighted sentence, data table, or quote clause.
-4. `RETURN_TO_CONTEXT`: Return to general narrative context.
+`VisualContinuityDirector` operates only after projection. It may assign:
 
-Jumping directly to `DETAIL` without establishing `OVERVIEW` triggers `DOCUMENT_CONTEXT_LOST`.
+- continuity decisions such as `KEEP`, `REUSE`, `RETURN_TO_MOTIF`, `PROGRESS_DOCUMENT`, `PROGRESS_DIAGRAM`, or `SWITCH_CONTEXT`;
+- asset reuse policies such as `CONTINUITY_ANCHOR`, `INTENTIONAL_REUSE`, `CONCEPTUAL_VARIATION`, `CALLBACK_VISUAL`, or `NEW_ACQUISITION`;
+- diagnostics for visual churn, overly long holds, accidental repetition, document context loss, comparison side swaps, and missing progression.
 
-### Comparison Continuity (`ComparisonContinuityState`)
-Maintains stable spatial assignments across comparative beats:
-- `entity_a` mapped to `ComparisonSide.LEFT`.
-- `entity_b` mapped to `ComparisonSide.RIGHT`.
-- Inverting entity sides across adjacent beats triggers `COMPARISON_SIDE_SWAP`.
+It does not change editorial segmentation, narration authority, or timing.
 
----
+## Visual direction handoff
 
-## 4. Diagnostics & Continuity Findings
+`BeatVisualDirector` remains the canonical beat-direction mapper. It resolves the editorial strategy and semantic role into render mode, template, asset requirements, layout, motion intent, and hard-cut transition intent.
 
-Structured finding codes emitted by `BeatDurationPolicy` and `VisualContinuityDirector`:
-- `BROKEN_SUBJECT_CONTINUITY`: Unjustified context jump during continuous subject explanation.
-- `ACCIDENTAL_ASSET_REPEAT`: Unmotivated asset duplication across unrelated topics.
-- `EXCESSIVE_VISUAL_HOLD`: Visual state held longer than policy allows without progression.
-- `EXCESSIVE_VISUAL_CHURN`: Three or more consecutive cuts under 2000ms.
-- `MISSING_VISUAL_PROGRESS`: Three or more consecutive beats with identical role and subject without informational progress.
-- `COMPARISON_SIDE_SWAP`: Semantic sides inverted in a comparison frame.
-- `DOCUMENT_CONTEXT_LOST`: Premature detail zoom without document overview.
-- `MOTIF_DRIFT`: Motif ID reused for conflicting subject matter.
-- `VISUAL_INTENT_MISMATCH`: Visual role contradicts information goal.
-- `VISUAL_HOLD_TOO_LONG`: Beat duration exceeds maximum threshold.
-- `VISUAL_CUT_TOO_FAST`: Beat duration below minimum threshold (1200-1500ms).
-- `INSUFFICIENT_VISUAL_CHANGE`: Adjacent beats lack visual variation.
+For one-to-one renderable intervals, `VisualDirectorBeatAdapter.enrich_beat_visual_direction` verifies the visual beat points to the supplied editorial beat and then adds continuity metadata to that canonical direction. `BeatRenderAdapter` converts the result into the standard `VisualDirection` view consumed by existing template/render code.
 
----
+This produces one renderer handoff rather than parallel final-direction paths.
 
-## 5. Existing VisualDirector Seam & Renderer Boundaries
+## Pacing terminology
 
-### VisualDirector Handoff
-Existing `VisualDirector.resolve(scene)` remains 100% backward compatible for legacy and scene-level callers.
-For beat-level continuity:
-- `VisualDirectorBeatAdapter` (and `VisualDirector.resolve_beat(scene, beat, continuity_decision)`) enriches `VisualDirection` with beat timing, role, continuity decisions, and asset policies in `metadata`.
+The canonical pacing values are:
 
-### Renderer Capabilities Boundary
-- `CAN_CURRENT_RENDERER_ACCEPT_MULTIPLE_VISUAL_STATES_PER_SCENE = YES`
-- Enabled via existing `BeatVisualRenderer` and `BeatClipAssembler` which compose multi-beat render units into coherent scene clips.
-- P22-A provides the editorial continuity and beat planning layer above this physical renderer seam.
+```text
+FAST
+BALANCED
+DELIBERATE
+```
 
----
+Legacy input `RELAXED` is accepted only as a deterministic compatibility alias for `DELIBERATE`; it is not a fourth pacing mode.
 
-## 6. Downstream Phase Boundaries
+## P22-A boundaries
 
-### P22-B: Camera & Transition Director
-- Consumes `REFRAME_LATER` and duration boundaries from P22-A.
-- Implements: Pan, tilt, push-in, pull-out, Ken Burns, reframing, hard cuts, match cuts, and crossfades.
-- STRICTLY EXCLUDED from P22-A.
+P22-A defines semantic projection, continuity policy, lineage, and the existing renderer handoff. It does not implement camera or transition execution, diagram/chart rendering, audio, publishing, or deployment.
 
-### P22-C: Diagram & Data Visualization
-- Consumes `DIAGRAM` and `DATA` visual roles from P22-A.
-- Implements: Dynamic flowchart nodes, statistical counter animations, and chart rendering.
-- STRICTLY EXCLUDED from P22-A.
+P22-B may consume P22-A timing boundaries and `REFRAME_LATER` intent to add camera paths, pan/zoom, Ken Burns, parallax, motion easing, match cuts, or animated transitions. None of those behaviors are executed by P22-A.
 
-### P22-D: Visual Editorial QA
-- Consumes P22-A continuity findings, P22-B camera transitions, and P22-C diagram rendering for end-to-end editorial verification.
+P22-C may consume `DIAGRAM` and `DATA` roles for actual diagram/chart rendering. P22-D may consume continuity findings for visual editorial QA.
+
+`P22A_SCHEMA_CHANGE_REQUIRED = NO`; the architecture uses derived in-memory models and requires no migration 028.

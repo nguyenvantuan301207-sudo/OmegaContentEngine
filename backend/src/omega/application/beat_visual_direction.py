@@ -8,6 +8,8 @@ Pure deterministic logic: zero I/O, zero network, zero external providers.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from contextlib import suppress
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -18,6 +20,11 @@ from omega.application.editorial_beat import (
     BeatTransitionIntent,
     EditorialBeatPlan,
     EditorialBeatSpec,
+)
+from omega.application.editorial_layout import EditorialLayout, select_editorial_layout
+from omega.application.semantic_asset_query import (
+    derive_semantic_asset_query,
+    is_unrelated_stock_concept,
 )
 from omega.application.storyboard_engine import StoryboardScene, VisualStrategy
 from omega.application.visual_direction import (
@@ -30,32 +37,32 @@ from omega.application.visual_direction import (
 )
 
 
-from omega.application.editorial_layout import EditorialLayout, select_editorial_layout
-from omega.application.semantic_asset_query import (
-    derive_semantic_asset_query,
-    is_unrelated_stock_concept,
-)
-
-
 def resolve_beat_query_hint(
     beat: EditorialBeatSpec, scene: StoryboardScene
 ) -> str | None:
     """Resolve asset query hint with deterministic priority: beat -> scene -> brief -> derived."""
-    candidate = None
-    if is_meaningful_query(beat.asset_query_hint) and not is_unrelated_stock_concept(beat.asset_query_hint):
-        candidate = beat.asset_query_hint
-    elif is_meaningful_query(scene.asset_query_hint) and not is_unrelated_stock_concept(scene.asset_query_hint):
-        candidate = scene.asset_query_hint
-    elif is_meaningful_query(scene.visual_brief) and not is_unrelated_stock_concept(scene.visual_brief):
-        candidate = scene.visual_brief
+    had_hint = False
+    if is_meaningful_query(beat.asset_query_hint):
+        had_hint = True
+        if not is_unrelated_stock_concept(beat.asset_query_hint):
+            return beat.asset_query_hint
+    if is_meaningful_query(scene.asset_query_hint):
+        had_hint = True
+        if not is_unrelated_stock_concept(scene.asset_query_hint):
+            return scene.asset_query_hint
+    if is_meaningful_query(scene.visual_brief):
+        had_hint = True
+        if not is_unrelated_stock_concept(scene.visual_brief):
+            return scene.visual_brief
 
-    if not candidate or is_unrelated_stock_concept(candidate):
-        candidate = derive_semantic_asset_query(
+    if had_hint:
+        return derive_semantic_asset_query(
             beat.narration_span or scene.narration_excerpt,
             fallback_topic=scene.section_id,
         )
 
-    return candidate
+    return None
+
 
 
 
@@ -185,10 +192,8 @@ class BeatVisualDirector:
             directions.append(direction)
             layout_val = direction.metadata.get("layout_variant")
             if layout_val:
-                try:
+                with suppress(ValueError):
                     history.append(EditorialLayout(layout_val))
-                except ValueError:
-                    pass
 
         return BeatVisualDirectionPlan(
             parent_scene_index=scene.sequence_index,

@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import os
 import uuid
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -46,9 +47,9 @@ from omega.application.narrative_planning_service import NarrativePlanningServic
 from omega.application.narrative_qa_service import NarrativeQAService
 from omega.application.narrative_script_adapter import NarrativePlanScriptAdapter
 from omega.application.retention_pacing_engine import RetentionPacingService
-from omega.application.storyboard_engine import StoryboardEngine, StoryboardPlan
+from omega.application.storyboard_engine import StoryboardEngine
 from omega.application.visual_continuity_director import (
-    EditorialBeatPlanner,
+    VisualBeatProjector,
     VisualContinuityDirector,
     verify_beat_lineage,
 )
@@ -58,19 +59,15 @@ from omega.domain.narrative_qa import NarrativeQAStatus
 from omega.domain.visual_beat import (
     AssetReusePolicy,
     ContinuityFindingCode,
-    VisualBeat,
-    VisualRole,
 )
 from omega.infrastructure.models import (
     Channel,
     ChannelDNARevision,
-    ClaimEvidence,
     ContentGenerationRequest,
     ResearchBrief,
     ResearchClaim,
     ResearchRequest,
     ResearchSource,
-    ScriptVersion,
     TopicCandidate,
 )
 
@@ -293,9 +290,9 @@ def test_p22a_realistic_isolated_canary(db_session: Session):
     if candidate_scene is None:
         candidate_scene = storyboard_plan.scenes[0]
 
-    # 4. Execute P22-A EditorialBeatPlanner
-    beat_planner = EditorialBeatPlanner(pacing="BALANCED")
-    beat_sequence = beat_planner.plan_scene_beats(
+    # 4. Execute P22-A VisualBeatProjector (built upon canonical EditorialBeatPlanner)
+    projector = VisualBeatProjector(pacing="BALANCED")
+    beat_sequence = projector.project_scene(
         scene=candidate_scene,
         script_version=raw_script_data,
         narrative_plan=v2_domain,

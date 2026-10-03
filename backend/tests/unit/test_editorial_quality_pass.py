@@ -437,7 +437,7 @@ def test_real_asset_binding_provenance_preservation():
         kind=VisualAssetKind.BROLL,
         mime_type="video/mp4",
         content_sha256="506bda77a4b29eeea9fed5a1ba74e3ce40541780c933152bac34c0c3bf82c4f0",
-        local_path=Path("/app/data/asset.bin"),
+        local_path=Path("/app/data/asset.bin").resolve(),
         duration_seconds=14.0,
         width=1920,
         height=1080,

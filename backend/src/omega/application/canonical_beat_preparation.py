@@ -1,7 +1,8 @@
 """Application-layer Canonical Beat Preparation Service.
 
 Deterministically coordinates the G2 pipeline layers:
-EditorialBeatPlanner -> allocate_timing -> BeatVisualDirector -> BeatAssetPolicy -> BeatRenderAdapter
+EditorialBeatPlanner -> allocate_timing -> VisualBeatProjector -> VisualContinuityDirector
+-> BeatVisualDirector -> BeatAssetPolicy -> BeatRenderAdapter
 into an immutable CanonicalBeatPreparationResult.
 
 Enforces:
@@ -41,7 +42,13 @@ from omega.application.editorial_beat import (
 )
 from omega.application.editorial_beat_planner import EditorialBeatPlanner
 from omega.application.storyboard_engine import StoryboardScene
+from omega.application.visual_continuity_director import (
+    VisualBeatProjector,
+    VisualContinuityDirector,
+    VisualDirectorBeatAdapter,
+)
 from omega.application.visual_direction import VisualAssetKind
+from omega.domain.visual_beat import VisualBeatSequence
 
 
 class CanonicalBeatPreparationResult(BaseModel):
@@ -61,6 +68,9 @@ class CanonicalBeatPreparationResult(BaseModel):
     beat_plan: EditorialBeatPlan | None = Field(default=None, description="Editorial beat plan")
     timing_plan: MaterializedBeatTimingPlan | None = Field(
         default=None, description="Materialized beat timing plan"
+    )
+    visual_beat_sequence: VisualBeatSequence | None = Field(
+        default=None, description="Visual continuity projection of materialized editorial beats"
     )
     direction_plan: BeatVisualDirectionPlan | None = Field(
         default=None, description="Beat visual direction plan"
@@ -154,12 +164,63 @@ class CanonicalBeatPreparationService:
                 beat_plan=beat_plan,
             )
 
-        # 3. Visual Direction
+        # 3. Visual beat projection and continuity enrichment
         try:
-            direction_plan = BeatVisualDirector.resolve_plan(
+            projected_sequence = VisualBeatProjector().project(
+                editorial_plan=beat_plan,
+                timing_plan=timing_plan,
+                scene=scene,
+            )
+            enriched_beats, continuity_findings = VisualContinuityDirector().analyze_sequence(
+                projected_sequence
+            )
+            visual_beat_sequence = projected_sequence.model_copy(
+                update={
+                    "beats": enriched_beats,
+                    "continuity_findings": continuity_findings,
+                }
+            )
+        except Exception as e:
+            return CanonicalBeatPreparationResult(
+                eligible=False,
+                fallback_reason=f"VISUAL_BEAT_PROJECTION_FAILED: {e}",
+                source_statements=tuple(stmt_list),
+                beat_plan=beat_plan,
+                timing_plan=timing_plan,
+            )
+
+        # 4. Canonical visual direction, enriched by continuity for renderable 1:1 beats
+        try:
+            base_direction_plan = BeatVisualDirector.resolve_plan(
                 scene=scene,
                 beat_plan=beat_plan,
             )
+            one_to_one = (
+                len(visual_beat_sequence.beats) == len(beat_plan.beats)
+                and all(
+                    visual.source_editorial_beat_indices == (editorial.beat_index,)
+                    for visual, editorial in zip(
+                        visual_beat_sequence.beats, beat_plan.beats, strict=True
+                    )
+                )
+            )
+            if one_to_one:
+                adapter = VisualDirectorBeatAdapter()
+                directions = tuple(
+                    adapter.enrich_beat_visual_direction(scene, visual, editorial)
+                    for visual, editorial in zip(
+                        visual_beat_sequence.beats, beat_plan.beats, strict=True
+                    )
+                )
+                direction_plan = BeatVisualDirectionPlan(
+                    parent_scene_index=scene.sequence_index,
+                    directions=directions,
+                )
+            else:
+                # Merged timing is already an explicit renderer fallback.  Keep the
+                # canonical base direction plan for diagnostics without inventing a
+                # second direction mapping for a non-renderable interval.
+                direction_plan = base_direction_plan
         except Exception as e:
             return CanonicalBeatPreparationResult(
                 eligible=False,
@@ -167,9 +228,10 @@ class CanonicalBeatPreparationService:
                 source_statements=tuple(stmt_list),
                 beat_plan=beat_plan,
                 timing_plan=timing_plan,
+                visual_beat_sequence=visual_beat_sequence,
             )
 
-        # 4. Asset Policy Planning
+        # 5. Asset Policy Planning
         try:
             asset_plan = BeatAssetPolicy.plan_assets(
                 scene=scene,
@@ -183,10 +245,11 @@ class CanonicalBeatPreparationService:
                 source_statements=tuple(stmt_list),
                 beat_plan=beat_plan,
                 timing_plan=timing_plan,
+                visual_beat_sequence=visual_beat_sequence,
                 direction_plan=direction_plan,
             )
 
-        # 5. Visual Asset Mode Enforcement
+        # 6. Visual Asset Mode Enforcement
         mode = visual_asset_mode.strip().upper()
         if mode == "LOCAL_TEMPLATE_ONLY":
             for decision in asset_plan.decisions:
@@ -200,11 +263,12 @@ class CanonicalBeatPreparationService:
                         source_statements=tuple(stmt_list),
                         beat_plan=beat_plan,
                         timing_plan=timing_plan,
+                        visual_beat_sequence=visual_beat_sequence,
                         direction_plan=direction_plan,
                         asset_plan=asset_plan,
                     )
 
-        # 6. Unsupported Asset Kind Enforcement (e.g. SCREENSHOT)
+        # 7. Unsupported Asset Kind Enforcement (e.g. SCREENSHOT)
         for decision in asset_plan.decisions:
             if (
                 decision.action
@@ -220,11 +284,12 @@ class CanonicalBeatPreparationService:
                         source_statements=tuple(stmt_list),
                         beat_plan=beat_plan,
                         timing_plan=timing_plan,
+                        visual_beat_sequence=visual_beat_sequence,
                         direction_plan=direction_plan,
                         asset_plan=asset_plan,
                     )
 
-        # 7. Render Adaptation
+        # 8. Render Adaptation
         adapt_res = BeatRenderAdapter.adapt(
             scene=scene,
             beat_plan=beat_plan,
@@ -240,6 +305,7 @@ class CanonicalBeatPreparationService:
                 source_statements=tuple(stmt_list),
                 beat_plan=beat_plan,
                 timing_plan=timing_plan,
+                visual_beat_sequence=visual_beat_sequence,
                 direction_plan=direction_plan,
                 asset_plan=asset_plan,
                 render_plan=None,
@@ -251,6 +317,7 @@ class CanonicalBeatPreparationService:
             source_statements=tuple(stmt_list),
             beat_plan=beat_plan,
             timing_plan=timing_plan,
+            visual_beat_sequence=visual_beat_sequence,
             direction_plan=direction_plan,
             asset_plan=asset_plan,
             render_plan=adapt_res.plan,

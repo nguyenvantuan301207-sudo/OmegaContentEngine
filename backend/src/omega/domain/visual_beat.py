@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from omega.domain.narrative_plan import NarrativeSectionRole
 
 
-class VisualRole(str, enum.Enum):
+class VisualRole(enum.StrEnum):
     """Editorial purpose classification for visual content."""
 
     ESTABLISH = "ESTABLISH"
@@ -35,7 +35,7 @@ class VisualRole(str, enum.Enum):
     CTA = "CTA"
 
 
-class ContinuityDecisionType(str, enum.Enum):
+class ContinuityDecisionType(enum.StrEnum):
     """Editorial continuity directives across adjacent visual beats."""
 
     KEEP = "KEEP"
@@ -48,7 +48,7 @@ class ContinuityDecisionType(str, enum.Enum):
     SWITCH_CONTEXT = "SWITCH_CONTEXT"
 
 
-class AssetReusePolicy(str, enum.Enum):
+class AssetReusePolicy(enum.StrEnum):
     """Explicit asset reuse semantics."""
 
     INTENTIONAL_REUSE = "INTENTIONAL_REUSE"
@@ -59,7 +59,7 @@ class AssetReusePolicy(str, enum.Enum):
     NEW_ACQUISITION = "NEW_ACQUISITION"
 
 
-class DocumentProgressStage(str, enum.Enum):
+class DocumentProgressStage(enum.StrEnum):
     """Progressive visual stages for primary evidence/document inspection."""
 
     OVERVIEW = "OVERVIEW"
@@ -68,7 +68,7 @@ class DocumentProgressStage(str, enum.Enum):
     RETURN_TO_CONTEXT = "RETURN_TO_CONTEXT"
 
 
-class ComparisonSide(str, enum.Enum):
+class ComparisonSide(enum.StrEnum):
     """Spatial placement assignment for comparative entities."""
 
     LEFT = "LEFT"
@@ -76,7 +76,7 @@ class ComparisonSide(str, enum.Enum):
     CENTER = "CENTER"
 
 
-class ContinuityFindingCode(str, enum.Enum):
+class ContinuityFindingCode(enum.StrEnum):
     """Diagnostic codes for visual continuity defects."""
 
     BROKEN_SUBJECT_CONTINUITY = "BROKEN_SUBJECT_CONTINUITY"
@@ -93,7 +93,7 @@ class ContinuityFindingCode(str, enum.Enum):
     INSUFFICIENT_VISUAL_CHANGE = "INSUFFICIENT_VISUAL_CHANGE"
 
 
-class ContinuityFindingSeverity(str, enum.Enum):
+class ContinuityFindingSeverity(enum.StrEnum):
     """Severity levels for visual continuity findings."""
 
     INFO = "INFO"
@@ -150,12 +150,21 @@ class ComparisonContinuityState(BaseModel):
 
 
 class VisualBeat(BaseModel):
-    """Authoritative editorial visual beat within a Storyboard scene."""
+    """Visual continuity projection of one materialized editorial beat interval.
+
+    EditorialBeatSpec remains authoritative for semantic segmentation and timing.
+    A VisualBeat adds visual-role and continuity information while retaining the
+    complete set of source editorial beat indices.
+    """
 
     id: UUID = Field(default_factory=uuid4)
     scene_id: str | int = Field(description="Parent scene sequence identifier")
     parent_scene_index: int = Field(ge=1, description="1-indexed sequence order of parent scene")
     beat_index: int = Field(ge=0, description="0-indexed position within the parent scene")
+    source_editorial_beat_indices: tuple[int, ...] = Field(
+        default_factory=tuple,
+        description="Ordered source EditorialBeatSpec indices represented by this visual interval",
+    )
 
     start_offset_ms: int = Field(ge=0, description="Start millisecond offset relative to scene start")
     end_offset_ms: int = Field(ge=0, description="End millisecond offset relative to scene start")
