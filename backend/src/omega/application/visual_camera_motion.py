@@ -15,6 +15,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field
 
 from omega.application.editorial_beat import BeatMotionIntent
+from omega.domain.camera_transition import FocusRegion, MotionStrength
 
 
 class CameraMotionProfile(BaseModel):
@@ -28,15 +29,11 @@ class CameraMotionProfile(BaseModel):
     start_x_offset: float = Field(
         ge=-1.0, le=1.0, description="Normalized horizontal offset at start"
     )
-    end_x_offset: float = Field(
-        ge=-1.0, le=1.0, description="Normalized horizontal offset at end"
-    )
+    end_x_offset: float = Field(ge=-1.0, le=1.0, description="Normalized horizontal offset at end")
     start_y_offset: float = Field(
         ge=-1.0, le=1.0, description="Normalized vertical offset at start"
     )
-    end_y_offset: float = Field(
-        ge=-1.0, le=1.0, description="Normalized vertical offset at end"
-    )
+    end_y_offset: float = Field(ge=-1.0, le=1.0, description="Normalized vertical offset at end")
 
 
 class CameraMotionState(BaseModel):
@@ -55,7 +52,12 @@ def smoothstep(progress: float) -> float:
     return p * p * (3.0 - 2.0 * p)
 
 
-def resolve_camera_motion_profile(intent: BeatMotionIntent) -> CameraMotionProfile:
+def resolve_camera_motion_profile(
+    intent: BeatMotionIntent,
+    *,
+    focus_region: FocusRegion | None = None,
+    strength: MotionStrength = MotionStrength.MODERATE,
+) -> CameraMotionProfile:
     """Deterministically map BeatMotionIntent to a restrained CameraMotionProfile.
 
     Restrained cinematic motion bounds:
@@ -77,11 +79,24 @@ def resolve_camera_motion_profile(intent: BeatMotionIntent) -> CameraMotionProfi
             start_y_offset=0.0,
             end_y_offset=0.0,
         )
+    scale_factor = {
+        MotionStrength.SUBTLE: 0.625,
+        MotionStrength.MODERATE: 1.0,
+        MotionStrength.EMPHATIC: 1.5,
+    }[strength]
+    focus_x = 0.0
+    focus_y = 0.0
+    if focus_region is not None:
+        # CSS translation moves the target toward frame center. Values remain far
+        # inside the renderer's safe crop envelope even at maximum 1.2 scale.
+        focus_x = max(-0.04, min(0.04, (0.5 - (focus_region.x + focus_region.width / 2)) * 0.1))
+        focus_y = max(-0.04, min(0.04, (0.5 - (focus_region.y + focus_region.height / 2)) * 0.1))
+
     if intent == BeatMotionIntent.SLOW_PUSH_IN:
         return CameraMotionProfile(
             intent=intent,
             start_scale=1.00,
-            end_scale=1.04,
+            end_scale=1.00 + 0.04 * scale_factor,
             start_x_offset=0.0,
             end_x_offset=0.0,
             start_y_offset=0.0,
@@ -90,7 +105,7 @@ def resolve_camera_motion_profile(intent: BeatMotionIntent) -> CameraMotionProfi
     if intent == BeatMotionIntent.SLOW_PULL_OUT:
         return CameraMotionProfile(
             intent=intent,
-            start_scale=1.04,
+            start_scale=1.00 + 0.04 * scale_factor,
             end_scale=1.00,
             start_x_offset=0.0,
             end_x_offset=0.0,
@@ -117,6 +132,26 @@ def resolve_camera_motion_profile(intent: BeatMotionIntent) -> CameraMotionProfi
             start_y_offset=0.0,
             end_y_offset=0.0,
         )
+    if intent == BeatMotionIntent.PAN_UP:
+        return CameraMotionProfile(
+            intent=intent,
+            start_scale=1.04,
+            end_scale=1.04,
+            start_x_offset=0.0,
+            end_x_offset=0.0,
+            start_y_offset=0.012,
+            end_y_offset=-0.012,
+        )
+    if intent == BeatMotionIntent.PAN_DOWN:
+        return CameraMotionProfile(
+            intent=intent,
+            start_scale=1.04,
+            end_scale=1.04,
+            start_x_offset=0.0,
+            end_x_offset=0.0,
+            start_y_offset=-0.012,
+            end_y_offset=0.012,
+        )
     if intent == BeatMotionIntent.DRIFT:
         return CameraMotionProfile(
             intent=intent,
@@ -131,11 +166,11 @@ def resolve_camera_motion_profile(intent: BeatMotionIntent) -> CameraMotionProfi
         return CameraMotionProfile(
             intent=intent,
             start_scale=1.00,
-            end_scale=1.06,
+            end_scale=1.00 + 0.06 * scale_factor,
             start_x_offset=0.0,
-            end_x_offset=0.0,
+            end_x_offset=focus_x,
             start_y_offset=0.0,
-            end_y_offset=0.0,
+            end_y_offset=focus_y,
         )
 
     # Fallback to safe static profile for unknown or unhandled intents
@@ -157,12 +192,8 @@ def evaluate_camera_motion(
     """Deterministically evaluate camera motion state at a normalized progress point."""
     eased = smoothstep(progress)
     scale = profile.start_scale + (profile.end_scale - profile.start_scale) * eased
-    x_offset = (
-        profile.start_x_offset + (profile.end_x_offset - profile.start_x_offset) * eased
-    )
-    y_offset = (
-        profile.start_y_offset + (profile.end_y_offset - profile.start_y_offset) * eased
-    )
+    x_offset = profile.start_x_offset + (profile.end_x_offset - profile.start_x_offset) * eased
+    y_offset = profile.start_y_offset + (profile.end_y_offset - profile.start_y_offset) * eased
 
     return CameraMotionState(
         scale=round(scale, 6),

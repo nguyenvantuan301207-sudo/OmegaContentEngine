@@ -12,7 +12,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from omega.application.beat_asset_executor import BeatAssetExecutionResult
+from omega.application.beat_asset_executor import BeatAssetExecutionResult, ExecutedBeatAsset
 from omega.application.beat_clip_assembler import RenderedBeatClip
 from omega.application.beat_render_adapter import BeatRenderPlan, BeatRenderUnit
 from omega.application.editorial_beat import BeatMotionIntent, BeatTransitionIntent
@@ -51,7 +51,11 @@ def quantize_parent_frame_counts(
         raise BeatVisualRenderError(f"fps must be a positive integer, got {fps!r}")
     if not intervals:
         raise BeatVisualRenderError("Cannot quantize frame counts for empty intervals")
-    if isinstance(global_duration_ms, bool) or not isinstance(global_duration_ms, int) or global_duration_ms <= 0:
+    if (
+        isinstance(global_duration_ms, bool)
+        or not isinstance(global_duration_ms, int)
+        or global_duration_ms <= 0
+    ):
         raise BeatVisualRenderError(
             f"global_duration_ms must be a positive integer, got {global_duration_ms!r}"
         )
@@ -121,17 +125,20 @@ def quantize_beat_frame_counts(
     """
     if isinstance(fps, bool) or not isinstance(fps, int) or fps <= 0:
         raise BeatVisualRenderError(f"fps must be a positive integer, got {fps!r}")
-    if isinstance(timeline_start_ms, bool) or not isinstance(timeline_start_ms, int) or timeline_start_ms < 0:
+    if (
+        isinstance(timeline_start_ms, bool)
+        or not isinstance(timeline_start_ms, int)
+        or timeline_start_ms < 0
+    ):
         raise BeatVisualRenderError(
             f"timeline_start_ms must be a non-negative integer, got {timeline_start_ms!r}"
         )
     if not units:
         raise BeatVisualRenderError("Cannot quantize frame counts for empty units")
 
-    expected_total_frames = (
-        _ceil_div((timeline_start_ms + total_duration_ms) * fps, 1000)
-        - _ceil_div(timeline_start_ms * fps, 1000)
-    )
+    expected_total_frames = _ceil_div(
+        (timeline_start_ms + total_duration_ms) * fps, 1000
+    ) - _ceil_div(timeline_start_ms * fps, 1000)
 
     # Validate units ordering, contiguity, and positive durations
     for idx, unit in enumerate(units):
@@ -204,12 +211,8 @@ class BeatVisualRenderResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     parent_scene_index: int = Field(ge=0, description="0-indexed parent scene index")
-    clips: tuple[RenderedBeatClip, ...] = Field(
-        description="Physical beat clips rendered in order"
-    )
-    beat_metadata: tuple[BeatClipMetadata, ...] = Field(
-        description="Per-beat rendering metadata"
-    )
+    clips: tuple[RenderedBeatClip, ...] = Field(description="Physical beat clips rendered in order")
+    beat_metadata: tuple[BeatClipMetadata, ...] = Field(description="Per-beat rendering metadata")
 
 
 class BeatVisualRenderer:
@@ -328,7 +331,10 @@ class BeatVisualRenderer:
                     bound_assets = (executed.bound_visual_asset,)
                     broll_asset = None
                 else:
-                    if executed.bound_broll_asset is not None or executed.bound_visual_asset is not None:
+                    if (
+                        executed.bound_broll_asset is not None
+                        or executed.bound_visual_asset is not None
+                    ):
                         raise BeatVisualRenderError(
                             f"Unexpected external assets on local template beat {unit.materialized_index}"
                         )
@@ -347,7 +353,9 @@ class BeatVisualRenderer:
                 )
 
                 # 3. Output path
-                clip_name = f"scene_{unit.parent_scene_index:03d}_beat_{unit.materialized_index:03d}.mp4"
+                clip_name = (
+                    f"scene_{unit.parent_scene_index:03d}_beat_{unit.materialized_index:03d}.mp4"
+                )
                 clip_path = output_dir / clip_name
 
                 # 4. Render clip
@@ -361,12 +369,16 @@ class BeatVisualRenderer:
                     fps=fps,
                     broll_asset=broll_asset,
                     camera_motion_intent=unit.camera_motion_intent,
+                    camera_focus_region=unit.camera_focus_region,
+                    camera_motion_strength=unit.camera_motion_strength,
                     frame_count_override=frame_count,
                 )
 
                 # 5. Validate output MP4
                 if not clip_path.exists() or clip_path.stat().st_size <= 0:
-                    raise BeatVisualRenderError(f"Rendered beat clip {clip_path} is missing or empty")
+                    raise BeatVisualRenderError(
+                        f"Rendered beat clip {clip_path} is missing or empty"
+                    )
 
                 rendered_clip = RenderedBeatClip(
                     parent_scene_index=unit.parent_scene_index,
@@ -388,7 +400,9 @@ class BeatVisualRenderer:
 
         tasks = [
             render_one(u, e, fc)
-            for u, e, fc in zip(render_plan.units, asset_execution.assets, beat_frame_counts, strict=True)
+            for u, e, fc in zip(
+                render_plan.units, asset_execution.assets, beat_frame_counts, strict=True
+            )
         ]
         results = await asyncio.gather(*tasks)
 

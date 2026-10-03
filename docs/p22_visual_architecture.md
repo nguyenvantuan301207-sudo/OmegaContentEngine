@@ -1,4 +1,4 @@
-# P22-A Visual Beat Authority and Continuity Architecture
+# P22 Visual Beat, Camera, and Transition Architecture
 
 ## Authority model
 
@@ -24,10 +24,12 @@ flowchart TD
     Timing --> Projector
     Projector --> Visual["VisualBeatSequence"]
     Visual --> Continuity["VisualContinuityDirector"]
+    Continuity --> Camera["CameraTransitionDirector"]
     Editorial --> Direction["BeatVisualDirector"]
     Continuity --> Adapter["VisualDirectorBeatAdapter"]
     Direction --> Adapter
     Adapter --> AssetPolicy["BeatAssetPolicy"]
+    Camera --> RenderAdapter["BeatRenderAdapter"]
     AssetPolicy --> RenderAdapter["BeatRenderAdapter"]
     RenderAdapter --> Renderer["BeatVisualRenderer"]
     Renderer --> Assembler["BeatClipAssembler"]
@@ -87,12 +89,32 @@ DELIBERATE
 
 Legacy input `RELAXED` is accepted only as a deterministic compatibility alias for `DELIBERATE`; it is not a fourth pacing mode.
 
-## P22-A boundaries
+## P22-B camera authority
 
-P22-A defines semantic projection, continuity policy, lineage, and the existing renderer handoff. It does not implement camera or transition execution, diagram/chart rendering, audio, publishing, or deployment.
+`CameraTransitionDirector` consumes ordered `VisualBeat` instances after continuity direction. It produces derived, recomputable `CameraPlan` and `TransitionPlan` values and never changes beat timing, asset selection, visual templates, narration, or audio.
 
-P22-B may consume P22-A timing boundaries and `REFRAME_LATER` intent to add camera paths, pan/zoom, Ken Burns, parallax, motion easing, match cuts, or animated transitions. None of those behaviors are executed by P22-A.
+`CameraIntent` is renderer-neutral and contains `STATIC`, `PUSH_IN`, `PULL_OUT`, four pan directions, `REFRAME`, `TRACK_SUBJECT`, `DETAIL_FOCUS`, and `RETURN_TO_CONTEXT`. A `CameraPlan` retains its `VisualBeat` UUID, all source editorial-beat indices, duration, start/end framing states, strength, easing, editorial purpose, safe area, and optional normalized `FocusRegion`.
 
-P22-C may consume `DIAGRAM` and `DATA` roles for actual diagram/chart rendering. P22-D may consume continuity findings for visual editorial QA.
+Focus coordinates use the closed normalized source-frame coordinate system. Width and height must be positive, and `x + width` and `y + height` may not exceed one. `FocusRegion.clamp` is the safe ingestion path for uncertain metadata. Document progression maps overview to a stable frame, section to a moderate reframe, detail to bounded focus, and return-to-context to a pull-out. Comparison focus uses fixed left and right regions; camera movement never exchanges entity placement.
 
-`P22A_SCHEMA_CHANGE_REQUIRED = NO`; the architecture uses derived in-memory models and requires no migration 028.
+Selection is deterministic across visual role, asset type, continuity decision, beat duration, importance, information density, document stage, comparison focus, and canonical `FAST`, `BALANCED`, or `DELIBERATE` pacing. Data and diagrams remain stable by default. Short or dense beats suppress optional movement. The director records findings for excessive motion, motion without purpose, rapid reversals, paths that are too fast or slow, and over-frequent camera changes.
+
+## Transition policy and physical support
+
+The typed taxonomy is `CUT`, `CROSSFADE`, `FADE_THROUGH`, `MATCH_CONTINUITY`, and `HARD_CONTEXT_SWITCH`. Transition plans preserve both the requested editorial intent and the physically applied intent. Durations are bounded to 600 ms by the model and to the smaller of the pacing allowance, 500 ms, or one sixth of the entering beat when an overlapping operation becomes supported.
+
+The current physical assembler reliably supports only lossless, gapless `CUT`. `HARD_CONTEXT_SWITCH` deliberately maps to that primitive. `CROSSFADE`, `FADE_THROUGH`, and `MATCH_CONTINUITY` remain intent-only and explicitly fall back to `CUT`; no overlap consumes narration or removes a beat. Therefore transition execution capability is `PARTIAL`.
+
+## Renderer adapter and safe fallback
+
+`BeatRenderAdapter` is the only translation boundary. It maps camera plans to existing `BeatMotionIntent` primitives and carries normalized focus and strength to `VisualV2VideoRenderer`. Supported media templates execute push, pull, horizontal/vertical pan, and focus-aware reframe through bounded CSS transforms or FFmpeg `zoompan`. Scale is capped at 1.2, offsets are clamped, FFmpeg crop expressions use `clip`, and output remains 1920x1080 CFR. `TRACK_SUBJECT` is intentionally not claimed as physically supported.
+
+Non-media templates, unsupported camera intents, or invalid focus metadata resolve to `STATIC`. Unsupported/invalid transitions resolve to `CUT`. These fallbacks are explicit on each `BeatRenderUnit`; optional motion cannot make the video fail. Existing callers that do not supply P22-B plans retain their prior strict contracts.
+
+## Phase boundaries
+
+P22-A defines semantic projection, continuity policy, lineage, and the existing renderer handoff. P22-B defines camera and transition direction plus the supported physical transforms described above.
+
+P22-C may consume `DIAGRAM` and `DATA` roles for actual diagram/chart rendering; P22-B only frames existing visuals. P22-D may consume continuity findings for visual editorial QA. Music, SFX, ducking, and mixing remain P23 scope. No phase here publishes or deploys.
+
+`P22A_SCHEMA_CHANGE_REQUIRED = NO` and `P22B_SCHEMA_CHANGE_REQUIRED = NO`; both architectures use derived in-memory models and require no migration 028.

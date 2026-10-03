@@ -18,7 +18,12 @@ from omega.application.visual_camera_motion import (
 from omega.application.visual_direction import VisualTemplateId
 from omega.application.visual_dom_motion import VisualDomMotionError, VisualDomMotionRuntime
 from omega.application.visual_template_renderer import RenderedTemplateDocument
-from omega.infrastructure.browser_capture_runtime import BrowserCaptureError, BrowserCaptureRuntime
+from omega.domain.camera_transition import FocusRegion, MotionStrength
+from omega.infrastructure.browser_capture_runtime import (
+    BrowserCapturedFrame,
+    BrowserCaptureError,
+    BrowserCaptureRuntime,
+)
 
 
 class VisualV2VideoRenderResult(BaseModel):
@@ -56,12 +61,15 @@ class VisualV2VideoRenderer:
         timeout_seconds: int = 120,
         broll_asset: BoundBrollAsset | None = None,
         camera_motion_intent: BeatMotionIntent | None = None,
+        camera_focus_region: FocusRegion | None = None,
+        camera_motion_strength: MotionStrength = MotionStrength.MODERATE,
         frame_count_override: int | None = None,
     ) -> VisualV2VideoRenderResult:
         if (
             camera_motion_intent is not None
             and camera_motion_intent != BeatMotionIntent.STATIC
-            and document.template_id not in (
+            and document.template_id
+            not in (
                 VisualTemplateId.IMAGE_EXPLAINER,
                 VisualTemplateId.BROLL_EXPLAINER,
                 VisualTemplateId.STATISTIC_HERO,
@@ -134,7 +142,11 @@ class VisualV2VideoRenderer:
                 ):
                     progress = (frame_index / (frame_count - 1)) if frame_count > 1 else 1.0
                     sampled_progress = round(progress, 2)
-                    cam_profile = resolve_camera_motion_profile(camera_motion_intent)
+                    cam_profile = resolve_camera_motion_profile(
+                        camera_motion_intent,
+                        focus_region=camera_focus_region,
+                        strength=camera_motion_strength,
+                    )
                     cam_state = evaluate_camera_motion(cam_profile, sampled_progress)
                     cam_html = inject_camera_motion_style(frame_doc.html, cam_state)
                     cam_sha256 = hashlib.sha256(cam_html.encode("utf-8")).hexdigest()
@@ -165,7 +177,9 @@ class VisualV2VideoRenderer:
                 except BrowserCaptureError as e:
                     raise VisualV2VideoRenderError(f"BrowserCaptureError: {e}") from e
                 except Exception as e:
-                    raise VisualV2VideoRenderError(f"Browser capture failed unexpectedly: {e}") from e
+                    raise VisualV2VideoRenderError(
+                        f"Browser capture failed unexpectedly: {e}"
+                    ) from e
 
             captured_results = await asyncio.gather(*[_cap(d) for d in unique_docs_map.values()])
             captured_frames: dict[str, BrowserCapturedFrame] = dict(captured_results)
@@ -189,7 +203,9 @@ class VisualV2VideoRenderer:
                         with open(frame_path, "wb") as f:
                             f.write(frame.png_bytes)
                 except Exception as e:
-                    raise VisualV2VideoRenderError(f"Failed to write frame {frame_index}: {e}") from e
+                    raise VisualV2VideoRenderError(
+                        f"Failed to write frame {frame_index}: {e}"
+                    ) from e
                 prev_sha = doc.content_sha256
                 prev_path = frame_path
 
@@ -204,13 +220,22 @@ class VisualV2VideoRenderer:
                 except VisualV2VideoRenderError:
                     raise
                 except Exception as e:
-                    raise VisualV2VideoRenderError(f"Failed to validate frame {frame_index}: {e}") from e
+                    raise VisualV2VideoRenderError(
+                        f"Failed to validate frame {frame_index}: {e}"
+                    ) from e
 
             if is_broll:
                 assert broll_asset is not None
                 broll_trim_duration = physical_duration_seconds
-                if camera_motion_intent is not None and camera_motion_intent != BeatMotionIntent.STATIC:
-                    cam_profile = resolve_camera_motion_profile(camera_motion_intent)
+                if (
+                    camera_motion_intent is not None
+                    and camera_motion_intent != BeatMotionIntent.STATIC
+                ):
+                    cam_profile = resolve_camera_motion_profile(
+                        camera_motion_intent,
+                        focus_region=camera_focus_region,
+                        strength=camera_motion_strength,
+                    )
                     zoompan_filter = build_broll_zoompan_filter(
                         cam_profile, total_frames=frame_count, fps=fps
                     )
@@ -241,19 +266,32 @@ class VisualV2VideoRenderer:
                 ffmpeg_cmd = [
                     "ffmpeg",
                     "-y",
-                    "-stream_loop", "-1",
-                    "-i", str(broll_asset.local_path),
-                    "-framerate", str(fps),
-                    "-i", os.path.join(temp_dir, "frame_%05d.png"),
-                    "-filter_complex", filter_complex,
-                    "-map", "[v]",
-                    "-c:v", "libx264",
-                    "-pix_fmt", "yuv420p",
-                    "-r", str(fps),
-                    "-t", str(broll_trim_duration),
-                    "-preset", "veryfast",
-                    "-crf", "23",
-                    "-movflags", "+faststart",
+                    "-stream_loop",
+                    "-1",
+                    "-i",
+                    str(broll_asset.local_path),
+                    "-framerate",
+                    str(fps),
+                    "-i",
+                    os.path.join(temp_dir, "frame_%05d.png"),
+                    "-filter_complex",
+                    filter_complex,
+                    "-map",
+                    "[v]",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-r",
+                    str(fps),
+                    "-t",
+                    str(broll_trim_duration),
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "23",
+                    "-movflags",
+                    "+faststart",
                     "-an",
                     str(output_path),
                 ]
@@ -261,14 +299,22 @@ class VisualV2VideoRenderer:
                 ffmpeg_cmd = [
                     "ffmpeg",
                     "-y",
-                    "-framerate", str(fps),
-                    "-i", os.path.join(temp_dir, "frame_%05d.png"),
-                    "-c:v", "libx264",
-                    "-pix_fmt", "yuv420p",
-                    "-r", str(fps),
-                    "-preset", "veryfast",
-                    "-crf", "23",
-                    "-movflags", "+faststart",
+                    "-framerate",
+                    str(fps),
+                    "-i",
+                    os.path.join(temp_dir, "frame_%05d.png"),
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-r",
+                    str(fps),
+                    "-preset",
+                    "veryfast",
+                    "-crf",
+                    "23",
+                    "-movflags",
+                    "+faststart",
                     "-an",
                     str(output_path),
                 ]
@@ -283,15 +329,20 @@ class VisualV2VideoRenderer:
                 raise VisualV2VideoRenderError(f"Failed to start FFmpeg: {e}") from e
 
             try:
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_seconds)
+                stdout, stderr = await asyncio.wait_for(
+                    process.communicate(), timeout=timeout_seconds
+                )
             except TimeoutError as e:
                 process.kill()
                 await process.communicate()
-                raise VisualV2VideoRenderError(f"FFmpeg timed out after {timeout_seconds} seconds") from e
+                raise VisualV2VideoRenderError(
+                    f"FFmpeg timed out after {timeout_seconds} seconds"
+                ) from e
 
             if process.returncode != 0:
-                raise VisualV2VideoRenderError(f"FFmpeg failed with exit code {process.returncode}:\n{stderr.decode(errors='ignore')}")
-
+                raise VisualV2VideoRenderError(
+                    f"FFmpeg failed with exit code {process.returncode}:\n{stderr.decode(errors='ignore')}"
+                )
 
         try:
             if not output_path.exists():

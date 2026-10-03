@@ -9,6 +9,8 @@ Pure logic: zero I/O, zero network, zero external providers.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from omega.application.beat_asset_policy import BeatAssetDecision, BeatAssetPlan
@@ -27,8 +29,78 @@ from omega.application.editorial_beat import (
 from omega.application.storyboard_engine import StoryboardScene
 from omega.application.visual_direction import (
     VisualDirection,
+    VisualTemplateId,
     is_meaningful_query,
 )
+from omega.domain.camera_transition import (
+    CameraIntent,
+    CameraPlan,
+    FocusRegion,
+    MotionStrength,
+    TransitionIntent,
+    TransitionPlan,
+)
+
+_CAMERA_CAPABLE_TEMPLATES = frozenset(
+    {
+        VisualTemplateId.IMAGE_EXPLAINER,
+        VisualTemplateId.BROLL_EXPLAINER,
+        VisualTemplateId.STATISTIC_HERO,
+        VisualTemplateId.CODE_EDITOR,
+    }
+)
+
+
+def adapt_camera_plan(
+    plan: CameraPlan,
+    template_id: VisualTemplateId | None,
+    *,
+    legacy_motion_intent: BeatMotionIntent | None = None,
+) -> tuple[BeatMotionIntent, FocusRegion | None, MotionStrength, str | None]:
+    """Translate a renderer-neutral CameraPlan with deterministic static fallback."""
+    if template_id not in _CAMERA_CAPABLE_TEMPLATES:
+        return (
+            BeatMotionIntent.STATIC,
+            None,
+            MotionStrength.SUBTLE,
+            "UNSUPPORTED_TEMPLATE_STATIC_FALLBACK",
+        )
+    if (
+        plan.intent == CameraIntent.STATIC
+        and plan.preferred_asset_type == "BROLL"
+        and legacy_motion_intent is not None
+    ):
+        # Existing BeatVisualDirector motion remains authoritative for B-roll
+        # when P22-B adds no more specific camera instruction.
+        return legacy_motion_intent, None, plan.strength, None
+    mapping = {
+        CameraIntent.STATIC: BeatMotionIntent.STATIC,
+        CameraIntent.PUSH_IN: BeatMotionIntent.SLOW_PUSH_IN,
+        CameraIntent.PULL_OUT: BeatMotionIntent.SLOW_PULL_OUT,
+        CameraIntent.PAN_LEFT: BeatMotionIntent.PAN_LEFT,
+        CameraIntent.PAN_RIGHT: BeatMotionIntent.PAN_RIGHT,
+        CameraIntent.PAN_UP: BeatMotionIntent.PAN_UP,
+        CameraIntent.PAN_DOWN: BeatMotionIntent.PAN_DOWN,
+        CameraIntent.REFRAME: BeatMotionIntent.FOCAL_ZOOM,
+        CameraIntent.DETAIL_FOCUS: BeatMotionIntent.FOCAL_ZOOM,
+        CameraIntent.RETURN_TO_CONTEXT: BeatMotionIntent.SLOW_PULL_OUT,
+    }
+    mapped = mapping.get(plan.intent)
+    if mapped is None:
+        return (
+            BeatMotionIntent.STATIC,
+            None,
+            MotionStrength.SUBTLE,
+            "UNSUPPORTED_CAMERA_INTENT_STATIC_FALLBACK",
+        )
+    return mapped, plan.focus_region, plan.strength, None
+
+
+def adapt_transition_plan(plan: TransitionPlan) -> tuple[BeatTransitionIntent, str | None]:
+    """Translate supported physical transitions; every unsupported intent becomes CUT."""
+    if plan.applied_intent != TransitionIntent.CUT:
+        return BeatTransitionIntent.HARD_CUT, "UNSUPPORTED_TRANSITION_CUT_FALLBACK"
+    return BeatTransitionIntent.HARD_CUT, plan.fallback_reason
 
 
 def resolve_beat_on_screen_text(
@@ -123,7 +195,6 @@ def adapt_visual_direction_view(
     )
 
 
-
 class BeatRenderUnit(BaseModel):
     """Immutable physical rendering unit for a single visual beat."""
 
@@ -142,6 +213,12 @@ class BeatRenderUnit(BaseModel):
         description="Preserved camera motion intent for G2C2"
     )
     transition_intent: BeatTransitionIntent = Field(description="Transition intent into this beat")
+    camera_plan: CameraPlan | None = None
+    transition_plan: TransitionPlan | None = None
+    camera_focus_region: FocusRegion | None = None
+    camera_motion_strength: MotionStrength = MotionStrength.MODERATE
+    camera_fallback_reason: str | None = None
+    transition_fallback_reason: str | None = None
 
 
 class BeatRenderPlan(BaseModel):
@@ -159,7 +236,9 @@ class BeatRenderPlanResult(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    eligible: bool = Field(description="Whether the scene is eligible for multi-beat physical rendering")
+    eligible: bool = Field(
+        description="Whether the scene is eligible for multi-beat physical rendering"
+    )
     fallback_reason: str | None = Field(
         default=None, description="Deterministic reason for fallback/ineligibility if not eligible"
     )
@@ -180,6 +259,8 @@ class BeatRenderAdapter:
         timing_plan: MaterializedBeatTimingPlan,
         direction_plan: BeatVisualDirectionPlan,
         asset_plan: BeatAssetPlan,
+        camera_plans: Sequence[CameraPlan] | None = None,
+        transition_plans: Sequence[TransitionPlan] | None = None,
     ) -> BeatRenderPlanResult:
         """Evaluate one-to-one timing gate and adapt beat models into BeatRenderPlan."""
         scene_idx = scene.sequence_index
@@ -197,6 +278,15 @@ class BeatRenderAdapter:
                 plan=None,
             )
 
+        if camera_plans is not None and len(camera_plans) != len(beat_plan.beats):
+            return BeatRenderPlanResult(
+                eligible=False, fallback_reason="CAMERA_PLAN_COUNT_MISMATCH", plan=None
+            )
+        if transition_plans is not None and len(transition_plans) != len(beat_plan.beats):
+            return BeatRenderPlanResult(
+                eligible=False, fallback_reason="TRANSITION_PLAN_COUNT_MISMATCH", plan=None
+            )
+
         # 1. One-to-one count check
         if len(timing_plan.timings) != len(beat_plan.beats):
             return BeatRenderPlanResult(
@@ -205,10 +295,9 @@ class BeatRenderAdapter:
                 plan=None,
             )
 
-        if (
-            len(direction_plan.directions) != len(beat_plan.beats)
-            or len(asset_plan.decisions) != len(beat_plan.beats)
-        ):
+        if len(direction_plan.directions) != len(beat_plan.beats) or len(
+            asset_plan.decisions
+        ) != len(beat_plan.beats):
             return BeatRenderPlanResult(
                 eligible=False,
                 fallback_reason="BEAT_PLAN_COUNT_MISMATCH",
@@ -281,8 +370,9 @@ class BeatRenderAdapter:
                     plan=None,
                 )
 
-            # Transition intent support: G2C1 supports HARD_CUT only
-            if beat.transition_intent != BeatTransitionIntent.HARD_CUT:
+            # Legacy callers retain the prior strict contract. P22-B plans carry an
+            # explicit applied transition and deterministic fallback at this boundary.
+            if transition_plans is None and beat.transition_intent != BeatTransitionIntent.HARD_CUT:
                 return BeatRenderPlanResult(
                     eligible=False,
                     fallback_reason="UNSUPPORTED_TRANSITION_INTENT",
@@ -333,6 +423,42 @@ class BeatRenderAdapter:
                 parent_scene_index=scene_idx,
             )
 
+            camera_plan = camera_plans[i] if camera_plans is not None else None
+            transition_plan = transition_plans[i] if transition_plans is not None else None
+            if camera_plan is not None and (
+                camera_plan.beat_index != beat.beat_index
+                or camera_plan.parent_scene_index != scene_idx
+                or camera_plan.source_editorial_beat_indices != timing.source_beat_indices
+            ):
+                return BeatRenderPlanResult(
+                    eligible=False, fallback_reason="CAMERA_PLAN_IDENTITY_MISMATCH", plan=None
+                )
+            if transition_plan is not None and (
+                transition_plan.beat_index != beat.beat_index
+                or transition_plan.parent_scene_index != scene_idx
+                or transition_plan.source_editorial_beat_indices != timing.source_beat_indices
+            ):
+                return BeatRenderPlanResult(
+                    eligible=False, fallback_reason="TRANSITION_PLAN_IDENTITY_MISMATCH", plan=None
+                )
+
+            if camera_plan is None:
+                camera_intent = direction.camera_motion_intent
+                focus_region = None
+                motion_strength = MotionStrength.MODERATE
+                camera_fallback = None
+            else:
+                camera_intent, focus_region, motion_strength, camera_fallback = adapt_camera_plan(
+                    camera_plan,
+                    direction_view.template_id,
+                    legacy_motion_intent=direction.camera_motion_intent,
+                )
+            if transition_plan is None:
+                transition_intent = beat.transition_intent
+                transition_fallback = None
+            else:
+                transition_intent, transition_fallback = adapt_transition_plan(transition_plan)
+
             unit = BeatRenderUnit(
                 parent_scene_index=scene_idx,
                 materialized_index=timing.materialized_index,
@@ -343,8 +469,14 @@ class BeatRenderAdapter:
                 scene_view=scene_view,
                 direction_view=direction_view,
                 asset_decision=decision,
-                camera_motion_intent=direction.camera_motion_intent,
-                transition_intent=beat.transition_intent,
+                camera_motion_intent=camera_intent,
+                transition_intent=transition_intent,
+                camera_plan=camera_plan,
+                transition_plan=transition_plan,
+                camera_focus_region=focus_region,
+                camera_motion_strength=motion_strength,
+                camera_fallback_reason=camera_fallback,
+                transition_fallback_reason=transition_fallback,
             )
             units.append(unit)
 

@@ -36,6 +36,7 @@ from omega.application.beat_visual_direction import (
     BeatVisualDirectionPlan,
     BeatVisualDirector,
 )
+from omega.application.camera_transition_director import CameraTransitionDirector
 from omega.application.editorial_beat import (
     EditorialBeatPlan,
     MaterializedBeatTimingPlan,
@@ -48,6 +49,7 @@ from omega.application.visual_continuity_director import (
     VisualDirectorBeatAdapter,
 )
 from omega.application.visual_direction import VisualAssetKind
+from omega.domain.camera_transition import CameraTransitionPlan
 from omega.domain.visual_beat import VisualBeatSequence
 
 
@@ -78,6 +80,9 @@ class CanonicalBeatPreparationResult(BaseModel):
     asset_plan: BeatAssetPlan | None = Field(default=None, description="Beat asset policy plan")
     render_plan: BeatRenderPlan | None = Field(
         default=None, description="Materialized beat render plan when eligible"
+    )
+    camera_transition_plan: CameraTransitionPlan | None = Field(
+        default=None, description="Derived P22-B camera and transition direction"
     )
 
 
@@ -180,6 +185,7 @@ class CanonicalBeatPreparationService:
                     "continuity_findings": continuity_findings,
                 }
             )
+            camera_transition_plan = CameraTransitionDirector.direct(visual_beat_sequence.beats)
         except Exception as e:
             return CanonicalBeatPreparationResult(
                 eligible=False,
@@ -195,13 +201,10 @@ class CanonicalBeatPreparationService:
                 scene=scene,
                 beat_plan=beat_plan,
             )
-            one_to_one = (
-                len(visual_beat_sequence.beats) == len(beat_plan.beats)
-                and all(
-                    visual.source_editorial_beat_indices == (editorial.beat_index,)
-                    for visual, editorial in zip(
-                        visual_beat_sequence.beats, beat_plan.beats, strict=True
-                    )
+            one_to_one = len(visual_beat_sequence.beats) == len(beat_plan.beats) and all(
+                visual.source_editorial_beat_indices == (editorial.beat_index,)
+                for visual, editorial in zip(
+                    visual_beat_sequence.beats, beat_plan.beats, strict=True
                 )
             )
             if one_to_one:
@@ -229,6 +232,7 @@ class CanonicalBeatPreparationService:
                 beat_plan=beat_plan,
                 timing_plan=timing_plan,
                 visual_beat_sequence=visual_beat_sequence,
+                camera_transition_plan=camera_transition_plan,
             )
 
         # 5. Asset Policy Planning
@@ -246,6 +250,7 @@ class CanonicalBeatPreparationService:
                 beat_plan=beat_plan,
                 timing_plan=timing_plan,
                 visual_beat_sequence=visual_beat_sequence,
+                camera_transition_plan=camera_transition_plan,
                 direction_plan=direction_plan,
             )
 
@@ -264,6 +269,7 @@ class CanonicalBeatPreparationService:
                         beat_plan=beat_plan,
                         timing_plan=timing_plan,
                         visual_beat_sequence=visual_beat_sequence,
+                        camera_transition_plan=camera_transition_plan,
                         direction_plan=direction_plan,
                         asset_plan=asset_plan,
                     )
@@ -279,15 +285,16 @@ class CanonicalBeatPreparationService:
                 and decision.required_kind == VisualAssetKind.SCREENSHOT
             ):
                 return CanonicalBeatPreparationResult(
-                        eligible=False,
-                        fallback_reason="UNSUPPORTED_BEAT_ASSET_KIND",
-                        source_statements=tuple(stmt_list),
-                        beat_plan=beat_plan,
-                        timing_plan=timing_plan,
-                        visual_beat_sequence=visual_beat_sequence,
-                        direction_plan=direction_plan,
-                        asset_plan=asset_plan,
-                    )
+                    eligible=False,
+                    fallback_reason="UNSUPPORTED_BEAT_ASSET_KIND",
+                    source_statements=tuple(stmt_list),
+                    beat_plan=beat_plan,
+                    timing_plan=timing_plan,
+                    visual_beat_sequence=visual_beat_sequence,
+                    camera_transition_plan=camera_transition_plan,
+                    direction_plan=direction_plan,
+                    asset_plan=asset_plan,
+                )
 
         # 8. Render Adaptation
         adapt_res = BeatRenderAdapter.adapt(
@@ -296,6 +303,8 @@ class CanonicalBeatPreparationService:
             timing_plan=timing_plan,
             direction_plan=direction_plan,
             asset_plan=asset_plan,
+            camera_plans=(camera_transition_plan.camera_plans if one_to_one else None),
+            transition_plans=(camera_transition_plan.transition_plans if one_to_one else None),
         )
 
         if not adapt_res.eligible:
@@ -306,6 +315,7 @@ class CanonicalBeatPreparationService:
                 beat_plan=beat_plan,
                 timing_plan=timing_plan,
                 visual_beat_sequence=visual_beat_sequence,
+                camera_transition_plan=camera_transition_plan,
                 direction_plan=direction_plan,
                 asset_plan=asset_plan,
                 render_plan=None,
@@ -318,6 +328,7 @@ class CanonicalBeatPreparationService:
             beat_plan=beat_plan,
             timing_plan=timing_plan,
             visual_beat_sequence=visual_beat_sequence,
+            camera_transition_plan=camera_transition_plan,
             direction_plan=direction_plan,
             asset_plan=asset_plan,
             render_plan=adapt_res.plan,

@@ -33,6 +33,8 @@ class BeatMotionIntent(enum.StrEnum):
     SLOW_PULL_OUT = "SLOW_PULL_OUT"
     PAN_LEFT = "PAN_LEFT"
     PAN_RIGHT = "PAN_RIGHT"
+    PAN_UP = "PAN_UP"
+    PAN_DOWN = "PAN_DOWN"
     DRIFT = "DRIFT"
     FOCAL_ZOOM = "FOCAL_ZOOM"
 
