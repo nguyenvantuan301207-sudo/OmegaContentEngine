@@ -179,3 +179,118 @@ Channel DNA v2 extends the immutable revision model with rich, typed, and inspec
 - **P24-C Packaging Seam (`.to_p24c_packaging_hints()`)**: Exposes title tone, title restraint, length tendency, thumbnail density, thumbnail text policy, and zero-tolerance clickbait constraints without generating text or images.
 - **P24-D QA Context (`.to_p24d_qa_context()`)**: Exposes full lineage, binding constraints, coherence findings, and consistency findings for final acceptance evaluation.
 
+
+## P24-C Packaging Engine
+
+The Packaging Engine derives the complete, publication-ready, and truthful packaging bundle for an Omega production without publishing media.
+
+### Single Authority Chain
+
+The authority chain strictly flows in one direction:
+`ChannelDNARevision` (Channel identity authority)
+  ↓
+`CreativeStylePlan` (Production-specific creative direction)
+  ↓
+`PackagingPlan` (Derived packaging artifact)
+
+P24-C preserves and never mutates `ChannelDNARevision`, `CreativeStylePlan`, `NarrativePlan`, or `ScriptVersion`.
+
+### PackagingPlan Domain Model
+
+`PackagingPlan` is the canonical derived artifact produced by P24-C:
+- `packaging_plan_id`: Unique derived bundle UUID.
+- `channel_dna_revision_id` & `creative_style_plan_id`: Strict provenance lineage.
+- `title_candidates`: At least 4 meaningfully different candidates across distinct strategies.
+- `selected_title`: Deterministically selected provisional title.
+- `thumbnail_concepts`: Distinct conceptual specifications with composition and visual hierarchy.
+- `selected_thumbnail`: Primary selected concept.
+- `physical_thumbnail_artifact`: Validated 1280x720 RGB PNG image file on disk.
+- `description`: Structured, grounded outline with takeaways, timestamps, and optional CTA.
+- `chapters`: Monotonic timeline chapters reconciled with physical video duration.
+- `tags`: Bounded relevant keywords derived from content.
+- `cta_metadata`: Conforming to ChannelDNA CTA preferences (`NO_CTA`, `SOFT_CTA`, `STANDARD_CTA`).
+- `attribution_block`: Preserves audio and asset attribution obligations from P23-D.
+- `provenance`: Generation metadata, provider details, renderer version, candidate rationale.
+- `validation_findings`: Diagnostic structural and coherence findings.
+
+### Title Candidate Generation, Grounding & Clickbait Guard
+
+1. **Candidate Strategies**:
+   - `FACTUAL`: Rigorous summary directly anchored to content objectives.
+   - `EXPLAINER`: Structural breakdown ("How X Works: The Mechanism Behind Y").
+   - `CURIOSITY`: Grounded inquiry stimulating audience curiosity without deception.
+   - `QUESTION`: Engaging interrogative exploring core premise.
+   - `OUTCOME`: Direct finding or payoff presentation.
+   - `CONTRAST`: Comparison between conventional consensus and empirical evidence.
+2. **Grounding Verification**:
+   - Every title claim must trace back to `NarrativePlan`, `ScriptVersion`, or research evidence.
+   - Detects and rejects:
+     - `TITLE_UNSUPPORTED_CLAIM`: Facts absent from content.
+     - `TITLE_NUMERIC_MISMATCH`: Numbers or percentages not present in grounded context.
+     - `TITLE_EXAGGERATION`: Unsupported superlatives ("revolutionizes everything").
+     - `TITLE_MISLEADING_CURIOSITY`: Fabricated urgency or deceptive framing.
+3. **Clickbait Boundary**:
+   - Strictly enforces `HardConstraints.no_misleading_clickbait` and ChannelDNA avoid patterns.
+   - Banned phrases: "You Won't Believe", "Shocking", "Mind-Blowing", "Terrifying", "Insane", manufactured controversy, and fake urgency.
+4. **Deterministic Ranking & Provisional Selection**:
+   - Score = (Clarity * 0.40) + (Specificity * 0.40) + Style Fit - Clickbait Penalty.
+   - Ungrounded candidates or candidates with hard constraint violations are disqualified.
+   - Stable tie-break: Highest score, then shorter character count, then alphabetical.
+
+### Thumbnail Concept, Composition & Physical Rendering
+
+1. **ThumbnailConcept**:
+   - Captures primary subject, secondary subject, visual hierarchy, composition, background treatment, contrast intent, and emotional intensity.
+   - Safe areas: 10% margins on all borders; platform badge safe area in the bottom-right corner (X > 75%, Y > 80%) kept free of vital text or subject focus (`ThumbnailSafeZone.LEFT_WEIGHTED`).
+2. **Text Policy**:
+   - Respects ChannelDNA: `NO_TEXT` or `SHORT_TEXT` (max 3-4 impactful words, <= 30 chars).
+   - Rejects full sentence overlays, duplicated titles, or unreadable copy (`THUMBNAIL_TEXT_OVERLOADED`).
+3. **Physical Thumbnail Renderer (`ThumbnailRenderer`)**:
+   - Generates genuine 1280x720 16:9 RGB PNG images.
+   - Composites existing visual assets / frames from P22 when available, or renders cinematic dark gradients with hero subject focus cards and high-contrast text badges.
+   - Uses FFmpeg filter chains where available, with an offline deterministic vector/raster fallback engine.
+4. **Physical QA Validation**:
+   - Verifies file exists on disk, file size > 1,000 bytes.
+   - Verifies valid PNG header, IHDR dimensions (1280x720), 8-bit depth, RGB/RGBA color type.
+   - Tests pixel standard deviation to ensure the image is not blank or solid.
+
+### Structured Description, Chapters & Metadata
+
+1. **Description Generation**:
+   - Premise summary, bulleted key takeaways from payoff sections, timeline timestamps, CTA, and attribution block.
+   - Grounded: No fabricated links, claims, credentials, or sponsors.
+2. **Chapter Generation & Duration Reconciliation**:
+   - Derived strictly from narrative section objectives and physical durations.
+   - Strictly monotonic timestamps starting at 00:00.
+   - Clamped within final media duration: No overflow past total duration.
+   - Adjacent duplicate chapter titles are deduplicated.
+   - For `SHORT` format profile, chapter listings are omitted matching platform conventions.
+3. **Tags & Keywords**:
+   - Bounded (typically 6-12 tags), content-derived.
+   - Eliminates keyword stuffing, duplicates, or competitor name hijacking.
+
+### Attribution & CTA Integration
+
+- **Attribution (P23-D)**: Preserves required audio narration and music bed attributions (e.g. Kokoro TTS, Creative Commons music) in the description block.
+- **CTA Policy**: Respects channel preferences (`prefer_concise_cta`). If soft CTA is requested, inserts gentle community discussion prompts rather than aggressive "like and subscribe" appeals.
+
+### Packaging Coherence & Promise/Payoff Alignment
+
+- Evaluates semantic consistency across modalities:
+  - `TITLE_THUMBNAIL_PROMISE_MISMATCH`: Raised if the thumbnail subject contradicts the title.
+  - `TITLE_DESCRIPTION_MISMATCH`: Raised if description diverges from the title premise.
+  - `PACKAGING_PAYOFF_MISMATCH`: Raised if packaging promises outcomes not delivered by the video payoff.
+
+### Model Assistance & Bounded Fallback
+
+- **`PackagingModelClient`**: Optional structured proposal client.
+- **Validation Pipeline**: Context -> Model Proposal -> Schema Validation -> Grounding Validation -> ChannelDNA Hard Constraints -> CreativeStylePlan Fit -> Ranking.
+- **Bounded Retry**: Allows exactly 1 retry with error feedback if proposal fails validation.
+- **Deterministic Fallback**: If model is unavailable or proposals fail validation, automatically falls back to `DeterministicPackagingGenerator`.
+
+### Handoff & Platform Boundaries
+
+- **P24-D QA Handoff (`.to_p24d_qa_package()`)**: Exposes complete candidate pool, selected title/thumbnail, physical PNG artifact, description, chapters, metadata, grounding references, and validation findings for final creative acceptance.
+- **P25 Publishing Boundary (`.to_p25_publish_payload()`)**: Formats publish-ready candidate payload strictly for P25-A ingestion.
+- **No Publishing**: P24-C has zero publishing capability; no live uploads, no API mutation, no scheduling.
+
