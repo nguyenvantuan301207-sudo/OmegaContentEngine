@@ -93,6 +93,8 @@ class StoryboardPlan(BaseModel):
     title: str
     estimated_duration_seconds: float
     scenes: list[StoryboardScene]
+    narrative_plan_id: str | None = None
+    narrative_plan_version: int | None = None
 
 class StoryboardEngine:
     """Deterministic Storyboard Engine."""
@@ -162,10 +164,15 @@ class StoryboardEngine:
                         (len(s.narration_excerpt.split()) / total_words) * total_script_duration, 1
                     )
 
+        narrative_plan_id = str(script_dict["narrative_plan_id"]) if script_dict.get("narrative_plan_id") else None
+        narrative_plan_version = script_dict.get("narrative_plan_version")
+
         return StoryboardPlan(
             title=script_dict.get("title", "Storyboard"),
             estimated_duration_seconds=total_script_duration,
-            scenes=scenes
+            scenes=scenes,
+            narrative_plan_id=narrative_plan_id,
+            narrative_plan_version=narrative_plan_version,
         )
 
     def _create_scene(

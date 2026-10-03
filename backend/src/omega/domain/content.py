@@ -196,6 +196,8 @@ class ScriptVersionSummaryResponse(BaseModel):
 
     id: UUID
     content_request_id: UUID
+    narrative_plan_id: UUID | None = None
+    narrative_plan_version: int | None = None
     version: int
     is_current: bool
     supersedes_script_id: UUID | None = None
@@ -213,6 +215,8 @@ class ScriptVersionResponse(BaseModel):
 
     id: UUID
     content_request_id: UUID
+    narrative_plan_id: UUID | None = None
+    narrative_plan_version: int | None = None
     version: int
     is_current: bool
     supersedes_script_id: UUID | None = None
