@@ -94,11 +94,15 @@ export function buildProductionReadView(
   }
 
   const snapshot = state.truth.runtime_snapshot;
-  const sceneIds = new Map(snapshot.scenes.map((scene) => [scene.sequence_index, `runtime-${artifact.id}-scene-${scene.sequence_index}`]));
+  const scenes = Array.isArray(snapshot?.scenes) ? snapshot.scenes : [];
+  const visuals = Array.isArray(snapshot?.visuals) ? snapshot.visuals : [];
+  const narration = Array.isArray(snapshot?.narration) ? snapshot.narration : [];
+  const cues = Array.isArray(snapshot?.subtitles?.cues) ? snapshot.subtitles.cues : [];
+  const sceneIds = new Map(scenes.map((scene) => [scene.sequence_index, `runtime-${artifact.id}-scene-${scene.sequence_index}`]));
   const createdAt = artifact.created_at;
   return {
     authority: "RENDERED",
-    scenes: snapshot.scenes.map((scene) => ({
+    scenes: scenes.map((scene) => ({
       id: sceneIds.get(scene.sequence_index)!,
       production_request_id: artifact.production_request_id,
       scene_order: scene.sequence_index,
@@ -106,14 +110,14 @@ export function buildProductionReadView(
       scene_type: scene.effective_strategy,
       narration_text: scene.narration_text ?? "",
       estimated_duration_ms: scene.duration_ms,
-      visual_intent: snapshot.visuals[scene.visual_index]
-        ? describeRuntimeVisual(snapshot.visuals[scene.visual_index])
+      visual_intent: (typeof scene.visual_index === "number" && visuals[scene.visual_index])
+        ? describeRuntimeVisual(visuals[scene.visual_index])
         : null,
       transition_in: null,
       transition_out: null,
       created_at: createdAt,
     })),
-    narration: snapshot.narration.map((segment) => ({
+    narration: narration.map((segment) => ({
       id: `runtime-${artifact.id}-narration-${segment.sequence_index}`,
       production_request_id: artifact.production_request_id,
       scene_id: sceneIds.get(segment.scene_index) ?? `runtime-${artifact.id}-scene-${segment.scene_index}`,
@@ -124,7 +128,7 @@ export function buildProductionReadView(
       duration_ms: segment.duration_ms,
       created_at: createdAt,
     })),
-    subtitles: snapshot.subtitles.cues.map((cue) => ({
+    subtitles: cues.map((cue) => ({
       id: `runtime-${artifact.id}-subtitle-${cue.cue_order}`,
       production_request_id: artifact.production_request_id,
       scene_id: sceneIds.get(cue.scene_index) ?? `runtime-${artifact.id}-scene-${cue.scene_index}`,
@@ -134,16 +138,17 @@ export function buildProductionReadView(
       text: cue.text,
       created_at: createdAt,
     })),
-    visuals: snapshot.visuals,
-    durationMs: snapshot.render_target.duration_ms,
+    visuals,
+    durationMs: snapshot?.render_target?.duration_ms ?? 0,
   };
 }
 
-export function describeRuntimeVisual(visual: ProductionReadView["visuals"][number]): string {
+export function describeRuntimeVisual(visual?: ProductionReadView["visuals"][number] | null): string {
+  if (!visual) return "Runtime visual";
   const identity = visual.provider
     ? `${visual.provider}${visual.provider_asset_id ? ` · ${visual.provider_asset_id}` : ""}`
-    : visual.template_id ?? visual.kind ?? visual.visual_mode;
-  return `${visual.origin} · ${identity}`;
+    : visual.template_id ?? visual.kind ?? visual.visual_mode ?? "visual";
+  return `${visual.origin ?? "UNKNOWN"} · ${identity}`;
 }
 
 export function qaForArtifact(qa: ProductionQAResult | null, artifact: MediaArtifact | null): ProductionQAResult | null {

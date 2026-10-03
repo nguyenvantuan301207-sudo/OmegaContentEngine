@@ -306,9 +306,7 @@ export function ArtifactPanel({
         controls
         preload="metadata"
         src={getMediaArtifactStreamUrl(channelId, requestId, selected.id)}
-      >
-        Your browser does not support video playback.
-      </video>
+      />
       <WorkflowStatusSummary
         metrics={[
           { label: "Type", value: selected.artifact_type },
