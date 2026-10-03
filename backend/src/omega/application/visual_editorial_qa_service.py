@@ -21,6 +21,7 @@ import binascii
 import logging
 import math
 import struct
+import subprocess
 import zlib
 from collections.abc import Sequence
 from pathlib import Path
@@ -874,6 +875,7 @@ class PhysicalArtifactQAEvaluator:
         expected_height: int = 1080,
         beat_index: int | None = None,
         scene_index: int | None = None,
+        media_probe_summary: dict[str, Any] | None = None,
     ) -> list[VisualQAFinding]:
         findings: list[VisualQAFinding] = []
         p = Path(file_path)
@@ -975,7 +977,162 @@ class PhysicalArtifactQAEvaluator:
                     )
                 )
 
+        # 4. MP4 / MOV video artifact inspection
+        elif p.suffix.lower() in (".mp4", ".mov"):
+            try:
+                header_data = p.read_bytes()[:1024]
+                is_valid_header = any(
+                    box in header_data[:16]
+                    for box in (b"ftyp", b"moov", b"mdat", b"wide", b"free", b"skip")
+                )
+                if not is_valid_header:
+                    findings.append(
+                        VisualQAFinding(
+                            code=VisualQAFindingCode.CORRUPT_ARTIFACT,
+                            severity=VisualQASeverity.BLOCKER,
+                            subsystem=VisualQASubsystem.ARTIFACT,
+                            scene_index=scene_index,
+                            beat_index=beat_index,
+                            explanation=f"File {p} does not contain valid MP4 container box headers.",
+                            recommended_remediation="Ensure renderer outputs valid MP4 container format.",
+                            contributing_sources=["PhysicalArtifactQAEvaluator"],
+                        )
+                    )
+                    return findings
+
+                width = None
+                height = None
+                if media_probe_summary is not None:
+                    width = media_probe_summary.get("width")
+                    height = media_probe_summary.get("height")
+                    if not media_probe_summary.get("has_video", True):
+                        findings.append(
+                            VisualQAFinding(
+                                code=VisualQAFindingCode.CORRUPT_ARTIFACT,
+                                severity=VisualQASeverity.BLOCKER,
+                                subsystem=VisualQASubsystem.ARTIFACT,
+                                scene_index=scene_index,
+                                beat_index=beat_index,
+                                explanation=f"MP4 artifact {p} contains no video stream.",
+                                recommended_remediation="Ensure video encoding produces video stream.",
+                                contributing_sources=["PhysicalArtifactQAEvaluator"],
+                            )
+                        )
+                        return findings
+
+                if width is not None and height is not None:
+                    if width != expected_width or height != expected_height:
+                        findings.append(
+                            VisualQAFinding(
+                                code=VisualQAFindingCode.INVALID_ARTIFACT_DIMENSIONS,
+                                severity=VisualQASeverity.ERROR,
+                                subsystem=VisualQASubsystem.ARTIFACT,
+                                scene_index=scene_index,
+                                beat_index=beat_index,
+                                explanation=f"Video dimensions ({width}x{height}) do not match expected ({expected_width}x{expected_height}).",
+                                recommended_remediation="Render video at canonical 1920x1080 dimensions.",
+                                contributing_sources=["PhysicalArtifactQAEvaluator"],
+                            )
+                        )
+
+                # Blank frame detection for MP4
+                sample_png = cls._sample_mp4_frame_png(p)
+                if sample_png and len(sample_png) >= 24 and sample_png.startswith(b"\x89PNG\r\n\x1a\n"):
+                    sw = int.from_bytes(sample_png[16:20], byteorder="big")
+                    sh = int.from_bytes(sample_png[20:24], byteorder="big")
+                    if (width is None or height is None) and (sw != expected_width or sh != expected_height):
+                        findings.append(
+                            VisualQAFinding(
+                                code=VisualQAFindingCode.INVALID_ARTIFACT_DIMENSIONS,
+                                severity=VisualQASeverity.ERROR,
+                                subsystem=VisualQASubsystem.ARTIFACT,
+                                scene_index=scene_index,
+                                beat_index=beat_index,
+                                explanation=f"Video frame dimensions ({sw}x{sh}) do not match expected ({expected_width}x{expected_height}).",
+                                recommended_remediation="Render video at canonical 1920x1080 dimensions.",
+                                contributing_sources=["PhysicalArtifactQAEvaluator"],
+                            )
+                        )
+                    if cls._is_blank_png(sample_png, sw, sh):
+                        findings.append(
+                            VisualQAFinding(
+                                code=VisualQAFindingCode.BLANK_FRAME_DETECTED,
+                                severity=VisualQASeverity.BLOCKER,
+                                subsystem=VisualQASubsystem.ARTIFACT,
+                                scene_index=scene_index,
+                                beat_index=beat_index,
+                                explanation=f"Rendered video artifact {p} contains uniform blank frames.",
+                                recommended_remediation="Ensure video content contains non-blank visual information.",
+                                contributing_sources=["PhysicalArtifactQAEvaluator"],
+                            )
+                        )
+            except Exception as e:
+                findings.append(
+                    VisualQAFinding(
+                        code=VisualQAFindingCode.CORRUPT_ARTIFACT,
+                        severity=VisualQASeverity.BLOCKER,
+                        subsystem=VisualQASubsystem.ARTIFACT,
+                        scene_index=scene_index,
+                        beat_index=beat_index,
+                        explanation=f"Failed inspecting MP4 artifact {p}: {e}",
+                        recommended_remediation="Check video file integrity.",
+                        contributing_sources=["PhysicalArtifactQAEvaluator"],
+                    )
+                )
+
         return findings
+
+    @classmethod
+    def _sample_mp4_frame_png(cls, mp4_path: Path | str) -> bytes | None:
+        """Extract a sample frame from an MP4 file as PNG bytes using host ffmpeg or isolated container."""
+        p = Path(mp4_path)
+        if not p.is_file():
+            return None
+        # Host ffmpeg
+        try:
+            res = subprocess.run(
+                [
+                    "ffmpeg", "-v", "quiet",
+                    "-ss", "0.1",
+                    "-i", str(p),
+                    "-vframes", "1",
+                    "-f", "image2pipe",
+                    "-vcodec", "png",
+                    "-pix_fmt", "rgb24",
+                    "pipe:1",
+                ],
+                capture_output=True,
+                timeout=10,
+            )
+            if res.returncode == 0 and res.stdout.startswith(b"\x89PNG\r\n\x1a\n"):
+                return res.stdout
+        except (FileNotFoundError, OSError, subprocess.SubprocessError):
+            pass
+
+        # Isolated container fallback via pipe:0
+        try:
+            mp4_bytes = p.read_bytes()
+            res = subprocess.run(
+                [
+                    "docker", "exec", "-i", "p20c-api",
+                    "ffmpeg", "-v", "quiet",
+                    "-ss", "0.1",
+                    "-i", "pipe:0",
+                    "-vframes", "1",
+                    "-f", "image2pipe",
+                    "-vcodec", "png",
+                    "-pix_fmt", "rgb24",
+                    "pipe:1",
+                ],
+                input=mp4_bytes,
+                capture_output=True,
+                timeout=15,
+            )
+            if res.returncode == 0 and res.stdout.startswith(b"\x89PNG\r\n\x1a\n"):
+                return res.stdout
+        except Exception:
+            pass
+        return None
 
     @classmethod
     def _is_blank_png(cls, png_bytes: bytes, width: int, height: int) -> bool:
@@ -1112,6 +1269,7 @@ class VisualEditorialQAService:
         expected_width: int = 1920,
         expected_height: int = 1080,
         scene_index: int | None = None,
+        media_probe_summary: dict[str, Any] | None = None,
     ) -> list[VisualQAFinding]:
         """Execute post-render physical artifact checks."""
         findings: list[VisualQAFinding] = []
@@ -1123,6 +1281,7 @@ class VisualEditorialQAService:
                     expected_height=expected_height,
                     beat_index=i,
                     scene_index=scene_index,
+                    media_probe_summary=media_probe_summary,
                 )
             )
         return findings
@@ -1223,6 +1382,7 @@ class VisualEditorialQAService:
         asset_assignments: dict[int, str] | None = None,
         entity_references: dict[int, str] | None = None,
         scene_index: int | None = None,
+        media_probe_summary: dict[str, Any] | None = None,
         provenance: dict[str, Any] | None = None,
     ) -> VisualQAResult:
         """Execute end-to-end Visual Editorial QA with deduplication and acceptance policy."""
@@ -1247,6 +1407,7 @@ class VisualEditorialQAService:
             post_findings = cls.post_render_qa(
                 rendered_artifacts=rendered_artifacts,
                 scene_index=scene_index,
+                media_probe_summary=media_probe_summary,
             )
 
         # 3. Deduplicate

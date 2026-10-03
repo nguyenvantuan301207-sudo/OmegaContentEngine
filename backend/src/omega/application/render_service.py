@@ -45,6 +45,9 @@ from omega.domain.production import (
     AssetType,
     MediaArtifactType,
     ProductionOutcome,
+    ProductionQAFinding,
+    ProductionQARuleCode,
+    ProductionQASeverity,
     ProductionQAStatus,
     ProductionRequestStatus,
     RenderErrorCode,
@@ -541,6 +544,7 @@ class ProductionRenderService:
             # 5. Atomic Move/Rename to final immutable artifacts path
             final_file_name = f"video_v{version}_{content_hash[:12]}.mp4"
             final_artifact_path = artifacts_dir / final_file_name
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
             os.replace(staging_output_path, final_artifact_path)
             rel_uri = self.storage.to_relative_uri(channel_id, request_id, final_artifact_path)
 
@@ -608,6 +612,22 @@ class ProductionRenderService:
             else:
                 canonical_scenes_data = None
 
+            # ══════════════════════════════════════════════════════════════
+            # POST-RENDER P22-D PHYSICAL ARTIFACT QA GATE
+            # ══════════════════════════════════════════════════════════════
+            from omega.application.visual_editorial_qa_service import (
+                PhysicalArtifactQAEvaluator,
+                VisualQAFindingCode,
+                VisualQASeverity,
+            )
+
+            post_visual_findings = PhysicalArtifactQAEvaluator.evaluate_file(
+                final_artifact_path,
+                expected_width=probe_summary.get("width", width) if probe_summary else width,
+                expected_height=probe_summary.get("height", height) if probe_summary else height,
+                media_probe_summary=probe_summary,
+            )
+
             # 1. Run local 17-rule Production QA with canonical runtime truth.
             qa_context = {
                 "request_data": req_data,
@@ -624,6 +644,42 @@ class ProductionRenderService:
             }
             qa_context["runtime_truth_snapshot"] = runtime_snapshot
             qa_status, qa_findings = self.qa_engine.evaluate(**qa_context)
+
+            # Enforce Post-render Visual QA Gate onto Production QA
+            if post_visual_findings:
+                has_visual_blocker = any(
+                    vf.severity in (VisualQASeverity.BLOCKER, VisualQASeverity.ERROR)
+                    for vf in post_visual_findings
+                )
+                has_visual_warning = any(
+                    vf.severity == VisualQASeverity.WARNING
+                    for vf in post_visual_findings
+                )
+                for vf in post_visual_findings:
+                    mapped_rule = (
+                        ProductionQARuleCode.PLACEHOLDER_ONLY_VISUALS
+                        if vf.code == VisualQAFindingCode.BLANK_FRAME_DETECTED
+                        else ProductionQARuleCode.FFPROBE_VALIDATION_FAILED
+                        if vf.code == VisualQAFindingCode.CORRUPT_ARTIFACT
+                        else ProductionQARuleCode.VIDEO_DIMENSION_MISMATCH
+                        if vf.code == VisualQAFindingCode.INVALID_ARTIFACT_DIMENSIONS
+                        else ProductionQARuleCode.RENDER_FILE_MISSING
+                        if vf.code == VisualQAFindingCode.MISSING_ARTIFACT
+                        else ProductionQARuleCode.ZERO_DURATION_ARTIFACT
+                    )
+                    qa_findings.append(
+                        ProductionQAFinding(
+                            rule_code=mapped_rule,
+                            severity=ProductionQASeverity.BLOCKING
+                            if vf.severity in (VisualQASeverity.BLOCKER, VisualQASeverity.ERROR)
+                            else ProductionQASeverity.WARNING,
+                            message=f"[P22-D Visual QA] {vf.explanation}",
+                            details={"visual_qa_code": vf.code.value, "subsystem": vf.subsystem.value},
+                        )
+                    )
+                # Fail-closed: Both FAIL and REVISE block final acceptance!
+                if has_visual_blocker or has_visual_warning:
+                    qa_status = ProductionQAStatus.BLOCKED
 
             # Prior to Phase 3: Check heartbeat runner health
             heartbeat_runner.assert_healthy()
@@ -1123,6 +1179,7 @@ class ProductionRenderService:
             raise ValueError("V2 output SHA mismatch")
 
         # byte-preserving copy
+        staging_output_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(out_path, staging_output_path)
 
         # Verify Copied SHA
@@ -1139,8 +1196,8 @@ class ProductionRenderService:
             {
                 "subtitle_style_applied": (
                     result.subtitle_style_applied.model_dump()
-                    if getattr(result, "subtitle_style_applied", None)
-                    else None
+                    if hasattr(getattr(result, "subtitle_style_applied", None), "model_dump")
+                    else getattr(result, "subtitle_style_applied", None)
                 ),
                 "target_fps": result.fps,
                 "effective_fps_mode": getattr(result, "effective_fps_mode", None),

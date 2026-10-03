@@ -2634,6 +2634,17 @@ class VisualProductionV2Service:
                 "scenes": [s.model_dump(mode="json") for s in scene_results],
             }
 
+            from omega.application.visual_editorial_qa_service import PhysicalArtifactQAEvaluator
+
+            manifest_content["visual_qa"] = [
+                f.model_dump(mode="json")
+                for f in PhysicalArtifactQAEvaluator.evaluate_file(
+                    final_mp4_path,
+                    expected_width=1920,
+                    expected_height=1080,
+                )
+            ]
+
             with open(manifest_path, "w", encoding="utf-8") as f:
                 json.dump(manifest_content, f, indent=2)
 

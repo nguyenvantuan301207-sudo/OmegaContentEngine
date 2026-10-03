@@ -294,6 +294,8 @@ class VisualExplanationRenderer:
                     "1",
                     "-vf",
                     "scale=1920:1080:flags=lanczos",
+                    "-pix_fmt",
+                    "rgb24",
                     str(png_path),
                 ],
                 capture_output=True,
