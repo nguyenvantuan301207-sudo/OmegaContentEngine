@@ -92,7 +92,16 @@ class MusicDirector:
             raise ValueError("PacingPlan does not belong to NarrativePlan")
         tone = " ".join(channel_dna.brand_voice.tone).lower()
         styles = " ".join(channel_dna.audience.preferred_style).lower()
-        profile = f"{tone} {styles}"
+        audio_prefs = getattr(channel_dna, "audio_preferences", None)
+        ed_voice = getattr(channel_dna, "editorial_voice", None)
+        extra = []
+        if audio_prefs and getattr(audio_prefs, "music_usage_tendency", None) in ("NONE", "MINIMAL"):
+            extra.append("no music")
+        if ed_voice and getattr(ed_voice, "energy", None) in ("CALM",):
+            extra.append("calm")
+        if ed_voice and getattr(ed_voice, "energy", None) in ("DYNAMIC", "HIGH_ENERGY"):
+            extra.append("energetic")
+        profile = f"{tone} {styles} {' '.join(extra)}"
         no_music = any(term in profile for term in ("no music", "music-free", "silent"))
         calm = any(term in profile for term in ("calm", "analytical", "minimal"))
         energetic = any(term in profile for term in ("energetic", "dynamic", "bold"))

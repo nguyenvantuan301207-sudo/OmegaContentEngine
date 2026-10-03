@@ -26,7 +26,7 @@ from omega.domain.channel import (
     validate_slug,
 )
 from omega.domain.channel_context import ChannelContext
-from omega.domain.channel_dna import ChannelDNA
+from omega.domain.channel_dna import ChannelDNA, ChannelDNAValidator
 from omega.domain.channel_style import (
     ChannelStyleProfile,
     ChannelStyleProfileResponse,
@@ -98,6 +98,17 @@ async def create_channel(session: AsyncSession, create_in: ChannelCreate) -> Cha
     session.add(channel)
 
     # 5. Create Initial Revision (Version 1)
+    dna_dict["_provenance"] = {
+        "schema_version": "v2.0",
+        "channel_id": str(channel_id),
+        "version": 1,
+        "superseded_version": None,
+        "created_at": datetime.now(UTC).isoformat(),
+        "actor": "USER",
+        "change_reason": "Initial channel creation",
+        "origin": "HUMAN",
+    }
+    channel.dna = dna_dict
     rev = ChannelDNARevision(
         id=uuid.uuid4(),
         channel_id=channel_id,
@@ -307,6 +318,112 @@ async def get_channel_dna(session: AsyncSession, channel_id: UUID) -> ChannelDNA
     return ChannelDNA.model_validate(channel.dna)
 
 
+class ChannelDNARevisionService:
+    """Canonical domain service managing atomic, validated ChannelDNARevision creation."""
+
+    @classmethod
+    async def create_revision(
+        cls,
+        session: AsyncSession,
+        channel_id: UUID,
+        new_dna: ChannelDNA,
+        change_reason: str,
+        actor: str = "USER",
+        origin: str = "HUMAN",
+    ) -> ChannelDNARevision:
+        """Validate candidate DNA, acquire row lock, determine next version, and persist immutable revision."""
+        # 1. Deterministic Candidate Validation
+        validation = ChannelDNAValidator.validate(new_dna)
+        if not validation.is_valid:
+            err_msgs = [
+                f"[{f.code.value}] {f.explanation}"
+                for f in validation.findings
+                if f.severity in ("ERROR", "BLOCKER")
+            ]
+            raise ValueError(f"Channel DNA validation failed: {'; '.join(err_msgs)}")
+
+        # 2. Lock channel row
+        res = await session.execute(
+            select(Channel).where(Channel.id == channel_id).with_for_update()
+        )
+        channel = res.scalar_one_or_none()
+        if not channel:
+            raise ValueError(f"Channel with ID '{channel_id}' not found.")
+
+        if channel.state == ChannelState.ARCHIVED.value:
+            raise ValueError("Cannot update DNA for an archived channel.")
+
+        if not change_reason or len(change_reason.strip()) < 3:
+            raise ValueError("A change reason of at least 3 characters is mandatory for DNA updates.")
+
+        # 3. Atomically calculate next version
+        max_ver_res = await session.execute(
+            select(func.coalesce(func.max(ChannelDNARevision.version), 0)).where(
+                ChannelDNARevision.channel_id == channel_id
+            )
+        )
+        current_max = max_ver_res.scalar_one()
+        next_version = current_max + 1
+
+        # 4. Serialize with audit provenance
+        dna_dict = new_dna.model_dump()
+        dna_dict["_provenance"] = {
+            "schema_version": "v2.0",
+            "channel_id": str(channel_id),
+            "version": next_version,
+            "superseded_version": current_max if current_max > 0 else None,
+            "created_at": datetime.now(UTC).isoformat(),
+            "actor": actor,
+            "change_reason": change_reason.strip(),
+            "origin": origin,
+        }
+
+        # 5. Atomically update Channel active DNA and insert revision
+        channel.dna = dna_dict
+        channel.updated_at = datetime.now(UTC)
+
+        rev = ChannelDNARevision(
+            id=uuid.uuid4(),
+            channel_id=channel_id,
+            version=next_version,
+            snapshot=dna_dict,
+            change_reason=change_reason.strip(),
+            actor=actor,
+        )
+        session.add(rev)
+        await session.commit()
+        await session.refresh(rev)
+
+        logger.info(
+            "Channel DNA revision created",
+            channel_id=str(channel_id),
+            version=next_version,
+            change_reason=change_reason,
+            actor=actor,
+        )
+        return rev
+
+    @classmethod
+    async def get_revision(
+        cls, session: AsyncSession, revision_id: UUID
+    ) -> ChannelDNARevision | None:
+        """Retrieve a specific pinned ChannelDNARevision by ID."""
+        return await session.get(ChannelDNARevision, revision_id)
+
+    @classmethod
+    async def get_current_revision(
+        cls, session: AsyncSession, channel_id: UUID
+    ) -> ChannelDNARevision | None:
+        """Retrieve the current active ChannelDNARevision for a channel."""
+        res = await session.execute(
+            select(ChannelDNARevision)
+            .where(ChannelDNARevision.channel_id == channel_id)
+            .order_by(ChannelDNARevision.version.desc())
+            .limit(1)
+        )
+        return res.scalar_one_or_none()
+
+
 async def update_channel_dna(
     session: AsyncSession,
     channel_id: UUID,
@@ -315,54 +432,30 @@ async def update_channel_dna(
     actor: str = "USER",
 ) -> ChannelDNA | None:
     """Update Channel DNA, atomically incrementing revision version under row lock."""
-    # 1. Lock channel row
-    res = await session.execute(select(Channel).where(Channel.id == channel_id).with_for_update())
+    # Check channel existence first
+    res = await session.execute(select(Channel).where(Channel.id == channel_id))
     channel = res.scalar_one_or_none()
     if not channel:
         return None
 
-    if channel.state == ChannelState.ARCHIVED.value:
-        raise ValueError("Cannot update DNA for an archived channel.")
-
-    if not change_reason or len(change_reason.strip()) < 3:
-        raise ValueError("A change reason of at least 3 characters is mandatory for DNA updates.")
-
-    # 2. Atomically calculate next version
-    max_ver_res = await session.execute(
-        select(func.coalesce(func.max(ChannelDNARevision.version), 0)).where(
-            ChannelDNARevision.channel_id == channel_id
-        )
-    )
-    current_max = max_ver_res.scalar_one()
-    next_version = current_max + 1
-
-    dna_dict = new_dna.model_dump()
-
-    # 3. Update Channel active DNA
-    channel.dna = dna_dict
-    channel.updated_at = datetime.now(UTC)
-
-    # 4. Insert immutable revision
-    rev = ChannelDNARevision(
-        id=uuid.uuid4(),
+    await ChannelDNARevisionService.create_revision(
+        session=session,
         channel_id=channel_id,
-        version=next_version,
-        snapshot=dna_dict,
-        change_reason=change_reason.strip(),
-        actor=actor,
-    )
-    session.add(rev)
-
-    await session.commit()
-    logger.info(
-        "Channel DNA updated",
-        channel_id=str(channel_id),
-        version=next_version,
+        new_dna=new_dna,
         change_reason=change_reason,
         actor=actor,
     )
-
     return new_dna
+
+
+async def get_channel_dna_revision(
+    session: AsyncSession, revision_id: UUID
+) -> ChannelDNARevisionResponse | None:
+    """Retrieve a specific pinned ChannelDNARevision by ID."""
+    rev = await ChannelDNARevisionService.get_revision(session, revision_id)
+    if not rev:
+        return None
+    return ChannelDNARevisionResponse.model_validate(rev)
 
 
 async def list_dna_revisions(

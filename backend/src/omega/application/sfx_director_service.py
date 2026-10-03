@@ -236,7 +236,13 @@ class SFXDirector:
     ) -> SFXPlan:
         tone = " ".join(channel_dna.brand_voice.tone).lower()
         styles = " ".join(channel_dna.audience.preferred_style).lower()
-        profile = f"{tone} {styles}"
+        audio_prefs = getattr(channel_dna, "audio_preferences", None)
+        extra = []
+        if audio_prefs and getattr(audio_prefs, "sfx_density", None) == "SPARSE":
+            extra.append("minimal calm")
+        elif audio_prefs and getattr(audio_prefs, "sfx_density", None) == "DYNAMIC":
+            extra.append("energetic")
+        profile = f"{tone} {styles} {' '.join(extra)}"
 
         calm = any(term in profile for term in ("calm", "analytical", "minimal", "factual", "serious"))
         energetic = any(term in profile for term in ("energetic", "dynamic", "bold"))

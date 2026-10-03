@@ -837,10 +837,22 @@ class ChannelStyleQAEvaluator:
             return findings
 
         # Extract preferences if available
-        prefs = channel_dna if isinstance(channel_dna, dict) else getattr(channel_dna, "visual_style_preferences", {})
-        if isinstance(prefs, dict):
-            max_density = prefs.get("max_visual_density")
-            if max_density == "LOW":
+        dna_dict = (
+            channel_dna.model_dump()
+            if isinstance(channel_dna, ChannelDNA)
+            else (channel_dna if isinstance(channel_dna, dict) else {})
+        )
+        prefs = (
+            getattr(channel_dna, "visual_style_preferences", {})
+            if not isinstance(channel_dna, dict)
+            else channel_dna
+        )
+        vis_prefs = dna_dict.get("visual_preferences") or {}
+        max_density = (
+            vis_prefs.get("visual_density")
+            or (prefs.get("max_visual_density") if isinstance(prefs, dict) else None)
+        )
+        if max_density == "LOW":
                 # Check if beats contain diagrams with many nodes
                 for beat in visual_beats:
                     if beat.visual_role in (VisualRole.DIAGRAM, VisualRole.DATA):

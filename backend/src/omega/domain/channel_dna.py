@@ -26,6 +26,23 @@ class KnowledgeLevel(enum.StrEnum):
     ALL_LEVELS = "ALL_LEVELS"
 
 
+class DesiredDepth(enum.StrEnum):
+    """Audience desired content depth."""
+
+    SURFACE = "SURFACE"
+    PRACTICAL = "PRACTICAL"
+    DEEP_DIVE = "DEEP_DIVE"
+    ACADEMIC = "ACADEMIC"
+
+
+class JargonSensitivity(enum.StrEnum):
+    """Audience sensitivity to technical terminology/jargon."""
+
+    LOW = "LOW"
+    MODERATE = "MODERATE"
+    HIGH = "HIGH"
+
+
 class AudienceProfile(BaseModel):
     """Defines target audience demographics, knowledge level, and intent."""
 
@@ -40,6 +57,24 @@ class AudienceProfile(BaseModel):
     preferred_content_length: str = Field(default="8-15 min", min_length=1, max_length=50)
     preferred_style: list[str] = Field(default_factory=lambda: ["CLEAR", "STRUCTURED"])
     geographic_focus: list[str] = Field(default_factory=lambda: ["US", "GLOBAL"])
+
+    # v2 Audience Dimensions
+    primary_audience: str = Field(
+        default="Technical practitioners, developers, and researchers",
+        min_length=1,
+        max_length=200,
+    )
+    expected_context: str = Field(
+        default="Foundational understanding of software engineering and computing principles",
+        min_length=1,
+        max_length=300,
+    )
+    desired_depth: DesiredDepth = DesiredDepth.DEEP_DIVE
+    preferred_complexity: str = Field(default="MODERATE_TO_HIGH", min_length=1, max_length=50)
+    sensitivity_to_jargon: JargonSensitivity = JargonSensitivity.LOW
+    content_expectations: list[str] = Field(
+        default_factory=lambda: ["Technical accuracy", "Grounded claims", "Structured reasoning"]
+    )
 
     @field_validator("interests")
     @classmethod
@@ -523,9 +558,466 @@ class Constraints(BaseModel):
     guidelines: list[str] = Field(default_factory=list)
 
 
-class ChannelDNA(BaseModel):
-    """Root Channel DNA model encapsulating full strategic and operational identity."""
+# ── P24-A Channel DNA v2 Models ──────────────────────────────────────────────
 
+
+class ChannelPositioning(BaseModel):
+    """Concise strategic positioning defining purpose, promise, and distinctive edge."""
+
+    model_config = ConfigDict(frozen=True)
+
+    channel_purpose: str = Field(
+        default="Provide rigorous, factual analysis on core technology developments",
+        min_length=1,
+        max_length=500,
+    )
+    content_promise: str = Field(
+        default="Clear, evidence-backed breakdowns without sensationalism",
+        min_length=1,
+        max_length=500,
+    )
+    distinctive_angle: str = Field(
+        default="First-principles architectural depth and empirical verification",
+        min_length=1,
+        max_length=500,
+    )
+    primary_subject_domain: str = Field(
+        default="AI & Computer Systems", min_length=1, max_length=150
+    )
+    secondary_subject_domains: tuple[str, ...] = (
+        "Distributed Systems",
+        "Software Engineering",
+    )
+    audience_benefit: str = Field(
+        default="Gain deep technical comprehension of complex engineering breakthroughs",
+        min_length=1,
+        max_length=500,
+    )
+
+
+class VoiceFormality(enum.StrEnum):
+    FORMAL = "FORMAL"
+    SEMI_FORMAL = "SEMI_FORMAL"
+    CONVERSATIONAL = "CONVERSATIONAL"
+    CASUAL = "CASUAL"
+
+
+class VoiceDepth(enum.StrEnum):
+    CONCISE = "CONCISE"
+    EXPLANATORY = "EXPLANATORY"
+    EXHAUSTIVE = "EXHAUSTIVE"
+
+
+class VoiceEnergy(enum.StrEnum):
+    CALM = "CALM"
+    MODERATE = "MODERATE"
+    DYNAMIC = "DYNAMIC"
+    HIGH_ENERGY = "HIGH_ENERGY"
+
+
+class VoiceExpressiveness(enum.StrEnum):
+    NEUTRAL = "NEUTRAL"
+    OBJECTIVE = "OBJECTIVE"
+    EXPRESSIVE = "EXPRESSIVE"
+    OPINIONATED = "OPINIONATED"
+
+
+class VoiceTechnicality(enum.StrEnum):
+    ACCESSIBLE = "ACCESSIBLE"
+    BALANCED = "BALANCED"
+    TECHNICAL = "TECHNICAL"
+    SPECIALIZED = "SPECIALIZED"
+
+
+class VoiceCharacter(enum.StrEnum):
+    SERIOUS = "SERIOUS"
+    ANALYTICAL = "ANALYTICAL"
+    ENGAGING = "ENGAGING"
+    PLAYFUL = "PLAYFUL"
+
+
+class EditorialVoice(BaseModel):
+    """Typed, inspectable editorial voice dimensions."""
+
+    model_config = ConfigDict(frozen=True)
+
+    formality: VoiceFormality = VoiceFormality.SEMI_FORMAL
+    depth: VoiceDepth = VoiceDepth.EXPLANATORY
+    energy: VoiceEnergy = VoiceEnergy.CALM
+    expressiveness: VoiceExpressiveness = VoiceExpressiveness.OBJECTIVE
+    technicality: VoiceTechnicality = VoiceTechnicality.TECHNICAL
+    tone_character: VoiceCharacter = VoiceCharacter.ANALYTICAL
+    style_notes: str | None = Field(
+        default="Maintain sober, evidence-focused tone; avoid colloquial hype.",
+        max_length=1000,
+    )
+
+
+class HardConstraints(BaseModel):
+    """Non-negotiable operational and editorial rules that downstream systems CANNOT violate."""
+
+    model_config = ConfigDict(frozen=True)
+
+    no_fabricated_claims: bool = True
+    no_misleading_clickbait: bool = True
+    no_unsupported_medical_claims: bool = True
+    no_profanity: bool = True
+    max_daily_videos: int = Field(default=1, ge=1, le=10)
+    content_safety_level: str = Field(default="STRICT", min_length=1, max_length=50)
+    prohibited_vocabulary: tuple[str, ...] = ()
+    required_disclaimers: tuple[str, ...] = ()
+    custom_rules: tuple[str, ...] = ()
+
+
+class SoftPreferences(BaseModel):
+    """Flexible guidelines that downstream systems can optimize within constraints."""
+
+    model_config = ConfigDict(frozen=True)
+
+    prefer_cinematic_visuals: bool = True
+    prefer_moderate_pacing: bool = True
+    prefer_concise_cta: bool = True
+    prefer_instrumental_music: bool = True
+    prefer_evidence_graphics: bool = True
+
+
+class NarrativeHookStyle(enum.StrEnum):
+    QUESTION = "QUESTION"
+    BOLD_STATEMENT = "BOLD_STATEMENT"
+    PARADOX = "PARADOX"
+    CASE_STUDY = "CASE_STUDY"
+    EVIDENCE_REVEAL = "EVIDENCE_REVEAL"
+
+
+class NarrativeContextDepth(enum.StrEnum):
+    MINIMAL = "MINIMAL"
+    MODERATE = "MODERATE"
+    COMPREHENSIVE = "COMPREHENSIVE"
+
+
+class NarrativePayoffStyle(enum.StrEnum):
+    CONCRETE_EVIDENCE = "CONCRETE_EVIDENCE"
+    SYNTHESIS = "SYNTHESIS"
+    ACTIONABLE_FRAMEWORK = "ACTIONABLE_FRAMEWORK"
+
+
+class NarrativeCTAStyle(enum.StrEnum):
+    CONCISE = "CONCISE"
+    COMMUNITY = "COMMUNITY"
+    ENGAGEMENT = "ENGAGEMENT"
+    MINIMAL = "MINIMAL"
+
+
+class NarrativePreferences(BaseModel):
+    """Channel preferences guiding P21 Narrative Architecture."""
+
+    model_config = ConfigDict(frozen=True)
+
+    preferred_strategies: tuple[str, ...] = (
+        "EVIDENCE_FIRST",
+        "PROBLEM_SOLUTION",
+        "HOOK_DISCOVERY",
+    )
+    hook_style: NarrativeHookStyle = NarrativeHookStyle.EVIDENCE_REVEAL
+    context_depth: NarrativeContextDepth = NarrativeContextDepth.MODERATE
+    preferred_pacing: str = "BALANCED"  # FAST, BALANCED, DELIBERATE
+    open_loop_tolerance: str = "BALANCED"  # STRICT, BALANCED, PERMISSIVE
+    payoff_style: NarrativePayoffStyle = NarrativePayoffStyle.CONCRETE_EVIDENCE
+    educational_depth: str = "PRACTICAL_DEPTH"
+    cta_style: NarrativeCTAStyle = NarrativeCTAStyle.CONCISE
+
+
+class VisualDensityPreference(enum.StrEnum):
+    LOW = "LOW"
+    MEDIUM = "MEDIUM"
+    HIGH = "HIGH"
+
+
+class CameraMotionIntensity(enum.StrEnum):
+    RESTRAINED = "RESTRAINED"
+    SMOOTH = "SMOOTH"
+    DYNAMIC = "DYNAMIC"
+
+
+class VisualPreferences(BaseModel):
+    """Channel preferences guiding P22 Visual Architecture."""
+
+    model_config = ConfigDict(frozen=True)
+
+    visual_density: VisualDensityPreference = VisualDensityPreference.MEDIUM
+    b_roll_usage: str = "TARGETED"
+    diagram_frequency: str = "MANDATORY_FOR_COMPLEX_CLAIMS"
+    evidence_emphasis: str = "HIGH"
+    camera_motion_intensity: CameraMotionIntensity = CameraMotionIntensity.RESTRAINED
+    transition_restraint: bool = True
+    typography_character: str = "CLEAN_MODERN"
+    graphic_complexity: str = "STRUCTURED"
+    comparison_treatment: str = "SIDE_BY_SIDE"
+
+
+class AudioPreferences(BaseModel):
+    """Channel preferences guiding P23 Audio Architecture."""
+
+    model_config = ConfigDict(frozen=True)
+
+    music_usage_tendency: str = "SUBTLE_BACKGROUND"  # ALWAYS, SUBTLE_BACKGROUND, KEY_BEATS_ONLY, NONE, MINIMAL
+    preferred_energy_min: float = Field(default=0.2, ge=0.0, le=1.0)
+    preferred_energy_max: float = Field(default=0.6, ge=0.0, le=1.0)
+    vocal_policy: str = "INSTRUMENTAL_ONLY"
+    sfx_density: str = "BALANCED"  # SPARSE, BALANCED, DYNAMIC
+    audio_restraint: bool = True
+    sonic_character: str = "CINEMATIC_AMBIENT"
+
+    @model_validator(mode="after")
+    def validate_energy_bounds(self) -> AudioPreferences:
+        if self.preferred_energy_min > self.preferred_energy_max:
+            raise ValueError("preferred_energy_min cannot be greater than preferred_energy_max")
+        return self
+
+
+class PackagingPreferences(BaseModel):
+    """Channel preferences preparing P24-C Packaging Generation seam."""
+
+    model_config = ConfigDict(frozen=True)
+
+    title_tone: str = "FACTUAL_COMPELLING"
+    title_length_tendency: str = "CONCISE"
+    thumbnail_density: str = "MINIMAL_TO_MODERATE"
+    thumbnail_text_policy: str = "MAX_3_WORDS"
+    description_style: str = "STRUCTURED_OUTLINE"
+    chapter_style: str = "SECTION_BASED"
+    metadata_voice: str = "OBJECTIVE"
+    clickbait_tolerance: str = "ZERO_TOLERANCE"
+    prohibited_packaging_patterns: tuple[str, ...] = (
+        "ALL_CAPS",
+        "RED_ARROWS_AND_CIRCLES",
+        "EMOTIONAL_CLICKBAIT",
+        "MISLEADING_PROMISES",
+    )
+
+
+class ResolvedPackagingSpec(BaseModel):
+    """Resolved packaging projection consumed by P24-C."""
+
+    model_config = ConfigDict(frozen=True)
+
+    title_tone: str
+    title_length_tendency: str
+    thumbnail_density: str
+    thumbnail_text_policy: str
+    description_style: str
+    chapter_style: str
+    metadata_voice: str
+    clickbait_tolerance: str
+    prohibited_patterns: tuple[str, ...]
+    hard_constraints_binding: bool = True
+
+
+class ContentPillar(BaseModel):
+    """Approved structured content pillar/theme."""
+
+    model_config = ConfigDict(frozen=True)
+
+    pillar_id: str = Field(min_length=1, max_length=50)
+    name: str = Field(min_length=1, max_length=100)
+    description: str = Field(min_length=1, max_length=500)
+    priority_weight: float = Field(default=1.0, ge=0.0, le=1.0)
+    allowed_subtopics: tuple[str, ...] = ()
+    exclusions: tuple[str, ...] = ()
+
+
+class AvoidPatterns(BaseModel):
+    """Explicit typed undesirable channel behaviors."""
+
+    model_config = ConfigDict(frozen=True)
+
+    sensationalized_claims: bool = True
+    repetitive_hooks: bool = True
+    excessive_memes: bool = True
+    overactive_camera_motion: bool = True
+    constant_sfx: bool = True
+    generic_cta: bool = True
+    overloaded_thumbnails: bool = True
+    prohibited_phrases: tuple[str, ...] = ()
+    custom_avoid_rules: tuple[str, ...] = ()
+
+
+class FormatOverride(BaseModel):
+    """Format-specific override for a target profile (e.g. SHORT, MEDIUM, LONG)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    pacing: str | None = None
+    context_depth: NarrativeContextDepth | None = None
+    visual_density: VisualDensityPreference | None = None
+    cta_style: NarrativeCTAStyle | None = None
+    music_tendency: str | None = None
+    sfx_density: str | None = None
+
+
+class ResolvedChannelDNA(BaseModel):
+    """Immutable resolved snapshot of Channel DNA for a specific format profile."""
+
+    model_config = ConfigDict(frozen=True)
+
+    format_profile: str
+    positioning: ChannelPositioning
+    audience: AudienceProfile
+    editorial_voice: EditorialVoice
+    hard_constraints: HardConstraints
+    soft_preferences: SoftPreferences
+    narrative_preferences: NarrativePreferences
+    visual_preferences: VisualPreferences
+    audio_preferences: AudioPreferences
+    packaging_preferences: PackagingPreferences
+    content_pillars: tuple[ContentPillar, ...]
+    avoid_patterns: AvoidPatterns
+    packaging_spec: ResolvedPackagingSpec
+    channel_dna_revision_id: UUID | None = None
+    version: int | None = None
+
+
+class ChannelDNAFindingCode(enum.StrEnum):
+    CONTRADICTORY_CONSTRAINTS = "CONTRADICTORY_CONSTRAINTS"
+    INVALID_RANGE_VALUE = "INVALID_RANGE_VALUE"
+    EMPTY_REQUIRED_POSITIONING = "EMPTY_REQUIRED_POSITIONING"
+    DUPLICATE_CONTENT_PILLAR_ID = "DUPLICATE_CONTENT_PILLAR_ID"
+    INVALID_PRIORITY_WEIGHT = "INVALID_PRIORITY_WEIGHT"
+    IMPOSSIBLE_FORMAT_OVERRIDE = "IMPOSSIBLE_FORMAT_OVERRIDE"
+    HARD_SOFT_POLICY_CONFLICT = "HARD_SOFT_POLICY_CONFLICT"
+    UNKNOWN_ENUM_VALUE = "UNKNOWN_ENUM_VALUE"
+
+
+class ChannelDNAFinding(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    code: ChannelDNAFindingCode
+    severity: Literal["INFO", "WARNING", "ERROR", "BLOCKER"]
+    field: str
+    explanation: str
+    recommended_remediation: str
+
+
+class ChannelDNAValidationResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    is_valid: bool
+    findings: tuple[ChannelDNAFinding, ...] = ()
+    error_count: int = 0
+    warning_count: int = 0
+
+
+class ChannelDNAValidator:
+    """Validates ChannelDNA integrity, constraints, ranges, and consistency."""
+
+    @classmethod
+    def validate(cls, dna: ChannelDNA) -> ChannelDNAValidationResult:
+        findings: list[ChannelDNAFinding] = []
+
+        # 1. Contradictory hard constraints / clickbait
+        if dna.hard_constraints.no_misleading_clickbait:
+            if dna.packaging_preferences.clickbait_tolerance in (
+                "HIGH_ENGAGEMENT",
+                "AGGRESSIVE_CLICKBAIT",
+                "CLICKBAIT_PERMITTED",
+            ):
+                findings.append(
+                    ChannelDNAFinding(
+                        code=ChannelDNAFindingCode.CONTRADICTORY_CONSTRAINTS,
+                        severity="ERROR",
+                        field="packaging_preferences.clickbait_tolerance",
+                        explanation="Packaging specifies aggressive clickbait tolerance while hard constraint forbids misleading clickbait.",
+                        recommended_remediation="Set clickbait_tolerance to ZERO_TOLERANCE or align with brand safety policy.",
+                    )
+                )
+
+        # 2. Audio energy range
+        if dna.audio_preferences.preferred_energy_min > dna.audio_preferences.preferred_energy_max:
+            findings.append(
+                ChannelDNAFinding(
+                    code=ChannelDNAFindingCode.INVALID_RANGE_VALUE,
+                    severity="ERROR",
+                    field="audio_preferences.preferred_energy_min",
+                    explanation=f"preferred_energy_min ({dna.audio_preferences.preferred_energy_min}) exceeds preferred_energy_max ({dna.audio_preferences.preferred_energy_max}).",
+                    recommended_remediation="Ensure minimum energy is less than or equal to maximum energy.",
+                )
+            )
+
+        # 3. Duplicate content pillar IDs and priority weights
+        seen_pillars: set[str] = set()
+        for pillar in dna.content_pillars_v2:
+            if pillar.pillar_id in seen_pillars:
+                findings.append(
+                    ChannelDNAFinding(
+                        code=ChannelDNAFindingCode.DUPLICATE_CONTENT_PILLAR_ID,
+                        severity="ERROR",
+                        field="content_pillars_v2",
+                        explanation=f"Duplicate content pillar ID '{pillar.pillar_id}' detected.",
+                        recommended_remediation="Assign unique pillar IDs across all content pillars.",
+                    )
+                )
+            seen_pillars.add(pillar.pillar_id)
+
+            if not (0.0 <= pillar.priority_weight <= 1.0):
+                findings.append(
+                    ChannelDNAFinding(
+                        code=ChannelDNAFindingCode.INVALID_PRIORITY_WEIGHT,
+                        severity="ERROR",
+                        field=f"content_pillars_v2.{pillar.pillar_id}.priority_weight",
+                        explanation=f"Priority weight {pillar.priority_weight} outside allowed range [0.0, 1.0].",
+                        recommended_remediation="Set priority weight between 0.0 and 1.0.",
+                    )
+                )
+
+        # 4. Positioning validation
+        pos = dna.positioning
+        if not pos.channel_purpose.strip():
+            findings.append(
+                ChannelDNAFinding(
+                    code=ChannelDNAFindingCode.EMPTY_REQUIRED_POSITIONING,
+                    severity="ERROR",
+                    field="positioning.channel_purpose",
+                    explanation="Channel purpose cannot be empty.",
+                    recommended_remediation="Provide a concise statement of channel purpose.",
+                )
+            )
+        if not pos.content_promise.strip():
+            findings.append(
+                ChannelDNAFinding(
+                    code=ChannelDNAFindingCode.EMPTY_REQUIRED_POSITIONING,
+                    severity="ERROR",
+                    field="positioning.content_promise",
+                    explanation="Content promise cannot be empty.",
+                    recommended_remediation="Define what content promise is delivered to the audience.",
+                )
+            )
+
+        # 5. Format overrides sanity
+        for fmt, override in dna.format_overrides.items():
+            if fmt.upper() not in ("SHORT", "MEDIUM", "LONG", "SHORT_FORM", "LONG_FORM"):
+                findings.append(
+                    ChannelDNAFinding(
+                        code=ChannelDNAFindingCode.IMPOSSIBLE_FORMAT_OVERRIDE,
+                        severity="WARNING",
+                        field=f"format_overrides.{fmt}",
+                        explanation=f"Unrecognized format profile override key '{fmt}'.",
+                        recommended_remediation="Use recognized format profile (SHORT, MEDIUM, LONG).",
+                    )
+                )
+
+        has_errors = any(f.severity in ("ERROR", "BLOCKER") for f in findings)
+        return ChannelDNAValidationResult(
+            is_valid=not has_errors,
+            findings=tuple(findings),
+            error_count=sum(1 for f in findings if f.severity in ("ERROR", "BLOCKER")),
+            warning_count=sum(1 for f in findings if f.severity == "WARNING"),
+        )
+
+
+class ChannelDNA(BaseModel):
+    """Root Channel DNA model encapsulating full strategic and operational identity (v2)."""
+
+    # Existing v1 models (retained for 100% backward compatibility)
     audience: AudienceProfile = Field(default_factory=AudienceProfile)
     brand_voice: BrandVoice = Field(default_factory=BrandVoice)
     visual_style: VisualStyle = Field(default_factory=VisualStyle)
@@ -535,7 +1027,117 @@ class ChannelDNA(BaseModel):
     goals_and_kpis: GoalsAndKPIs = Field(default_factory=GoalsAndKPIs)
     constraints: Constraints = Field(default_factory=Constraints)
 
+    # Channel DNA v2 core components
+    positioning: ChannelPositioning = Field(default_factory=ChannelPositioning)
+    editorial_voice: EditorialVoice = Field(default_factory=EditorialVoice)
+    hard_constraints: HardConstraints = Field(default_factory=HardConstraints)
+    soft_preferences: SoftPreferences = Field(default_factory=SoftPreferences)
+    narrative_preferences: NarrativePreferences = Field(default_factory=NarrativePreferences)
+    visual_preferences: VisualPreferences = Field(default_factory=VisualPreferences)
+    audio_preferences: AudioPreferences = Field(default_factory=AudioPreferences)
+    packaging_preferences: PackagingPreferences = Field(default_factory=PackagingPreferences)
+    content_pillars_v2: list[ContentPillar] = Field(default_factory=list)
+    avoid_patterns: AvoidPatterns = Field(default_factory=AvoidPatterns)
+    format_overrides: dict[str, FormatOverride] = Field(default_factory=dict)
+
     model_config = ConfigDict(extra="ignore")
+
+    def resolve_for_format(
+        self,
+        format_profile: str = "LONG",
+        contextual_overrides: dict | None = None,
+        *,
+        revision_id: UUID | None = None,
+        version: int | None = None,
+    ) -> ResolvedChannelDNA:
+        """Deterministically resolve effective ChannelDNA values for a format profile."""
+        norm_fmt = format_profile.strip().upper()
+        override = self.format_overrides.get(norm_fmt) or self.format_overrides.get(format_profile)
+
+        # 1. Hard constraints are strictly binding and immutable across format overrides
+        resolved_hard = self.hard_constraints
+
+        # 2. Narrative preferences
+        pacing = override.pacing if (override and override.pacing) else self.narrative_preferences.preferred_pacing
+        context_depth = override.context_depth if (override and override.context_depth) else self.narrative_preferences.context_depth
+        cta_style = override.cta_style if (override and override.cta_style) else self.narrative_preferences.cta_style
+
+        # For SHORT format: defaults to FAST pacing and MINIMAL context if not explicitly set
+        if norm_fmt in ("SHORT", "SHORT_FORM") and not (override and override.pacing):
+            pacing = "FAST"
+        if norm_fmt in ("SHORT", "SHORT_FORM") and not (override and override.context_depth):
+            context_depth = NarrativeContextDepth.MINIMAL
+
+        resolved_narrative = self.narrative_preferences.model_copy(update={
+            "preferred_pacing": pacing,
+            "context_depth": context_depth,
+            "cta_style": cta_style,
+        })
+
+        # 3. Visual preferences
+        vis_density = override.visual_density if (override and override.visual_density) else self.visual_preferences.visual_density
+        resolved_visual = self.visual_preferences.model_copy(update={
+            "visual_density": vis_density,
+        })
+
+        # 4. Audio preferences
+        music_tendency = override.music_tendency if (override and override.music_tendency) else self.audio_preferences.music_usage_tendency
+        sfx_density = override.sfx_density if (override and override.sfx_density) else self.audio_preferences.sfx_density
+        resolved_audio = self.audio_preferences.model_copy(update={
+            "music_usage_tendency": music_tendency,
+            "sfx_density": sfx_density,
+        })
+
+        # 5. Content pillars (if v2 list empty, derive from v1 content_strategy.content_pillars)
+        pillars: list[ContentPillar] = list(self.content_pillars_v2)
+        if not pillars and self.content_strategy.content_pillars:
+            pillars = [
+                ContentPillar(
+                    pillar_id=f"pillar-{i+1}",
+                    name=p,
+                    description=f"Strategic content pillar: {p}",
+                    priority_weight=1.0,
+                )
+                for i, p in enumerate(self.content_strategy.content_pillars)
+            ]
+
+        # 6. Packaging spec
+        pkg_spec = self.to_packaging_spec(format_profile=norm_fmt)
+
+        return ResolvedChannelDNA(
+            format_profile=norm_fmt,
+            positioning=self.positioning,
+            audience=self.audience,
+            editorial_voice=self.editorial_voice,
+            hard_constraints=resolved_hard,
+            soft_preferences=self.soft_preferences,
+            narrative_preferences=resolved_narrative,
+            visual_preferences=resolved_visual,
+            audio_preferences=resolved_audio,
+            packaging_preferences=self.packaging_preferences,
+            content_pillars=tuple(pillars),
+            avoid_patterns=self.avoid_patterns,
+            packaging_spec=pkg_spec,
+            channel_dna_revision_id=revision_id,
+            version=version,
+        )
+
+    def to_packaging_spec(self, format_profile: str = "LONG") -> ResolvedPackagingSpec:
+        """Derive resolved packaging specification for P24-C."""
+        pkg = self.packaging_preferences
+        clickbait = "ZERO_TOLERANCE" if self.hard_constraints.no_misleading_clickbait else pkg.clickbait_tolerance
+        return ResolvedPackagingSpec(
+            title_tone=pkg.title_tone,
+            title_length_tendency=pkg.title_length_tendency,
+            thumbnail_density=pkg.thumbnail_density,
+            thumbnail_text_policy=pkg.thumbnail_text_policy,
+            description_style=pkg.description_style,
+            chapter_style=pkg.chapter_style,
+            metadata_voice=pkg.metadata_voice,
+            clickbait_tolerance=clickbait,
+            prohibited_patterns=pkg.prohibited_packaging_patterns,
+            hard_constraints_binding=True,
+        )
 
     @classmethod
     def create_default(
@@ -544,9 +1146,14 @@ class ChannelDNA(BaseModel):
         language: str = "en",
         region: str = "US",
     ) -> ChannelDNA:
-        """Helper to construct a fully-populated default Channel DNA."""
+        """Helper to construct a fully-populated default Channel DNA with v2 structures."""
         return cls(
             audience=AudienceProfile(geographic_focus=[region]),
             content_strategy=ContentStrategy(niche=niche),
             publishing_preferences=PublishingPreferences(target_timezone="UTC"),
+            positioning=ChannelPositioning(
+                channel_purpose=f"Provide rigorous, factual analysis on {niche}",
+                content_promise=f"Clear, evidence-backed breakdowns of {niche} developments",
+                primary_subject_domain=niche,
+            ),
         )

@@ -52,6 +52,22 @@ class PacingProfileResolver:
             return PacingProfile.BALANCED
 
         dna_dict = channel_dna.model_dump() if isinstance(channel_dna, ChannelDNA) else dict(channel_dna)
+
+        # 1. Direct v2 Narrative Preferences check
+        narr_prefs = dna_dict.get("narrative_preferences") or {}
+        pref_pace = str(narr_prefs.get("preferred_pacing") or "").upper()
+        if pref_pace == "FAST":
+            return PacingProfile.FAST
+        if pref_pace == "DELIBERATE":
+            return PacingProfile.DELIBERATE
+
+        # 2. Direct v2 Editorial Voice check
+        ed_voice = dna_dict.get("editorial_voice") or {}
+        ed_energy = str(ed_voice.get("energy") or "").upper()
+        if ed_energy in ("HIGH_ENERGY", "DYNAMIC"):
+            return PacingProfile.FAST
+
+        # 3. Fallback to Brand Voice
         brand_voice = dna_dict.get("brand_voice", {})
         pace_str = str(brand_voice.get("pace", "")).upper()
         tone_str = str(brand_voice.get("tone", "")).upper()
@@ -62,6 +78,9 @@ class PacingProfileResolver:
             return PacingProfile.DELIBERATE
         if "ACADEMIC" in tone_str or "ANALYTICAL" in tone_str:
             return PacingProfile.DELIBERATE
+
+        if pref_pace == "BALANCED":
+            return PacingProfile.BALANCED
 
         return PacingProfile.BALANCED
 
