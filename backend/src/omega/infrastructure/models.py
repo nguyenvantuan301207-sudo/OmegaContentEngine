@@ -1465,6 +1465,12 @@ class ContentGenerationRequest(Base):
     production_requests: Mapped[list[ProductionRequest]] = relationship(
         "ProductionRequest", back_populates="content_request", cascade="all, delete-orphan"
     )
+    narrative_plans: Mapped[list[NarrativePlan]] = relationship(
+        "NarrativePlan",
+        back_populates="content_request",
+        cascade="all, delete-orphan",
+        order_by="NarrativePlan.version.desc()",
+    )
 
     def __repr__(self) -> str:
         return f"<ContentGenerationRequest id={self.id} channel_id={self.channel_id} status={self.status}>"
@@ -1675,6 +1681,20 @@ class ScriptVersion(Base):
     production_requests: Mapped[list[ProductionRequest]] = relationship(
         "ProductionRequest", back_populates="script_version", cascade="all, delete-orphan"
     )
+    narrative_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("narrative_plans.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    narrative_plan: Mapped[NarrativePlan | None] = relationship(
+        "NarrativePlan", back_populates="scripts"
+    )
+
+    @property
+    def narrative_plan_version(self) -> int | None:
+        """Expose referenced NarrativePlan version if linked."""
+        return self.narrative_plan.version if self.narrative_plan else None
 
     def __repr__(self) -> str:
         return f"<ScriptVersion id={self.id} request_id={self.content_request_id} v={self.version} current={self.is_current}>"
@@ -1820,6 +1840,222 @@ class ContentQAResult(Base):
 
     def __repr__(self) -> str:
         return f"<ContentQAResult id={self.id} script_version_id={self.script_version_id} status={self.status}>"
+
+
+# ── OMEGA-021 Narrative Plan Models ──
+
+
+class NarrativePlan(Base):
+    """NarrativePlan database model storing versioned, authoritative pre-script story structure."""
+
+    __tablename__ = "narrative_plans"
+    __table_args__ = (
+        UniqueConstraint("content_generation_request_id", "version", name="uq_narrative_plan_version"),
+        Index(
+            "uq_narrative_plan_single_current",
+            "content_generation_request_id",
+            unique=True,
+            postgresql_where=text("is_current = true"),
+        ),
+        CheckConstraint(
+            "status IN ('DRAFT', 'VALIDATED', 'APPROVED', 'REJECTED', 'SUPERSEDED')",
+            name="chk_narrative_plan_status",
+        ),
+        CheckConstraint(
+            "format_profile IN ('SHORT', 'MEDIUM', 'LONG')",
+            name="chk_narrative_plan_format_profile",
+        ),
+        CheckConstraint(
+            "target_duration_seconds > 0",
+            name="chk_narrative_plan_target_duration",
+        ),
+        CheckConstraint(
+            "estimated_duration_seconds >= 0",
+            name="chk_narrative_plan_estimated_duration",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    content_generation_request_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("content_generation_requests.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    topic_candidate_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("topic_candidates.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    research_brief_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_briefs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    channel_dna_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("channel_dna_revisions.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    supersedes_plan_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("narrative_plans.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="DRAFT", index=True)
+    format_profile: Mapped[str] = mapped_column(String(50), nullable=False, default="MEDIUM")
+    target_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    estimated_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    metadata_: Mapped[dict] = mapped_column("metadata", JSON, nullable=False, server_default="{}")
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    content_request: Mapped[ContentGenerationRequest] = relationship(
+        "ContentGenerationRequest", back_populates="narrative_plans"
+    )
+    sections: Mapped[list[NarrativeSection]] = relationship(
+        "NarrativeSection",
+        back_populates="narrative_plan",
+        cascade="all, delete-orphan",
+        order_by="NarrativeSection.section_order.asc()",
+    )
+    scripts: Mapped[list[ScriptVersion]] = relationship(
+        "ScriptVersion",
+        back_populates="narrative_plan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<NarrativePlan id={self.id} request_id={self.content_generation_request_id} v={self.version} current={self.is_current}>"
+
+
+class NarrativeSection(Base):
+    """NarrativeSection database model storing individual structured sections of a narrative plan."""
+
+    __tablename__ = "narrative_sections"
+    __table_args__ = (
+        UniqueConstraint("narrative_plan_id", "section_order", name="uq_narrative_section_order"),
+        Index(
+            "uq_narrative_section_promise_id",
+            "narrative_plan_id",
+            "promise_id",
+            unique=True,
+            postgresql_where=text("promise_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_narrative_sections_payoff_ref",
+            "narrative_plan_id",
+            "payoff_reference",
+            postgresql_where=text("payoff_reference IS NOT NULL"),
+        ),
+        CheckConstraint("section_order > 0", name="chk_narrative_section_order"),
+        CheckConstraint("target_duration_seconds > 0", name="chk_narrative_section_duration"),
+        CheckConstraint(
+            "role IN ('HOOK', 'PROMISE', 'CONTEXT', 'DEVELOPMENT', 'ESCALATION', 'PAYOFF', 'TAKEAWAY', 'CLOSING', 'CTA')",
+            name="chk_narrative_section_role",
+        ),
+        CheckConstraint(
+            "target_information_density IN ('LOW', 'MEDIUM', 'HIGH')",
+            name="chk_narrative_section_density",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    narrative_plan_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("narrative_plans.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    section_order: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String(50), nullable=False)
+    objective: Mapped[str] = mapped_column(String(500), nullable=False)
+    key_information: Mapped[list] = mapped_column(JSON, nullable=False, server_default="[]")
+    target_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_information_density: Mapped[str] = mapped_column(String(20), nullable=False, default="MEDIUM")
+    open_loop_intent: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    promise_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    payoff_reference: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    narrative_plan: Mapped[NarrativePlan] = relationship("NarrativePlan", back_populates="sections")
+    grounding_citations: Mapped[list[NarrativeGroundingCitation]] = relationship(
+        "NarrativeGroundingCitation",
+        back_populates="section",
+        cascade="all, delete-orphan",
+    )
+
+    def __repr__(self) -> str:
+        return f"<NarrativeSection id={self.id} plan_id={self.narrative_plan_id} order={self.section_order} role={self.role}>"
+
+
+class NarrativeGroundingCitation(Base):
+    """NarrativeGroundingCitation database model linking narrative sections to research authorities."""
+
+    __tablename__ = "narrative_grounding_citations"
+    __table_args__ = (
+        CheckConstraint(
+            "grounding_type IN ('FACTUAL', 'BACKGROUND', 'DATA_POINT', 'QUOTE')",
+            name="chk_narrative_grounding_type",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    narrative_section_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("narrative_sections.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    research_brief_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_briefs.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    claim_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_claims.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("claim_evidence.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    source_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("research_sources.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    grounding_type: Mapped[str] = mapped_column(String(50), nullable=False, default="FACTUAL")
+    description: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    section: Mapped[NarrativeSection] = relationship("NarrativeSection", back_populates="grounding_citations")
+
+    def __repr__(self) -> str:
+        return f"<NarrativeGroundingCitation id={self.id} section_id={self.narrative_section_id} brief_id={self.research_brief_id}>"
 
 
 # ── OMEGA-007 Production Engine Models ──
