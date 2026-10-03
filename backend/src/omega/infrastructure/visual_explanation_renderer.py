@@ -300,41 +300,271 @@ class VisualExplanationRenderer:
                 timeout=45,
                 check=False,
             )
-            if result.returncode == 0 and png_path.is_file() and png_path.stat().st_size > 0:
+            if result.returncode == 0 and png_path.is_file() and png_path.stat().st_size > 1000:
                 converted = True
         except (OSError, subprocess.TimeoutExpired):
             pass
 
         if not converted:
-            png_bytes = VisualExplanationRenderer._generate_1080p_png(svg_path)
+            svg_text = svg_path.read_text(encoding="utf-8")
+            png_bytes = VisualExplanationRenderer._rasterize_svg_content(svg_text)
             png_path.write_bytes(png_bytes)
 
     @staticmethod
-    def _generate_1080p_png(svg_path: Path) -> bytes:
+    def _rasterize_svg_content(svg_text: str, width: int = 1920, height: int = 1080) -> bytes:
+        """Deterministically rasterizes SVG diagram and chart elements into genuine physical pixels."""
         import binascii
         import re
         import struct
+        import xml.etree.ElementTree as ET
         import zlib
+        import numpy as np
 
-        r, g, b = 15, 23, 42
+        font_8x8 = {
+            ' ': [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            '!': [0x18, 0x18, 0x18, 0x18, 0x18, 0x00, 0x18, 0x00],
+            '"': [0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00],
+            '#': [0x6c, 0x6c, 0xfe, 0x6c, 0xfe, 0x6c, 0x6c, 0x00],
+            '$': [0x18, 0x7e, 0x18, 0x3e, 0x60, 0x3c, 0x18, 0x00],
+            '%': [0x00, 0x63, 0x66, 0x0c, 0x18, 0x33, 0x63, 0x00],
+            '&': [0x38, 0x6c, 0x38, 0x76, 0xdc, 0xcc, 0x76, 0x00],
+            "'": [0x18, 0x18, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00],
+            '(': [0x0c, 0x18, 0x30, 0x30, 0x30, 0x18, 0x0c, 0x00],
+            ')': [0x30, 0x18, 0x0c, 0x0c, 0x0c, 0x18, 0x30, 0x00],
+            '*': [0x00, 0x66, 0x3c, 0xff, 0x3c, 0x66, 0x00, 0x00],
+            '+': [0x00, 0x18, 0x18, 0x7e, 0x18, 0x18, 0x00, 0x00],
+            ',': [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x30],
+            '-': [0x00, 0x00, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00],
+            '.': [0x00, 0x00, 0x00, 0x00, 0x00, 0x18, 0x18, 0x00],
+            '/': [0x06, 0x0c, 0x18, 0x30, 0x60, 0xc0, 0x80, 0x00],
+            '0': [0x3c, 0x66, 0x6e, 0x76, 0x66, 0x66, 0x3c, 0x00],
+            '1': [0x18, 0x38, 0x18, 0x18, 0x18, 0x18, 0x7e, 0x00],
+            '2': [0x3c, 0x66, 0x06, 0x0c, 0x18, 0x30, 0x7e, 0x00],
+            '3': [0x3c, 0x66, 0x06, 0x1c, 0x06, 0x66, 0x3c, 0x00],
+            '4': [0x0c, 0x1c, 0x3c, 0x6c, 0xfe, 0x0c, 0x0c, 0x00],
+            '5': [0x7e, 0x60, 0x7c, 0x06, 0x06, 0x66, 0x3c, 0x00],
+            '6': [0x3c, 0x66, 0x60, 0x7c, 0x66, 0x66, 0x3c, 0x00],
+            '7': [0x7e, 0x66, 0x0c, 0x18, 0x18, 0x18, 0x18, 0x00],
+            '8': [0x3c, 0x66, 0x66, 0x3c, 0x66, 0x66, 0x3c, 0x00],
+            '9': [0x3c, 0x66, 0x66, 0x3e, 0x06, 0x66, 0x3c, 0x00],
+            ':': [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x00, 0x00],
+            ';': [0x00, 0x18, 0x18, 0x00, 0x18, 0x18, 0x30, 0x00],
+            '<': [0x0c, 0x18, 0x30, 0x60, 0x30, 0x18, 0x0c, 0x00],
+            '=': [0x00, 0x7e, 0x00, 0x7e, 0x00, 0x00, 0x00, 0x00],
+            '>': [0x30, 0x18, 0x0c, 0x06, 0x0c, 0x18, 0x30, 0x00],
+            '?': [0x3c, 0x66, 0x06, 0x0c, 0x18, 0x00, 0x18, 0x00],
+            '@': [0x3c, 0x66, 0x6e, 0x6a, 0x6e, 0x60, 0x3c, 0x00],
+            'A': [0x3c, 0x66, 0x66, 0x7e, 0x66, 0x66, 0x66, 0x00],
+            'B': [0x7c, 0x66, 0x66, 0x7c, 0x66, 0x66, 0x7c, 0x00],
+            'C': [0x3c, 0x66, 0x60, 0x60, 0x60, 0x66, 0x3c, 0x00],
+            'D': [0x78, 0x6c, 0x66, 0x66, 0x66, 0x6c, 0x78, 0x00],
+            'E': [0x7e, 0x60, 0x60, 0x7c, 0x60, 0x60, 0x7e, 0x00],
+            'F': [0x7e, 0x60, 0x60, 0x7c, 0x60, 0x60, 0x60, 0x00],
+            'G': [0x3c, 0x66, 0x60, 0x6e, 0x66, 0x66, 0x3a, 0x00],
+            'H': [0x66, 0x66, 0x66, 0x7e, 0x66, 0x66, 0x66, 0x00],
+            'I': [0x3c, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00],
+            'J': [0x0e, 0x06, 0x06, 0x06, 0x06, 0x66, 0x3c, 0x00],
+            'K': [0x66, 0x6c, 0x78, 0x70, 0x78, 0x6c, 0x66, 0x00],
+            'L': [0x60, 0x60, 0x60, 0x60, 0x60, 0x60, 0x7e, 0x00],
+            'M': [0x63, 0x77, 0x7f, 0x6b, 0x63, 0x63, 0x63, 0x00],
+            'N': [0x66, 0x76, 0x7e, 0x7e, 0x6e, 0x66, 0x66, 0x00],
+            'O': [0x3c, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3c, 0x00],
+            'P': [0x7c, 0x66, 0x66, 0x7c, 0x60, 0x60, 0x60, 0x00],
+            'Q': [0x3c, 0x66, 0x66, 0x66, 0x6a, 0x6c, 0x36, 0x00],
+            'R': [0x7c, 0x66, 0x66, 0x7c, 0x6c, 0x66, 0x66, 0x00],
+            'S': [0x3c, 0x66, 0x60, 0x3c, 0x06, 0x66, 0x3c, 0x00],
+            'T': [0x7e, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00],
+            'U': [0x66, 0x66, 0x66, 0x66, 0x66, 0x66, 0x3c, 0x00],
+            'V': [0x66, 0x66, 0x66, 0x66, 0x66, 0x3c, 0x18, 0x00],
+            'W': [0x63, 0x63, 0x63, 0x6b, 0x7f, 0x77, 0x63, 0x00],
+            'X': [0x66, 0x66, 0x3c, 0x18, 0x3c, 0x66, 0x66, 0x00],
+            'Y': [0x66, 0x66, 0x66, 0x3c, 0x18, 0x18, 0x18, 0x00],
+            'Z': [0x7e, 0x06, 0x0c, 0x18, 0x30, 0x60, 0x7e, 0x00],
+            '[': [0x3c, 0x30, 0x30, 0x30, 0x30, 0x30, 0x3c, 0x00],
+            '\\': [0x60, 0x30, 0x18, 0x0c, 0x06, 0x03, 0x01, 0x00],
+            ']': [0x3c, 0x0c, 0x0c, 0x0c, 0x0c, 0x0c, 0x3c, 0x00],
+            '^': [0x18, 0x3c, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00],
+            '_': [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff],
+            '`': [0x30, 0x18, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00],
+            'a': [0x00, 0x00, 0x3c, 0x06, 0x3e, 0x66, 0x3e, 0x00],
+            'b': [0x60, 0x60, 0x7c, 0x66, 0x66, 0x66, 0x7c, 0x00],
+            'c': [0x00, 0x00, 0x3c, 0x66, 0x60, 0x66, 0x3c, 0x00],
+            'd': [0x06, 0x06, 0x3e, 0x66, 0x66, 0x66, 0x3e, 0x00],
+            'e': [0x00, 0x00, 0x3c, 0x66, 0x7e, 0x60, 0x3c, 0x00],
+            'f': [0x1c, 0x30, 0x30, 0x7c, 0x30, 0x30, 0x30, 0x00],
+            'g': [0x00, 0x00, 0x3e, 0x66, 0x66, 0x3e, 0x06, 0x3c],
+            'h': [0x60, 0x60, 0x7c, 0x66, 0x66, 0x66, 0x66, 0x00],
+            'i': [0x18, 0x00, 0x38, 0x18, 0x18, 0x18, 0x3c, 0x00],
+            'j': [0x0c, 0x00, 0x1c, 0x0c, 0x0c, 0x0c, 0x6c, 0x38],
+            'k': [0x60, 0x60, 0x66, 0x6c, 0x78, 0x6c, 0x66, 0x00],
+            'l': [0x38, 0x18, 0x18, 0x18, 0x18, 0x18, 0x3c, 0x00],
+            'm': [0x00, 0x00, 0x76, 0x7f, 0x6b, 0x6b, 0x6b, 0x00],
+            'n': [0x00, 0x00, 0x7c, 0x66, 0x66, 0x66, 0x66, 0x00],
+            'o': [0x00, 0x00, 0x3c, 0x66, 0x66, 0x66, 0x3c, 0x00],
+            'p': [0x00, 0x00, 0x7c, 0x66, 0x66, 0x7c, 0x60, 0x60],
+            'q': [0x00, 0x00, 0x3e, 0x66, 0x66, 0x3e, 0x06, 0x06],
+            'r': [0x00, 0x00, 0x7c, 0x66, 0x60, 0x60, 0x60, 0x00],
+            's': [0x00, 0x00, 0x3e, 0x60, 0x3c, 0x06, 0x7c, 0x00],
+            't': [0x18, 0x18, 0x7e, 0x18, 0x18, 0x18, 0x0e, 0x00],
+            'u': [0x00, 0x00, 0x66, 0x66, 0x66, 0x66, 0x3e, 0x00],
+            'v': [0x00, 0x00, 0x66, 0x66, 0x66, 0x3c, 0x18, 0x00],
+            'w': [0x00, 0x00, 0x63, 0x6b, 0x7f, 0x77, 0x63, 0x00],
+            'x': [0x00, 0x00, 0x66, 0x3c, 0x18, 0x3c, 0x66, 0x00],
+            'y': [0x00, 0x00, 0x66, 0x66, 0x66, 0x3e, 0x06, 0x3c],
+            'z': [0x00, 0x00, 0x7e, 0x0c, 0x18, 0x30, 0x7e, 0x00],
+            '{': [0x0e, 0x18, 0x18, 0x70, 0x18, 0x18, 0x0e, 0x00],
+            '|': [0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x00],
+            '}': [0x70, 0x18, 0x18, 0x0e, 0x18, 0x18, 0x70, 0x00],
+            '~': [0x76, 0xdc, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],
+            '“': [0x66, 0x66, 0x24, 0x00, 0x00, 0x00, 0x00, 0x00],
+            '”': [0x24, 0x66, 0x66, 0x00, 0x00, 0x00, 0x00, 0x00],
+            '—': [0x00, 0x00, 0x00, 0xff, 0x00, 0x00, 0x00, 0x00],
+        }
+
+        def parse_color(c: str) -> tuple[int, int, int]:
+            if not c or c == "none":
+                return (0, 0, 0)
+            c = c.strip()
+            if c.startswith("#"):
+                h = c[1:]
+                if len(h) == 3:
+                    h = "".join(x + x for x in h)
+                if len(h) == 6:
+                    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+            named = {
+                "white": (255, 255, 255),
+                "black": (0, 0, 0),
+                "red": (255, 0, 0),
+                "green": (0, 255, 0),
+                "blue": (0, 0, 255),
+            }
+            return named.get(c.lower(), (255, 255, 255))
+
+        img = np.zeros((height, width, 3), dtype=np.uint8)
+
+        def draw_rect(x: float, y: float, w: float, h: float, color: tuple[int, int, int], opacity: float = 1.0):
+            x1 = max(0, min(width, int(round(x))))
+            x2 = max(0, min(width, int(round(x + w))))
+            y1 = max(0, min(height, int(round(y))))
+            y2 = max(0, min(height, int(round(y + h))))
+            if x1 >= x2 or y1 >= y2:
+                return
+            if opacity >= 0.999:
+                img[y1:y2, x1:x2] = color
+            else:
+                curr = img[y1:y2, x1:x2].astype(np.float32)
+                c = np.array(color, dtype=np.float32)
+                blended = (curr * (1.0 - opacity) + c * opacity).astype(np.uint8)
+                img[y1:y2, x1:x2] = blended
+
+        def draw_line(x1: float, y1: float, x2: float, y2: float, color: tuple[int, int, int], stroke_w: int = 1):
+            dx = x2 - x1
+            dy = y2 - y1
+            steps = int(max(abs(dx), abs(dy), 1))
+            hw = stroke_w / 2.0
+            for i in range(steps + 1):
+                t = i / max(1, steps)
+                px = x1 + t * dx
+                py = y1 + t * dy
+                ix1 = max(0, min(width, int(px - hw)))
+                ix2 = max(0, min(width, int(px + hw + 0.5)))
+                iy1 = max(0, min(height, int(py - hw)))
+                iy2 = max(0, min(height, int(py + hw + 0.5)))
+                if ix1 < ix2 and iy1 < iy2:
+                    img[iy1:iy2, ix1:ix2] = color
+
+        def draw_circle(cx: float, cy: float, r: float, color: tuple[int, int, int]):
+            x1 = max(0, min(width, int(cx - r)))
+            x2 = max(0, min(width, int(cx + r + 1)))
+            y1 = max(0, min(height, int(cy - r)))
+            y2 = max(0, min(height, int(cy + r + 1)))
+            if x1 >= x2 or y1 >= y2:
+                return
+            Y, X = np.ogrid[y1:y2, x1:x2]
+            mask = (X - cx) ** 2 + (Y - cy) ** 2 <= r ** 2
+            img[y1:y2, x1:x2][mask] = color
+
+        def draw_text(text: str, x: float, y: float, font_size: float, color: tuple[int, int, int], anchor: str, baseline: str):
+            scale = max(1, int(round(font_size / 8.0)))
+            total_w = len(text) * 8 * scale
+            total_h = 8 * scale
+            start_x = int(round(x - total_w / 2.0)) if anchor == "middle" else (int(round(x - total_w)) if anchor == "end" else int(round(x)))
+            start_y = int(round(y - total_h / 2.0)) if baseline == "middle" else int(round(y - total_h))
+            for idx, ch in enumerate(text):
+                bitmap = font_8x8.get(ch, font_8x8.get('?'))
+                ch_x = start_x + idx * 8 * scale
+                for r_idx in range(8):
+                    bits = bitmap[r_idx]
+                    for c_idx in range(8):
+                        if (bits >> (7 - c_idx)) & 1:
+                            py1 = max(0, min(height, start_y + r_idx * scale))
+                            py2 = max(0, min(height, start_y + (r_idx + 1) * scale))
+                            px1 = max(0, min(width, ch_x + c_idx * scale))
+                            px2 = max(0, min(width, ch_x + (c_idx + 1) * scale))
+                            if px1 < px2 and py1 < py2:
+                                img[py1:py2, px1:px2] = color
+
+        cleaned_svg = re.sub(r'\sxmlns="[^"]+"', '', svg_text, count=1)
         try:
-            svg_text = svg_path.read_text(encoding="utf-8")
-            match = re.search(r'fill="(#[0-9A-Fa-f]{6})"', svg_text)
-            if match:
-                hex_color = match.group(1)
-                r = int(hex_color[1:3], 16)
-                g = int(hex_color[3:5], 16)
-                b = int(hex_color[5:7], 16)
+            root = ET.fromstring(cleaned_svg)
         except Exception:
-            pass
+            root = ET.Element("svg")
 
-        width, height = 1920, 1080
-        raw_row = bytes([0]) + bytes([r, g, b]) * width
-        compressed = zlib.compress(raw_row * height, level=6)
+        for elem in root.iter():
+            tag = elem.tag.split('}')[-1]
+            if tag == "rect":
+                rx = float(elem.attrib.get("x", 0))
+                ry = float(elem.attrib.get("y", 0))
+                rw = float(elem.attrib.get("width", 0))
+                rh = float(elem.attrib.get("height", 0))
+                fill = parse_color(elem.attrib.get("fill", "#000000"))
+                opacity = float(elem.attrib.get("opacity", 1.0))
+                draw_rect(rx, ry, rw, rh, fill, opacity)
+            elif tag == "line":
+                x1 = float(elem.attrib.get("x1", 0))
+                y1 = float(elem.attrib.get("y1", 0))
+                x2 = float(elem.attrib.get("x2", 0))
+                y2 = float(elem.attrib.get("y2", 0))
+                stroke = parse_color(elem.attrib.get("stroke", "#ffffff"))
+                stroke_w = int(round(float(elem.attrib.get("stroke-width", 1))))
+                draw_line(x1, y1, x2, y2, stroke, max(1, stroke_w))
+            elif tag == "polyline":
+                pts_str = elem.attrib.get("points", "")
+                stroke = parse_color(elem.attrib.get("stroke", "#ffffff"))
+                stroke_w = int(round(float(elem.attrib.get("stroke-width", 1))))
+                pts: list[tuple[float, float]] = []
+                for pair in pts_str.strip().split():
+                    if "," in pair:
+                        px, py = pair.split(",", 1)
+                        pts.append((float(px), float(py)))
+                for i in range(len(pts) - 1):
+                    draw_line(pts[i][0], pts[i][1], pts[i+1][0], pts[i+1][1], stroke, max(1, stroke_w))
+            elif tag == "circle":
+                cx = float(elem.attrib.get("cx", 0))
+                cy = float(elem.attrib.get("cy", 0))
+                r = float(elem.attrib.get("r", 0))
+                fill = parse_color(elem.attrib.get("fill", "#ffffff"))
+                draw_circle(cx, cy, r, fill)
+            elif tag == "text":
+                text_content = (elem.text or "").strip()
+                if text_content:
+                    tx = float(elem.attrib.get("x", 0))
+                    ty = float(elem.attrib.get("y", 0))
+                    fill = parse_color(elem.attrib.get("fill", "#ffffff"))
+                    font_size = float(elem.attrib.get("font-size", 24))
+                    anchor = elem.attrib.get("text-anchor", "start")
+                    baseline = elem.attrib.get("dominant-baseline", "alphabetic")
+                    draw_text(text_content, tx, ty, font_size, fill, anchor, baseline)
 
-        def chunk(tag: bytes, data: bytes) -> bytes:
-            crc = binascii.crc32(tag + data) & 0xFFFFFFFF
-            return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+        raw_rows = bytearray()
+        for row in range(height):
+            raw_rows.append(0)
+            raw_rows.extend(img[row].tobytes())
+        compressed = zlib.compress(bytes(raw_rows), level=6)
+
+        def chunk(tag_name: bytes, data: bytes) -> bytes:
+            crc = binascii.crc32(tag_name + data) & 0xFFFFFFFF
+            return struct.pack(">I", len(data)) + tag_name + data + struct.pack(">I", crc)
 
         ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
         return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", compressed) + chunk(b"IEND", b"")

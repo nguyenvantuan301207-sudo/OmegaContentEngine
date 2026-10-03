@@ -570,3 +570,123 @@ def test_canonical_pipeline_integration_beat_to_renderer_contract(tmp_path: Path
     assert unit.duration_ms == 4000
     assert unit.direction_view.scene_index == 1
 
+
+def _decode_png_pixels(png_bytes: bytes, width: int = 1920, height: int = 1080) -> list[bytes]:
+    import struct
+    import zlib
+    pos = 8
+    idat_data = bytearray()
+    while pos < len(png_bytes):
+        length = struct.unpack(">I", png_bytes[pos:pos + 4])[0]
+        tag = png_bytes[pos + 4:pos + 8]
+        if tag == b"IDAT":
+            idat_data.extend(png_bytes[pos + 8:pos + 8 + length])
+        pos += 12 + length
+    decompressed = zlib.decompress(bytes(idat_data))
+    stride = 1 + width * 3
+    return [decompressed[y * stride + 1: (y + 1) * stride] for y in range(height)]
+
+
+def _get_pixel(rows: list[bytes], x: int, y: int) -> tuple[int, int, int]:
+    offset = x * 3
+    return (rows[y][offset], rows[y][offset + 1], rows[y][offset + 2])
+
+
+def test_p22c_raster_content_and_layout(tmp_path: Path):
+    """Verifies that materialized PNG contains actual foreground shapes, text, and layout regions."""
+    renderer = VisualExplanationRenderer()
+
+    # 1. Diagram Plan
+    diag_plan = VisualExplanationPlanner.plan(
+        beat(VisualRole.DIAGRAM, text="Input causes processing then storage."),
+        evidence=[evidence(statement="Input causes processing then storage.")],
+    )
+    art_diag = renderer.render(diag_plan, output_dir=tmp_path / "diag")
+    assert art_diag.png_path.is_file()
+    diag_png = art_diag.png_path.read_bytes()
+    diag_rows = _decode_png_pixels(diag_png)
+
+    # Background color at corner
+    bg_pixel = _get_pixel(diag_rows, 10, 10)
+
+    # Verify PNG differs from blank frame (multiple foreground regions/pixels exist)
+    diag_non_bg = sum(
+        1 for y in range(0, 1080, 5) for x in range(0, 1920, 5)
+        if _get_pixel(diag_rows, x, y) != bg_pixel
+    )
+    assert diag_non_bg > 500, "Diagram PNG must contain substantial non-background foreground pixels"
+
+    # Layout correspondence: diagram layout boxes should have node color at center
+    layout = DiagramLayoutEngine.layout(diag_plan.diagram_spec)
+    for box in layout.boxes:
+        center_x = int(box.x + box.width / 2)
+        center_y = int(box.y + box.height / 2)
+        node_pixel = _get_pixel(diag_rows, center_x, center_y)
+        # Center of node is either text or node box fill, neither of which is background
+        assert node_pixel != bg_pixel, f"Diagram node at ({center_x}, {center_y}) must not be background"
+
+    # 2. Bar Chart Plan
+    e1, e2 = evidence(), evidence(CLAIM_B, EVIDENCE_B, SOURCE_B, statement="The second is 48 percent.")
+    chart_plan = VisualExplanationPlanner.plan(
+        beat(VisualRole.COMPARE),
+        data_points=[point("A", 72), point("B", 48, claim_id=CLAIM_B, evidence_id=EVIDENCE_B, source_id=SOURCE_B)],
+        evidence=[e1, e2],
+    )
+    art_chart = renderer.render(chart_plan, output_dir=tmp_path / "chart")
+    assert art_chart.png_path.is_file()
+    chart_png = art_chart.png_path.read_bytes()
+    chart_rows = _decode_png_pixels(chart_png)
+
+    chart_non_bg = sum(
+        1 for y in range(0, 1080, 5) for x in range(0, 1920, 5)
+        if _get_pixel(chart_rows, x, y) != bg_pixel
+    )
+    assert chart_non_bg > 500, "Chart PNG must contain substantial non-background foreground pixels"
+
+    # Layout correspondence: bar area must have accent color
+    # Left axis is at x=220, top=250, bottom at y=860. Bar 0 is at x in [355, 835], y in [320, 860]
+    bar_sample_pixel = _get_pixel(chart_rows, 500, 500)
+    assert bar_sample_pixel != bg_pixel, "Bar area at (500, 500) must be drawn with foreground/bar fill"
+
+
+def test_p22c_raster_determinism_and_dataset_sensitivity(tmp_path: Path):
+    """Verifies determinism (identical input -> identical hash) and sensitivity (different input -> different hash)."""
+    import hashlib
+    renderer = VisualExplanationRenderer()
+
+    # Plan 1 (A=72, B=48)
+    e1, e2 = evidence(), evidence(CLAIM_B, EVIDENCE_B, SOURCE_B, statement="The second is 48 percent.")
+    plan_1a = VisualExplanationPlanner.plan(
+        beat(VisualRole.COMPARE),
+        data_points=[point("A", 72), point("B", 48, claim_id=CLAIM_B, evidence_id=EVIDENCE_B, source_id=SOURCE_B)],
+        evidence=[e1, e2],
+    )
+    plan_1b = VisualExplanationPlanner.plan(
+        beat(VisualRole.COMPARE),
+        data_points=[point("A", 72), point("B", 48, claim_id=CLAIM_B, evidence_id=EVIDENCE_B, source_id=SOURCE_B)],
+        evidence=[e1, e2],
+    )
+
+    # Plan 2 (A=15, B=95) with different values
+    e2_alt = evidence(CLAIM_B, EVIDENCE_B, SOURCE_B, statement="The second is 95 percent.")
+    plan_2 = VisualExplanationPlanner.plan(
+        beat(VisualRole.COMPARE),
+        data_points=[point("A", 15), point("B", 95, claim_id=CLAIM_B, evidence_id=EVIDENCE_B, source_id=SOURCE_B)],
+        evidence=[e1, e2_alt],
+    )
+
+    art_1a = renderer.render(plan_1a, output_dir=tmp_path / "1a")
+    art_1b = renderer.render(plan_1b, output_dir=tmp_path / "1b")
+    art_2 = renderer.render(plan_2, output_dir=tmp_path / "2")
+
+    hash_1a = hashlib.sha256(art_1a.png_path.read_bytes()).hexdigest()
+    hash_1b = hashlib.sha256(art_1b.png_path.read_bytes()).hexdigest()
+    hash_2 = hashlib.sha256(art_2.png_path.read_bytes()).hexdigest()
+
+    # P22C_RASTER_DETERMINISM_TEST = PASS
+    assert hash_1a == hash_1b, "Deterministic identical input must produce identical PNG hash"
+
+    # P22C_RASTER_CONTENT_TEST = PASS (different data produces different physical image hash)
+    assert hash_1a != hash_2, "Two different source datasets must produce different PNG content hashes"
+
+
