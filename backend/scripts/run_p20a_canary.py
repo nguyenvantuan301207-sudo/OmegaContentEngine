@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 # Setup test DB URL
-DB_URL = "postgresql+asyncpg://omega:omega_dev@localhost:21432/omega_test_p20a"
+DB_URL = os.environ.get("TEST_DATABASE_URL", "postgresql+asyncpg://omega:nonprod_synthetic_dev_placeholder_password@localhost:21432/omega_test_p20a")
 engine = create_async_engine(DB_URL, echo=False)
 AsyncSessionLocal = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 

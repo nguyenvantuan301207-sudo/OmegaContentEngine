@@ -218,7 +218,7 @@ async def test_outbox_relay_crash_recovery(db_session: AsyncSession) -> None:
     # 3. Next relay cycle runs recover_stale_claims against test database
     from sqlalchemy import create_engine
     from sqlalchemy.pool import NullPool
-    sync_url = os.environ.get("DATABASE_URL_SYNC", "postgresql+psycopg2://omega:omega_dev@localhost:5432/omega_test")
+    sync_url = os.environ.get("DATABASE_URL_SYNC", "postgresql+psycopg2://omega:nonprod_synthetic_dev_placeholder_password@localhost:5432/omega_test")
     test_sync_engine = create_engine(sync_url, poolclass=NullPool)
     with Session(test_sync_engine) as sync_session:
         recovered = DurableDispatchService.recover_stale_claims(

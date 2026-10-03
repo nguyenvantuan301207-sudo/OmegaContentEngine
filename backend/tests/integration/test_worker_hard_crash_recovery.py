@@ -182,7 +182,7 @@ async def test_physical_hard_crash_and_orphan_sweep_recovery(db_session: AsyncSe
     # The subprocess will run a pulse script that directly renews the lease every second
     db_url_sync = os.environ.get(
         "DATABASE_URL_SYNC",
-        "postgresql+psycopg2://omega:omega_dev@localhost:5432/omega_test",
+        "postgresql+psycopg2://omega:nonprod_synthetic_dev_placeholder_password@localhost:5432/omega_test",
     )
     worker_script = f"""
 import sys, time, uuid

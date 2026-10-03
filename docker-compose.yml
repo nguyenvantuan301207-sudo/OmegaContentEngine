@@ -9,7 +9,7 @@ services:
     container_name: omega-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-omega}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-omega_dev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nonprod_synthetic_dev_placeholder_password}
       POSTGRES_DB: ${POSTGRES_DB:-omega}
     ports:
       - "5432:5432"
@@ -44,8 +44,8 @@ services:
     ports:
       - "8000:8000"
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:omega_dev@omega-postgres:5432/omega}
-      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:omega_dev@omega-postgres:5432/omega}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:nonprod_synthetic_dev_placeholder_password@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:nonprod_synthetic_dev_placeholder_password@omega-postgres:5432/omega}
       TEST_DATABASE_URL: ${TEST_DATABASE_URL:-}
       REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
       ENVIRONMENT: ${ENVIRONMENT:-development}
@@ -96,8 +96,8 @@ services:
     container_name: omega-worker
     command: celery -A omega.infrastructure.celery_app:celery_app worker --loglevel=info --concurrency=2 --queues=celery
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:omega_dev@omega-postgres:5432/omega}
-      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:omega_dev@omega-postgres:5432/omega}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:nonprod_synthetic_dev_placeholder_password@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:nonprod_synthetic_dev_placeholder_password@omega-postgres:5432/omega}
       REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
@@ -139,8 +139,8 @@ services:
     container_name: omega-beat
     command: celery -A omega.infrastructure.celery_app:celery_app beat --loglevel=info
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:omega_dev@omega-postgres:5432/omega}
-      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:omega_dev@omega-postgres:5432/omega}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://omega:nonprod_synthetic_dev_placeholder_password@omega-postgres:5432/omega}
+      DATABASE_URL_SYNC: ${DATABASE_URL_SYNC:-postgresql+psycopg2://omega:nonprod_synthetic_dev_placeholder_password@omega-postgres:5432/omega}
       REDIS_URL: ${REDIS_URL:-redis://omega-redis:6379/0}
       ENVIRONMENT: ${ENVIRONMENT:-development}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}

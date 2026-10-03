@@ -45,11 +45,15 @@ class Settings(BaseSettings):
     image_tag: str = "unknown"
     build_timestamp: str = "unknown"
 
+    # ── Non-production Synthetic Dev Placeholder ──
+    # Explicitly labeled non-production placeholder. Must NEVER equal historical production credentials.
+    synthetic_dev_db_password: str = "nonprod_synthetic_dev_placeholder_password"
+
     # ── Database (async — FastAPI) ──
-    database_url: str = "postgresql+asyncpg://omega:omega_dev@omega-postgres:5432/omega"
+    database_url: str = "postgresql+asyncpg://omega:nonprod_synthetic_dev_placeholder_password@omega-postgres:5432/omega"
 
     # ── Database (sync — Celery worker) ──
-    database_url_sync: str = "postgresql+psycopg2://omega:omega_dev@omega-postgres:5432/omega"
+    database_url_sync: str = "postgresql+psycopg2://omega:nonprod_synthetic_dev_placeholder_password@omega-postgres:5432/omega"
 
     # ── Redis ──
     redis_url: str = "redis://omega-redis:6379/0"
@@ -219,6 +223,23 @@ class Settings(BaseSettings):
         env_time = os.getenv("OMEGA_BUILD_TIMESTAMP") or os.getenv("BUILD_TIMESTAMP")
         if env_time:
             self.build_timestamp = env_time
+
+        # ── Fail-Closed Production Database Credential Enforcement ──
+        if self.environment.lower() == "production":
+            for name, url_val in [
+                ("DATABASE_URL", self.database_url),
+                ("DATABASE_URL_SYNC", self.database_url_sync),
+            ]:
+                if (
+                    not url_val
+                    or self.synthetic_dev_db_password in url_val
+                    or "@" not in url_val
+                    or "://" not in url_val
+                ):
+                    raise ValueError(
+                        f"Production {name} must be explicitly configured via secure operational secret; "
+                        "fallback to development placeholder is forbidden in production."
+                    )
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
