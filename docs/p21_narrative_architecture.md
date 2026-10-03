@@ -189,7 +189,37 @@ ResearchBrief & TopicCandidate
 
 ## 10. P21-B Narrative Director Specification
 
-### 10.1 NarrativeDirector Contract
+### 10.1 Architecture Overview & Director Implementations
+The Narrative Director translates editorial inputs (`TopicCandidate`, `ResearchBrief`, `ContentGenerationRequest`, `ContentIntent`, and `ChannelDNARevision`) into structured, format-compliant story structure drafts.
+
+#### Implementations:
+1. **Primary Intelligent Path**: `ModelBackedNarrativeDirector`
+   - Leverages structured LLM completion constraints (JSON schema enforcement).
+   - Generates multi-candidate story structure drafts adhering to format profiles, required roles, and open curiosity loops.
+   - Provider abstraction: `GeminiNarrativeModelClient` (backed by Gemini API through clean Omega provider boundary with bounded <=20s HTTP timeout).
+   - Enforces strict grounding allowlist: only cited claim IDs from verified claims in `ResearchBrief` are admitted; uncertain claims and invented IDs are rejected.
+2. **Fallback & Test Oracle**: `DeterministicNarrativeDirector`
+   - Test-safe, reproducible implementation with deterministic strategy scoring.
+   - Serves as graceful fallback in `NarrativePlanningService` whenever model provider retries are exhausted or return unparseable structured output.
+
+#### Canonical Selection Architecture:
+```text
+TopicCandidate + ResearchBrief + Intent + DNA
+               ↓
+Deterministic Eligibility (Format & Profile Bounds)
+               ↓
+Model-Backed Generation & Selection (ModelBackedNarrativeDirector)
+               ↓
+Grounding Allowlist Verification (Rejection of Uncertain/Unknown IDs)
+               ↓
+P21-A Deterministic Structural Validation (NarrativePlanValidator)
+               ↓
+Candidate Selection Engine (Scoring Fidelity & Duration Proximity)
+               ↓
+Authoritative PostgreSQL schema027 Persistence (NarrativePlanService)
+```
+
+### 10.2 NarrativeDirector Contract
 `NarrativeDirectorProtocol` defines the application boundary:
 ```python
 class NarrativeDirectorProtocol(Protocol):

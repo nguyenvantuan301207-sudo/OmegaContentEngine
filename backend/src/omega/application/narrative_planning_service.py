@@ -6,6 +6,7 @@ atomic PostgreSQL persistence, and downstream script generation handoff.
 
 from __future__ import annotations
 
+import os
 import uuid
 from typing import Any
 from uuid import UUID
@@ -13,6 +14,7 @@ from uuid import UUID
 from omega.application.narrative_director import (
     CandidateSelectionEngine,
     DeterministicNarrativeDirector,
+    ModelBackedNarrativeDirector,
     NarrativeDirector,
 )
 from omega.application.narrative_plan_service import (
@@ -50,7 +52,13 @@ class NarrativePlanningService:
         max_retries: int = 2,
     ) -> None:
         self.validator = validator or NarrativePlanValidator()
-        self.director = director or DeterministicNarrativeDirector(validator=self.validator)
+        self.fallback_director = DeterministicNarrativeDirector(validator=self.validator)
+        if director is not None:
+            self.director = director
+        elif os.getenv("OMEGA_NARRATIVE_DIRECTOR_MODE", "").lower() == "model" and os.getenv("GEMINI_API_KEY"):
+            self.director = ModelBackedNarrativeDirector(validator=self.validator)
+        else:
+            self.director = self.fallback_director
         self.plan_service = plan_service or NarrativePlanService(validator=self.validator)
         self.selection_engine = selection_engine or CandidateSelectionEngine(validator=self.validator)
         self.max_retries = max_retries

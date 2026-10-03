@@ -24,6 +24,14 @@ from omega.application.content_provider import TemplateContentProvider
 from omega.application.narrative_director import (
     CandidateSelectionEngine,
     DeterministicNarrativeDirector,
+    GeminiNarrativeModelClient,
+    ModelBackedNarrativeDirector,
+    NarrativeDirectorGroundingError,
+    NarrativeDirectorStrategyError,
+    NarrativeModelError,
+    NarrativeModelMalformedError,
+    NarrativeModelProviderError,
+    NarrativeModelTimeoutError,
 )
 from omega.application.narrative_plan_service import (
     InMemoryNarrativePlanRepository,
@@ -378,8 +386,34 @@ def test_candidate_generation_and_selection(sample_dna, sample_research_brief, s
 
 
 # ======================================================================
-# Test F: Fallback and Error Handling
+# Test F: Fallback and Error Handling & Model Failure Matrix
 # ======================================================================
+
+class MockNarrativeModelClient:
+    """Mock model client for controlled offline failure and schema testing."""
+
+    provider_name: str = "mock_provider"
+    model_name: str = "mock_model"
+
+    def __init__(self, side_effect: Any = None, return_value: dict[str, Any] | None = None) -> None:
+        self.side_effect = side_effect
+        self.return_value = return_value or {}
+        self.call_count = 0
+
+    def generate_structured_plan(
+        self,
+        prompt: str,
+        system_instruction: str,
+        response_schema: dict[str, Any],
+        timeout: float = 20.0,
+    ) -> dict[str, Any]:
+        self.call_count += 1
+        if isinstance(self.side_effect, Exception):
+            raise self.side_effect
+        if callable(self.side_effect):
+            return self.side_effect()
+        return self.return_value
+
 
 class FailingDirector:
     """Mock director that always raises an error to test retry and deterministic fallback."""
@@ -412,6 +446,184 @@ def test_failing_director_triggers_deterministic_fallback(sample_dna, sample_res
     assert plan is not None
     assert val_result.is_valid
     assert plan.status == NarrativePlanStatus.VALIDATED
+
+
+def test_p21b_model_timeout_error(sample_dna, sample_research_brief, sample_content_intent):
+    """A. Provider timeout raises NarrativeModelTimeoutError."""
+    client = MockNarrativeModelClient(side_effect=NarrativeModelTimeoutError("Gemini API request timed out after 20.0s"))
+    director = ModelBackedNarrativeDirector(client=client)
+    with pytest.raises(NarrativeModelTimeoutError):
+        director.generate_candidates(
+            content_request_id=uuid.uuid4(),
+            channel_dna=sample_dna,
+            research_brief=sample_research_brief,
+            content_intent=sample_content_intent,
+            topic_title="Quantum Mechanics",
+        )
+
+
+def test_p21b_model_provider_failure_error(sample_dna, sample_research_brief, sample_content_intent):
+    """B. Provider exception raises NarrativeModelProviderError."""
+    client = MockNarrativeModelClient(side_effect=NarrativeModelProviderError("Gemini API returned status code 503"))
+    director = ModelBackedNarrativeDirector(client=client)
+    with pytest.raises(NarrativeModelProviderError):
+        director.generate_candidates(
+            content_request_id=uuid.uuid4(),
+            channel_dna=sample_dna,
+            research_brief=sample_research_brief,
+            content_intent=sample_content_intent,
+            topic_title="Quantum Mechanics",
+        )
+
+
+def test_p21b_model_malformed_structured_response(sample_dna, sample_research_brief, sample_content_intent):
+    """C. Malformed structured output raises NarrativeModelMalformedError."""
+    client = MockNarrativeModelClient(return_value={"candidates": []})
+    director = ModelBackedNarrativeDirector(client=client)
+    with pytest.raises(NarrativeModelMalformedError):
+        director.generate_candidates(
+            content_request_id=uuid.uuid4(),
+            channel_dna=sample_dna,
+            research_brief=sample_research_brief,
+            content_intent=sample_content_intent,
+            topic_title="Quantum Mechanics",
+        )
+
+
+def test_p21b_model_schema_invalid_and_ineligible_strategy(sample_dna, sample_research_brief, sample_content_intent):
+    """D & E. Schema-invalid / ineligible strategy rejected by director."""
+    client = MockNarrativeModelClient(return_value={
+        "candidates": [
+            {
+                "strategy": "MYSTERY_REVEAL",  # Ineligible for SHORT format
+                "rationale": "Ineligible strategy draft",
+                "sections": [
+                    {"role": "HOOK", "objective": "Hook", "target_duration_seconds": 15},
+                    {"role": "PAYOFF", "objective": "Payoff", "target_duration_seconds": 30},
+                ],
+            }
+        ]
+    })
+    director = ModelBackedNarrativeDirector(client=client)
+    with pytest.raises(NarrativeModelMalformedError):
+        director.generate_candidates(
+            content_request_id=uuid.uuid4(),
+            channel_dna=sample_dna,
+            research_brief=sample_research_brief,
+            content_intent=sample_content_intent,
+            topic_title="Quantum Mechanics",
+            format_profile=NarrativeFormatProfile.SHORT,
+        )
+
+
+def test_p21b_model_unknown_grounding_id_rejected(sample_dna, sample_research_brief, sample_content_intent):
+    """F. Unknown grounding claim ID is rejected and disqualifies candidate."""
+    client = MockNarrativeModelClient(return_value={
+        "candidates": [
+            {
+                "strategy": "HOW_IT_WORKS",
+                "rationale": "Cites unknown claim",
+                "sections": [
+                    {"role": "HOOK", "objective": "Hook", "target_duration_seconds": 15},
+                    {"role": "DEVELOPMENT", "objective": "Dev", "target_duration_seconds": 20, "cited_claim_id": str(uuid.uuid4())},
+                    {"role": "CLOSING", "objective": "Close", "target_duration_seconds": 10},
+                ],
+            }
+        ]
+    })
+    director = ModelBackedNarrativeDirector(client=client)
+    with pytest.raises(NarrativeModelMalformedError):
+        director.generate_candidates(
+            content_request_id=uuid.uuid4(),
+            channel_dna=sample_dna,
+            research_brief=sample_research_brief,
+            content_intent=sample_content_intent,
+            topic_title="Quantum Mechanics",
+            format_profile=NarrativeFormatProfile.SHORT,
+        )
+
+
+def test_p21b_model_uncertain_claim_not_promoted(sample_dna, sample_research_brief, sample_content_intent):
+    """F2. Uncertain claims cannot be promoted to factual grounding."""
+    uncertain_cid = sample_research_brief["uncertain_claims"][0]["claim_id"]
+    client = MockNarrativeModelClient(return_value={
+        "candidates": [
+            {
+                "strategy": "HOW_IT_WORKS",
+                "rationale": "Cites uncertain claim",
+                "sections": [
+                    {"role": "HOOK", "objective": "Hook", "target_duration_seconds": 15},
+                    {"role": "DEVELOPMENT", "objective": "Dev", "target_duration_seconds": 20, "cited_claim_id": uncertain_cid},
+                    {"role": "CLOSING", "objective": "Close", "target_duration_seconds": 10},
+                ],
+            }
+        ]
+    })
+    director = ModelBackedNarrativeDirector(client=client)
+    with pytest.raises(NarrativeModelMalformedError):
+        director.generate_candidates(
+            content_request_id=uuid.uuid4(),
+            channel_dna=sample_dna,
+            research_brief=sample_research_brief,
+            content_intent=sample_content_intent,
+            topic_title="Quantum Mechanics",
+            format_profile=NarrativeFormatProfile.SHORT,
+        )
+
+
+def test_p21b_model_validator_rejection(sample_dna, sample_research_brief, sample_content_intent):
+    """G. Invalid role combinations rejected by P21-A structural constraints."""
+    client = MockNarrativeModelClient(return_value={
+        "candidates": [
+            {
+                "strategy": "HOW_IT_WORKS",
+                "rationale": "Invalid role combination",
+                "sections": [
+                    {"role": "INVALID_ROLE", "objective": "Hook", "target_duration_seconds": 15},
+                ],
+            }
+        ]
+    })
+    director = ModelBackedNarrativeDirector(client=client)
+    with pytest.raises(NarrativeModelMalformedError):
+        director.generate_candidates(
+            content_request_id=uuid.uuid4(),
+            channel_dna=sample_dna,
+            research_brief=sample_research_brief,
+            content_intent=sample_content_intent,
+            topic_title="Quantum Mechanics",
+            format_profile=NarrativeFormatProfile.SHORT,
+        )
+
+
+def test_p21b_fallback_after_exhaustion(sample_dna, sample_research_brief, sample_content_intent):
+    """H & I. Bounded retry exhaustion triggers clean deterministic fallback."""
+    client = MockNarrativeModelClient(side_effect=NarrativeModelTimeoutError("Simulated provider timeout"))
+    director = ModelBackedNarrativeDirector(client=client)
+    repo = InMemoryNarrativePlanRepository()
+    plan_service = NarrativePlanService(repository=repo)
+    planning_service = NarrativePlanningService(
+        director=director,
+        plan_service=plan_service,
+        max_retries=2,
+    )
+    plan, val_result, _ = planning_service.plan_narrative_for_request(
+        content_generation_request_id=uuid.uuid4(),
+        channel_dna_revision_id=uuid.uuid4(),
+        channel_dna=sample_dna,
+        research_brief=sample_research_brief,
+        content_intent=sample_content_intent,
+        topic_title="Quantum Computing",
+        format_profile=NarrativeFormatProfile.SHORT,
+        target_duration_seconds=45,
+    )
+    # Check that retries occurred (initial attempt + 2 retries = 3 calls)
+    assert client.call_count == 3
+    # Plan was successfully generated via fallback
+    assert plan is not None
+    assert val_result.is_valid
+    assert plan.status == NarrativePlanStatus.VALIDATED
+    assert plan.metadata.get("director_implementation") == "DeterministicNarrativeDirector"
 
 
 # ======================================================================
