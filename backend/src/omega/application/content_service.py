@@ -368,6 +368,11 @@ async def generate_content(
         from omega.application.narrative_script_adapter import NarrativePlanScriptAdapter
 
         domain_plan = _orm_to_domain(narrative_plan_model)
+        NarrativePlanScriptAdapter.enforce_script_gate(
+            plan=domain_plan,
+            research_brief=brief_dict,
+            channel_dna=dna_dict,
+        )
         outline_data = NarrativePlanScriptAdapter.map_plan_to_script_outline(domain_plan)
         attached_narrative_plan_id = narrative_plan_model.id
     else:

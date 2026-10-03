@@ -39,6 +39,23 @@ class NarrativePlanScriptAdapter:
     """Adapts NarrativePlan structures into legacy and future script generation interfaces."""
 
     @staticmethod
+    def enforce_script_gate(
+        plan: NarrativePlan,
+        qa_result: Any | None = None,
+        research_brief: dict[str, Any] | None = None,
+        channel_dna: Any | None = None,
+    ) -> Any:
+        """Enforce P21-D QA acceptance before script generation can proceed."""
+        from omega.application.narrative_qa_service import NarrativeQAService
+
+        return NarrativeQAService().enforce_script_gate(
+            plan=plan,
+            qa_result=qa_result,
+            research_brief=research_brief,
+            channel_dna=channel_dna,
+        )
+
+    @staticmethod
     def prepare_generation_context(
         content_generation_request_id: UUID,
         target_duration_seconds: int,

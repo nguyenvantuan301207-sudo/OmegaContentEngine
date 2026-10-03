@@ -353,9 +353,63 @@ When pacing adjustments are approved, `RetentionPacingService.optimize_plan`:
 
 ---
 
-## 12. Extension Seams for P21-D
+## 12. P21-D Narrative QA & Editorial Acceptance Specification
 
-1. **P21-D (Narrative QA & Policy Verification)**:
-   - Automated editorial tone consistency verification against channel DNA.
-   - Guardian policy verification for claim fidelity, ethical constraints, and narrative coherence prior to downstream script generation.
-   - Verification of script generation output conformance against the authoritative NarrativePlan.
+### 12.1 Purpose & Role in the Narrative Pipeline
+P21-D constitutes the final quality gate before script prose generation. It aggregates structural validation (P21-A), retention pacing diagnostics (P21-C), factual research grounding, promise/payoff fidelity, hook quality, narrative coherence, and channel DNA alignment into a single authoritative evaluation verdict:
+
+```text
+NarrativePlan (v2 Paced Revision)
+       ↓
+P21-D Narrative QA Engine (NarrativeQAService)
+       ↓
+NarrativeQAResult (PASS / REVISE / FAIL)
+       ↓
+[Script Generation Gate: enforce_script_gate]
+       ↓ (PASS)
+NarrativePlanScriptAdapter
+       ↓
+ScriptVersion Lineage & Storyboard
+```
+
+### 12.2 Typed Finding Taxonomy & Subsystems
+Findings are categorized across five distinct subsystems (`NarrativeQASubsystem`):
+- `STRUCTURE`: Empty plan, missing required roles, invalid role order, orphan payoff, unresolved promise, duration sum mismatch, ordering gaps.
+- `GROUNDING`: Weak grounding coverage in factual sections, excessive citation reuse, unsupported key information, uncertain claims promoted as fact, payoff lacking empirical evidence, contradictions.
+- `EDITORIAL` & `PROMISE_PAYOFF`: Weak/vague promise, promise/payoff mismatch, incomplete payoff, weak hook, misleading hook, overlong hook, narrative repetition, circular development, missing context, development too thin, abrupt closing.
+- `PACING`: Dead zones, overloaded/underloaded sections, open loop held too long, payoff delivered prematurely, flat escalation curve.
+- `CHANNEL_FIT`: Tone mismatch against brand voice, audience depth mismatch, pacing style mismatch, excessive calls-to-action.
+
+### 12.3 Severity & Acceptance Policy
+Findings carry typed severities (`NarrativeQASeverity`): `INFO`, `WARNING`, `ERROR`, `BLOCKER`.
+- **`PASS`**: No `BLOCKER` or `ERROR` findings exist. Advisory warnings and informative notes permit direct script generation.
+- **`REVISE`**: Plan is structurally sound but contains actionable defects (e.g., editorial mismatches, weak grounding, dead zones, or open-loop lifetime violations) requiring a corrective `NarrativePlan` revision before generation.
+- **`FAIL`**: Fundamental structural violations, orphan payoffs, broken lineage, unverified claims promoted as fact, or blocking defects that completely prohibit safe script generation.
+
+### 12.4 Finding Deduplication & Actionable Remediation
+- **Deterministic Deduplication**: Findings from multiple sources (structural validator, pacing engine, editorial evaluators, and model review) for identical section targets collapse into canonical findings preserving contributing sources and the highest severity.
+- **Revision Recommendations**: REVISE verdicts automatically generate structured recommendations (`NarrativeQARecommendation`) specifying concrete actions (`SHORTEN_CONTEXT`, `STRENGTHEN_PAYOFF_EVIDENCE`, `MERGE_SECTIONS`, `ADVANCE_PAYOFF`, `TIGHTEN_HOOK`, etc.).
+
+### 12.5 Script Generation Gate & Provenance
+- **Enforcement Gate (`enforce_script_gate`)**: Script generation adapters reject plans with `REVISE` or `FAIL` status by raising `NarrativeQAGateError`.
+- **QA Provenance**: Evaluated findings count, blocker/error breakdowns, timestamp, engine version, and status are durably persisted in `NarrativePlan.metadata["p21d_qa"]` without requiring schema migrations (`P21D_SCHEMA_CHANGE_REQUIRED = NO`).
+
+---
+
+## 13. Canonical P21 End-to-End Pipeline & P22 Handoff Boundary
+
+### 13.1 Complete Closed Flow
+1. **Topic & Research Phase**: `TopicCandidate` + `ResearchBrief` with verified empirical claims and source lineage.
+2. **P21-B Narrative Director**: Strategy selection (`STRATEGY_CATALOG`) and candidate generation → persists authoritative `NarrativePlan v1`.
+3. **P21-C Retention & Pacing Intelligence**: PacingProfile evaluation, section duration planning, open-loop bounds, dead-zone mitigation → persists optimized revision `NarrativePlan v2`.
+4. **P21-D Narrative QA & Acceptance**: Comprehensive editorial quality evaluation → `PASS` acceptance verdict.
+5. **Script Generation**: `NarrativePlanScriptAdapter.enforce_script_gate` → `ScriptVersion` carrying `narrative_plan_id=v2.id`.
+6. **Storyboard Generation**: `StoryboardEngine` generates `StoryboardPlan` preserving full upstream lineage.
+
+### 13.2 P22 Handoff Boundary
+P21 strictly governs story structure, narrative pacing, and editorial readiness.
+The following capabilities are explicitly deferred to P22:
+- Visual direction and scene composition.
+- Camera motion, zoom, pan, and visual transitions.
+- B-roll selection and video asset generation.
+- Music, sound effects, audio mastering, packaging, and publishing.
