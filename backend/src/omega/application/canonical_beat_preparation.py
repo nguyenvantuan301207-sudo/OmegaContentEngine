@@ -51,6 +51,7 @@ from omega.application.visual_continuity_director import (
 from omega.application.visual_direction import VisualAssetKind
 from omega.domain.camera_transition import CameraTransitionPlan
 from omega.domain.visual_beat import VisualBeatSequence
+from omega.domain.visual_editorial_qa import VisualQAResult, VisualQAStatus
 
 
 class CanonicalBeatPreparationResult(BaseModel):
@@ -83,6 +84,9 @@ class CanonicalBeatPreparationResult(BaseModel):
     )
     camera_transition_plan: CameraTransitionPlan | None = Field(
         default=None, description="Derived P22-B camera and transition direction"
+    )
+    visual_qa_result: VisualQAResult | None = Field(
+        default=None, description="P22-D Visual editorial QA result"
     )
 
 
@@ -129,6 +133,7 @@ class CanonicalBeatPreparationService:
         source_statements: Sequence[Any],
         scene_duration_ms: int,
         visual_asset_mode: str,
+        enforce_visual_qa_gate: bool = False,
     ) -> CanonicalBeatPreparationResult:
         """Deterministically prepare the complete G2 execution plan for a StoryboardScene."""
         if scene_duration_ms <= 0:
@@ -307,6 +312,35 @@ class CanonicalBeatPreparationService:
             transition_plans=(camera_transition_plan.transition_plans if one_to_one else None),
         )
 
+        # 9. Visual Editorial QA (P22-D)
+        from omega.application.visual_editorial_qa_service import VisualEditorialQAService
+
+        qa_res = VisualEditorialQAService.evaluate(
+            visual_beats=visual_beat_sequence.beats,
+            continuity_findings=getattr(visual_beat_sequence, "continuity_findings", None),
+            camera_plans=(camera_transition_plan.camera_plans if camera_transition_plan else None),
+            transition_plans=(camera_transition_plan.transition_plans if camera_transition_plan else None),
+            scene_index=scene.sequence_index,
+        )
+
+        if enforce_visual_qa_gate and qa_res.status in (
+            VisualQAStatus.REVISE,
+            VisualQAStatus.FAIL,
+        ):
+            return CanonicalBeatPreparationResult(
+                eligible=False,
+                fallback_reason=f"VISUAL_QA_{qa_res.status.value}",
+                source_statements=tuple(stmt_list),
+                beat_plan=beat_plan,
+                timing_plan=timing_plan,
+                visual_beat_sequence=visual_beat_sequence,
+                camera_transition_plan=camera_transition_plan,
+                direction_plan=direction_plan,
+                asset_plan=asset_plan,
+                render_plan=None,
+                visual_qa_result=qa_res,
+            )
+
         if not adapt_res.eligible:
             return CanonicalBeatPreparationResult(
                 eligible=False,
@@ -319,6 +353,7 @@ class CanonicalBeatPreparationService:
                 direction_plan=direction_plan,
                 asset_plan=asset_plan,
                 render_plan=None,
+                visual_qa_result=qa_res,
             )
 
         return CanonicalBeatPreparationResult(
@@ -332,4 +367,5 @@ class CanonicalBeatPreparationService:
             direction_plan=direction_plan,
             asset_plan=asset_plan,
             render_plan=adapt_res.plan,
+            visual_qa_result=qa_res,
         )

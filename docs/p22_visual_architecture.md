@@ -227,3 +227,73 @@ P22-C validation is strictly structural and grounding-based. Final visual QA, ho
   - Full end-to-end integration test connecting `VisualBeat` -> `Plan` -> `Artifact` -> `BoundVisualAsset` -> `BeatVisualDirector` -> `CameraTransitionDirector` -> `BeatRenderAdapter` -> `BeatRenderUnit`.
   - Comprehensive P22-C canary (`test_p22c_visual_explanation_canary.py`) rendering physical multi-beat video with verified duration, streams, and provenance.
 
+---
+
+## P22-D Visual Editorial QA & Acceptance Layer
+
+### Overview and Authority Model
+
+P22-D establishes the final editorial QA and acceptance gate for the visual pipeline before video rendering:
+- **Pre-Render QA**: Evaluates all abstract and structured visual specifications across continuity, asset relevance, grounding provenance, explanatory diagram/chart readability, data fidelity against evidence, camera motion safety, transition policy, safe-frame composition, and visual repetition/pacing.
+- **Post-Render QA**: Evaluates physical media artifacts (PNGs, video clips, and assembled scenes) for file existence, non-zero file size, 1920×1080 resolution, valid headers, and non-blank visual content via pure-Python compressed chunk analysis (without requiring external imaging libraries).
+- **Single Render Acceptance Gate**: `VisualRenderGate.verify_acceptance(qa_result)` enforces the fail-closed boundary, raising `VisualRenderGateError` on any `REVISE` or `FAIL` status.
+
+### Domain Model Taxonomy
+
+1. **`VisualQAStatus`**:
+   - `PASS`: No blocker or error-level findings; clean sequence approved for final rendering.
+   - `REVISE`: Contains warning-level findings with actionable remediation recommendations.
+   - `FAIL`: Contains blocker- or error-level findings; rendering is strictly prohibited.
+
+2. **`VisualQASeverity`**:
+   - `INFO` (Rank 1): Informational suggestions (e.g., transition fallback to CUT).
+   - `WARNING` (Rank 2): Editorial suboptimalities (e.g., long hold, soft style mismatch, transition duration warning).
+   - `ERROR` (Rank 3): Structural violations (e.g., camera focus out of bounds, text overflow, node layout overlap, missing physical artifact, corrupt/zero-byte artifact).
+   - `BLOCKER` (Rank 4): Critical integrity failures (e.g., ungrounded visual data, data value mismatch between chart and verified evidence, missing artifact content hash, blank uniform frame).
+
+3. **`VisualQASubsystem`**:
+   - `CONTINUITY`, `ASSET`, `GROUNDING`, `READABILITY`, `DATA_FIDELITY`, `CAMERA`, `TRANSITION`, `COMPOSITION`, `REPETITION`, `TIMING`, `STYLE`, `PHYSICAL_ARTIFACT`.
+
+4. **`VisualQAFindingCode`**:
+   - Complete strongly-typed taxonomy covering all pre-render and post-render defect conditions.
+
+5. **`VisualQAResult`**:
+   - Deterministic UUID derived via `uuid5` from scene index, beat IDs, and evaluated findings.
+   - Deterministic timestamp defaults to UTC epoch `1970-01-01T00:00:00Z` when not explicitly supplied.
+   - Lists deduplicated `findings` and generated `recommendations`.
+
+### Pre-Render vs Post-Render Evaluators
+
+| Evaluator | Domain | Key Verifications & Severity |
+|---|---|---|
+| `VisualContinuityQAEvaluator` | Pre-Render | Accidental beat repeats (`ERROR`), context loss on document detail (`ERROR`), comparison side swaps (`ERROR`). |
+| `AssetAppropriatenessQAEvaluator` | Pre-Render | Generic B-roll bound to data/diagram beat (`ERROR`), irrelevant B-roll tags (`WARNING`), mismatched entity references (`ERROR`). |
+| `VisualGroundingQAEvaluator` | Pre-Render | Unverified evidence items (`BLOCKER`), ungrounded visual data points (`BLOCKER`), ungrounded diagram nodes (`BLOCKER`), missing/malformed SHA-256 artifact hashes (`BLOCKER`). |
+| `ExplanatoryVisualReadabilityQAEvaluator` | Pre-Render | Node count > 8 (`WARNING`), node label > 80 chars (`ERROR`), node layout overlap (`ERROR`), chart data points > 20 (`WARNING`), chart label > 60 chars (`ERROR`), missing evidence source label (`ERROR`). |
+| `DataFidelityQAEvaluator` | Pre-Render | Chart/evidence value mismatch against verified source evidence text (`BLOCKER`), direct quote degraded to paraphrase (`BLOCKER`). |
+| `CameraQAEvaluator` | Pre-Render | Focus region outside [0, 1] bounds (`ERROR`), excessive zoom/speed on short beat (`WARNING`), rapid directional reversals (`WARNING`). |
+| `TransitionQAEvaluator` | Pre-Render | Duration >= 500ms without crossfade capability (`WARNING`), fallback from crossfade/wipe to CUT (`INFO`). |
+| `CompositionQAEvaluator` | Pre-Render | Safe frame margins violation (`WARNING`), non-1920x1080 dimensions (`ERROR`). |
+| `VisualRepetitionQAEvaluator` | Pre-Render | Unbroken static hold > 8000ms without intentional motif (`WARNING`). |
+| `VisualTimingQAEvaluator` | Pre-Render | Beat sequence timing gaps (`ERROR`), beat overlaps (`ERROR`), total duration drift (`ERROR`). |
+| `ChannelStyleQAEvaluator` | Pre-Render | Density mismatch against Channel DNA guidelines (`WARNING`). |
+| `PhysicalArtifactQAEvaluator` | Post-Render | Missing file (`ERROR`), zero-byte file (`ERROR`), corrupt header/decompression failure (`ERROR`), blank/uniform solid frame (`BLOCKER`), dimensions mismatch (`ERROR`). |
+
+### Multimodal Review Audit Boundary
+
+- **Provider Abstraction Audit**: The existing Omega content generation provider abstraction (`omega.infrastructure.llm`) provides text completion, TTS audio generation, and Pexels stock asset search. There is no active multimodal vision/image review model configured or provisioned in production.
+- **Audit Flags**:
+  - `P22D_MULTIMODAL_PROVIDER_AVAILABLE = NO`
+  - `P22D_MODEL_VISUAL_REVIEW = NOT_USED`
+- **Design Principle**: All visual editorial evaluations and acceptance checks are deterministically computed by pure-Python rule evaluators and pixel analysis, avoiding flaky or ungrounded external model calls.
+
+### Schema & Deployment Impact
+
+- `P22D_SCHEMA_CHANGE_REQUIRED = NO`
+- `MIGRATION_028_CREATED = NO`
+- `P22_CLOSED = YES`
+- Production database remains locked at revision `026`.
+- P21 and P22 artifacts remain isolated in development and test environments.
+- Ready for P23 Audio, Music, Ducking & Final Mix.
+
+
