@@ -378,17 +378,37 @@ class ProductionService:
                 "Terminal requests are immutable; explicit retry requires a new ProductionRequest attempt."
             )
 
+        # Active render job states
+        active_states = [
+            RenderJobState.PENDING.value,
+            RenderJobState.QUEUED.value,
+            RenderJobState.RUNNING.value,
+            RenderJobState.RETRY.value,
+        ]
+
+        # For normal render: if an active render job already exists, reuse the authoritative active job
+        if not is_rerender:
+            active_jobs_stmt = (
+                select(ProductionRenderJob)
+                .where(
+                    ProductionRenderJob.production_request_id == req.id,
+                    ProductionRenderJob.state.in_(active_states),
+                )
+                .order_by(ProductionRenderJob.created_at.desc())
+            )
+            active_job_res = await session.execute(active_jobs_stmt)
+            active_job = active_job_res.scalars().first()
+            if active_job:
+                plan_stmt = select(RenderPlan).where(RenderPlan.id == active_job.render_plan_id)
+                plan_res = await session.execute(plan_stmt)
+                plan = plan_res.scalar_one()
+                return active_job, plan, False
+
         # If rerender, ensure all prior jobs are terminal
         if is_rerender:
             active_jobs_stmt = select(ProductionRenderJob).where(
                 ProductionRenderJob.production_request_id == req.id,
-                ProductionRenderJob.state.in_(
-                    [
-                        RenderJobState.PENDING.value,
-                        RenderJobState.QUEUED.value,
-                        RenderJobState.RUNNING.value,
-                    ]
-                ),
+                ProductionRenderJob.state.in_(active_states),
             )
             active_jobs_res = await session.execute(active_jobs_stmt)
             if active_jobs_res.scalars().all():

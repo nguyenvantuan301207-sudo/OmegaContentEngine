@@ -976,6 +976,15 @@ class VisualProductionV2Service:
             if narration_enabled
             else scene_out_path
         )
+        from omega.application.template_payload_resolver import can_resolve_diagram_payload
+        from omega.application.visual_direction import RenderMode, VisualTemplateId
+        from omega.application.editorial_beat_planner import BeatSemanticRole
+
+        if scene.visual_strategy == VisualStrategy.DIAGRAM and not can_resolve_diagram_payload(scene.narration_excerpt):
+            scene.visual_strategy = VisualStrategy.KINETIC_TEXT
+            if not scene.on_screen_text:
+                scene.on_screen_text = scene.narration_excerpt
+
         try:
             prep = self._beat_preparation_service.prepare_from_script_dict(
                 script_dict=script_dict,
@@ -993,6 +1002,27 @@ class VisualProductionV2Service:
             and len(prep.render_plan.units) >= 2
         ):
             plan = prep.render_plan
+            for unit in plan.units:
+                if unit.direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM:
+                    unit_content = (
+                        unit.scene_view.narration_excerpt
+                        or unit.scene_view.on_screen_text
+                        or unit.scene_view.visual_brief
+                    )
+                    is_g2 = (
+                        unit.direction_view.metadata.get("semantic_role")
+                        == BeatSemanticRole.MECHANISM.value
+                    )
+                    if not can_resolve_diagram_payload(unit_content, is_g2_mechanism=is_g2):
+                        unit.direction_view = unit.direction_view.model_copy(
+                            update={
+                                "template_id": VisualTemplateId.KINETIC_TEXT,
+                                "render_mode": RenderMode.LOCAL_TEMPLATE,
+                            }
+                        )
+                        unit.scene_view.visual_strategy = VisualStrategy.KINETIC_TEXT
+                        if not unit.scene_view.on_screen_text:
+                            unit.scene_view.on_screen_text = unit.scene_view.narration_excerpt
             try:
                 execution = await self._beat_asset_executor.execute_plan(
                     render_plan=plan,
@@ -1743,6 +1773,15 @@ class VisualProductionV2Service:
 
         if not storyboard.scenes:
             raise VerticalSliceError("StoryboardEngine produced 0 scenes")
+
+        # Sanitize any scene where DIAGRAM cannot truthfully resolve >= 2 nodes before TTS / rendering
+        from omega.application.template_payload_resolver import can_resolve_diagram_payload
+        for s in storyboard.scenes:
+            if s.visual_strategy == VisualStrategy.DIAGRAM:
+                if not can_resolve_diagram_payload(s.narration_excerpt):
+                    s.visual_strategy = VisualStrategy.KINETIC_TEXT
+                    if not s.on_screen_text:
+                        s.on_screen_text = s.narration_excerpt
 
         # 5. Work Directory Setup
         work_dir = run_dir / "work"

@@ -110,25 +110,37 @@ class VisualDirector:
         return None
 
     def resolve(self, scene: StoryboardScene) -> VisualDirection:
-        if scene.visual_strategy not in _STRATEGY_MAPPING:
-            raise VisualDirectionError(f"Unsupported VisualStrategy: {scene.visual_strategy}")
+        strategy = scene.visual_strategy
+        if strategy == VisualStrategy.DIAGRAM:
+            from omega.application.template_payload_resolver import can_resolve_diagram_payload
 
-        render_mode, template_id, motion_profile, rationale = _STRATEGY_MAPPING[scene.visual_strategy]
+            content = (
+                scene.narration_excerpt
+                or scene.on_screen_text
+                or scene.visual_brief
+            )
+            if not can_resolve_diagram_payload(content):
+                strategy = VisualStrategy.KINETIC_TEXT
+
+        if strategy not in _STRATEGY_MAPPING:
+            raise VisualDirectionError(f"Unsupported VisualStrategy: {strategy}")
+
+        render_mode, template_id, motion_profile, rationale = _STRATEGY_MAPPING[strategy]
 
         assets = []
-        if scene.visual_strategy == VisualStrategy.IMAGE:
+        if strategy == VisualStrategy.IMAGE:
             assets.append(VisualAssetRequirement(
                 kind=VisualAssetKind.IMAGE,
                 query_hint=self._resolve_query_hint(scene),
                 purpose="Primary visual for image explainer"
             ))
-        elif scene.visual_strategy == VisualStrategy.BROLL:
+        elif strategy == VisualStrategy.BROLL:
             assets.append(VisualAssetRequirement(
                 kind=VisualAssetKind.BROLL,
                 query_hint=self._resolve_query_hint(scene),
                 purpose="Primary visual for broll explainer"
             ))
-        elif scene.visual_strategy == VisualStrategy.SCREENSHOT:
+        elif strategy == VisualStrategy.SCREENSHOT:
             assets.append(VisualAssetRequirement(
                 kind=VisualAssetKind.SCREENSHOT,
                 query_hint=self._resolve_query_hint(scene),

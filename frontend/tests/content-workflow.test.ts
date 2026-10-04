@@ -589,6 +589,130 @@ test("proceedToProductionHandoff creates a new ProductionRequest pinned to curre
   assert.notEqual(createPayloadReceived?.script_version_id, "script-v1-hist");
 });
 
+test("proceedToProductionHandoff creates new attempt when existing production for current script is FAILED", async () => {
+  const v2Current: ScriptVersionSummary = {
+    id: "script-v2-curr",
+    content_request_id: "req-1",
+    version: 2,
+    is_current: true,
+    title: "Script v2",
+    estimated_word_count: 520,
+    estimated_duration_seconds: 125,
+    qa_status: "PASSED",
+    created_at: "2026-10-02T00:00:00Z",
+  };
+
+  const failedProduction: ProductionRequest = {
+    id: "prod-failed-v2",
+    channel_id: "chan-1",
+    script_version_id: "script-v2-curr",
+    content_request_id: "req-1",
+    channel_dna_revision_id: "dna-1",
+    mode: "INTERACTIVE",
+    status: "FAILED",
+    outcome: "BLOCKED",
+    target_width: 1920,
+    target_height: 1080,
+    fps: 30,
+    video_codec: "h264",
+    audio_codec: "aac",
+    container_format: "mp4",
+    created_at: "2026-10-03T00:00:00Z",
+  };
+
+  let createCalled = false;
+  const result = await proceedToProductionHandoff({
+    channelId: "chan-1",
+    scripts: [v2Current],
+    listRequests: async () => [failedProduction],
+    createRequest: async (_ch, payload) => {
+      createCalled = true;
+      return {
+        id: "prod-retry-v2",
+        channel_id: "chan-1",
+        script_version_id: payload.script_version_id,
+        content_request_id: "req-1",
+        channel_dna_revision_id: "dna-1",
+        mode: "INTERACTIVE",
+        status: "READY",
+        target_width: 1920,
+        target_height: 1080,
+        fps: 30,
+        video_codec: "h264",
+        audio_codec: "aac",
+        container_format: "mp4",
+        created_at: "2026-10-04T00:00:00Z",
+      };
+    },
+  });
+
+  assert.equal(createCalled, true);
+  assert.equal(result.reused, false);
+  assert.equal(result.requestId, "prod-retry-v2");
+});
+
+test("proceedToProductionHandoff creates new attempt when existing production for current script is CANCELLED", async () => {
+  const v2Current: ScriptVersionSummary = {
+    id: "script-v2-curr",
+    content_request_id: "req-1",
+    version: 2,
+    is_current: true,
+    title: "Script v2",
+    estimated_word_count: 520,
+    estimated_duration_seconds: 125,
+    qa_status: "PASSED",
+    created_at: "2026-10-02T00:00:00Z",
+  };
+
+  const cancelledProduction: ProductionRequest = {
+    id: "prod-cancelled-v2",
+    channel_id: "chan-1",
+    script_version_id: "script-v2-curr",
+    content_request_id: "req-1",
+    channel_dna_revision_id: "dna-1",
+    mode: "INTERACTIVE",
+    status: "CANCELLED",
+    outcome: "BLOCKED",
+    target_width: 1920,
+    target_height: 1080,
+    fps: 30,
+    video_codec: "h264",
+    audio_codec: "aac",
+    container_format: "mp4",
+    created_at: "2026-10-03T00:00:00Z",
+  };
+
+  let createCalled = false;
+  const result = await proceedToProductionHandoff({
+    channelId: "chan-1",
+    scripts: [v2Current],
+    listRequests: async () => [cancelledProduction],
+    createRequest: async (_ch, payload) => {
+      createCalled = true;
+      return {
+        id: "prod-retry2-v2",
+        channel_id: "chan-1",
+        script_version_id: payload.script_version_id,
+        content_request_id: "req-1",
+        channel_dna_revision_id: "dna-1",
+        mode: "INTERACTIVE",
+        status: "READY",
+        target_width: 1920,
+        target_height: 1080,
+        fps: 30,
+        video_codec: "h264",
+        audio_codec: "aac",
+        container_format: "mp4",
+        created_at: "2026-10-04T00:00:00Z",
+      };
+    },
+  });
+
+  assert.equal(createCalled, true);
+  assert.equal(result.reused, false);
+  assert.equal(result.requestId, "prod-retry2-v2");
+});
+
 test("proceedToProductionHandoff rejects when current script is BLOCKED", async () => {
   const v2Blocked: ScriptVersionSummary = {
     id: "script-v2-blocked",

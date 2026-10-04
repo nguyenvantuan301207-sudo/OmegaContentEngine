@@ -35,6 +35,24 @@ def is_internal_structural_label(label: str | None) -> bool:
     return is_structural_or_internal_label(label)
 
 
+def can_resolve_diagram_payload(content: str | None, is_g2_mechanism: bool = False) -> bool:
+    """Pre-validate whether authoritative content can produce at least 2 trustworthy diagram nodes.
+
+    Prevents assigning or committing FLOW_DIAGRAM when semantic requirements cannot be satisfied,
+    without hallucinating or fabricating nodes.
+    """
+    if not content or not isinstance(content, str) or not content.strip():
+        return False
+    text = content.strip()
+    if is_g2_mechanism:
+        mech_spec = resolve_mechanism_diagram_spec(text)
+        if mech_spec is not None and len(mech_spec.nodes) >= 2:
+            return True
+    resolver = TemplatePayloadResolver()
+    nodes, _ = resolver._extract_diagram(text)
+    return len(nodes) >= 2
+
+
 class TemplateEdge(BaseModel):
     model_config = ConfigDict(frozen=True)
     from_node: str

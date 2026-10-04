@@ -293,7 +293,10 @@ class StoryboardEngine:
 
         # 2. DIAGRAM
         if re.search(r'\b(architecture|workflow|pipeline|process|flow|relationship|components|stages)\b', n_lower):
-            return VisualStrategy.DIAGRAM
+            from omega.application.template_payload_resolver import can_resolve_diagram_payload
+
+            if can_resolve_diagram_payload(narration):
+                return VisualStrategy.DIAGRAM
 
         # 3. STATISTIC
         if extract_trustworthy_metric(narration) is not None:

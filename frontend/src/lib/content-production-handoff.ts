@@ -56,13 +56,16 @@ export async function proceedToProductionHandoff({
   }
 
   const existingRequests = await listRequests(channelId);
-  const existing = existingRequests.find(
-    (req) => req.script_version_id === currentScript.id,
+  const reusable = existingRequests.find(
+    (req) =>
+      req.script_version_id === currentScript.id &&
+      req.status !== "FAILED" &&
+      req.status !== "CANCELLED",
   );
 
-  if (existing) {
+  if (reusable) {
     return {
-      requestId: existing.id,
+      requestId: reusable.id,
       reused: true,
       scriptVersionId: currentScript.id,
     };

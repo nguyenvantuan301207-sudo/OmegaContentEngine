@@ -95,12 +95,26 @@ class RuntimeRenderProvenance(dict):
 
 
 def _classify_phase2_error(exc: Exception) -> RenderErrorCode:
-    """Classify known Phase 2 failures without treating input defects as FFmpeg errors."""
-    if isinstance(exc, TemplatePayloadError):
-        return RenderErrorCode.INPUT_INVALID
-    if isinstance(exc, FFmpegExecutionError):
+    """Classify known Phase 2 failures without treating input defects as FFmpeg errors.
+
+    Inspects the causal exception chain (__cause__ and __context__).
+    """
+    curr: BaseException | None = exc
+    seen: set[int] = set()
+    has_ffmpeg_error = False
+
+    while curr is not None and id(curr) not in seen:
+        seen.add(id(curr))
+        if isinstance(curr, TemplatePayloadError):
+            return RenderErrorCode.INPUT_INVALID
+        if isinstance(curr, FFmpegExecutionError):
+            has_ffmpeg_error = True
+        curr = curr.__cause__ or curr.__context__
+
+    if has_ffmpeg_error:
         return RenderErrorCode.FFMPEG_FAILED
-    return RenderErrorCode.FFMPEG_FAILED
+
+    return RenderErrorCode.UNKNOWN
 
 
 class ProductionRenderService:
