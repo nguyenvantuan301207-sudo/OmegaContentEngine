@@ -1,18 +1,110 @@
-# P25-A Controlled Publishing Rollout Architecture
+# P25-A Controlled Publishing Rollout & Authority Architecture
 
 ## 1. Publishing Authority and Scope
 P25-A establishes the canonical, fail-closed publishing rollout boundary for OMEGA Content Engine.
 It bridges accepted creative packages from P24 (P24-A ChannelDNA, P24-B CreativeStyle, P24-C Packaging, P24-D Creative QA) and core production artifacts (P20-C, P21 Narrative, P22 Visual, P23 Audio) into immutable publish intents, isolated provider execution, and non-secret durable publish receipts.
 
-P25-A enforces strict provider boundary separation:
-- Domain and application services interact solely via the `VideoPublishingProvider` abstraction.
-- Zero external mutations are permitted without explicit user authorization (`P25A_REAL_PROVIDER_MUTATED = NO`).
-- All normal execution, testing, and canaries run deterministically against `FakePublishingProvider`.
-- No database schema migrations were added; existing schema (revision 027 isolated / 026 production) fully persists intents, attempts, upload sessions, and state transitions (`P25A_SCHEMA_CHANGE_REQUIRED = NO`, `MIGRATION_028_CREATED = NO`).
+### Canonical Orchestration Authority:
+**`omega.application.publisher.publishing_service.PublishingService`** is the **sole canonical publishing authority**.
+All publishing execution converges on:
+- `PublishingService.prepare_publish(...)`
+- `PublishingService.execute_publish(...)`
+- `PublishingService.reconcile_publish(...)`
 
 ---
 
-## 2. Publish Eligibility Gate & Fail-Closed Taxonomy
+## 2. Canonical Call Graph & Entry Points
+
+```
+             ┌─────────────────────────────────────────────────────────┐
+             │       Publishing Entry Points                           │
+             │  • API: POST /api/v1/publisher/execute-p25              │
+             │  • API: POST /api/v1/publisher/execute (Legacy Seam)    │
+             │  • Worker: execute_publish_task(task_id)                │
+             │  • Scheduler: PublishCalendarService Dispatch           │
+             └────────────────────────────┬────────────────────────────┘
+                                          │
+                                          ▼
+                      ┌───────────────────────────────────────┐
+                      │  omega.application.publisher          │
+                      │  .publishing_service                  │
+                      │  .PublishingService                   │
+                      └───────────────────┬───────────────────┘
+                                          │
+                  ┌───────────────────────┴───────────────────────┐
+                  ▼                                               ▼
+     ┌─────────────────────────┐                     ┌─────────────────────────┐
+     │  PublishEligibilityGate │                     │  ReconciliationEngine   │
+     │  (Fail-Closed Upstream  │                     │  (Authoritative Query)  │
+     │   Validation)           │                     └────────────┬────────────┘
+     └────────────┬────────────┘                                  │
+                  │                                               │
+                  ▼                                               │
+     ┌─────────────────────────┐                                  │
+     │  PublishIntent          │                                  │
+     │  (Canonical Checksum,   │                                  │
+     │   Monotonic Revision)   │                                  │
+     └────────────┬────────────┘                                  │
+                  │                                               │
+                  ▼                                               │
+     ┌─────────────────────────┐                                  │
+     │  PublishingStateMachine │                                  │
+     │  (11 Typed States)      │                                  │
+     └────────────┬────────────┘                                  │
+                  │                                               │
+                  ▼                                               │
+     ┌─────────────────────────┐                                  │
+     │ VideoPublishingProvider │◄─────────────────────────────────┘
+     │ (Narrow Abstraction)    │
+     └────────────┬────────────┘
+                  │
+        ┌─────────┴─────────┐
+        ▼                   ▼
+┌──────────────┐     ┌────────────────────────────────┐
+│ FakeProvider │     │ LegacyAdapterBridgeProvider    │
+│ (Sandbox/CI) │     │ (Wraps BasePlatformAdapter/YT) │
+└───────┬──────┘     └───────────────┬────────────────┘
+        │                            │
+        └──────────────┬─────────────┘
+                       ▼
+         ┌───────────────────────────┐
+         │ External State Verified   │
+         └─────────────┬─────────────┘
+                       ▼
+         ┌───────────────────────────┐
+         │ PublishReceipt            │
+         │ (Non-Secret Durable Truth)│
+         └───────────────────────────┘
+```
+
+---
+
+## 3. Legacy Seams & Reconciliation
+
+### A. `PublishExecutionService` (`publish_service.py`)
+- **Status:** Converted into a thin compatibility delegate into canonical `PublishingService`.
+- **Fail-Closed Gate:** Before execution, `PublishExecutionService.execute_publish` enforces the canonical eligibility gate fail-closed:
+  - If `MediaArtifact` is missing or non-current (`is_current is False`, `status in ("IS_SUPERSEDED", "PURGED", "FAILED")`) -> `BLOCKED (STALE_ARTIFACT / NO_CURRENT_ARTIFACT)`.
+  - If `ProductionRuntimeTruth` is missing -> `BLOCKED (RUNTIME_TRUTH_MISSING)`.
+  - If `CreativeQAResult` is not `PASS` or not accepted -> `BLOCKED (CREATIVE_QA_NOT_PASS)`.
+- **Delegation:** Upon passing gate validation, it delegates execution exclusively to `PublishingService.execute_publish`. It does **not** independently mutate external providers.
+
+### B. `PublishIntentService` (`intent_service.py`)
+- **Status:** Intent persistence and revisioning helpers are unified with canonical intent creation.
+- Monotonic revisions (`revision_number = max_rev + 1`, `supersedes_intent_id`) and immutable transitions in `PublishIntentTransition` obey canonical publishing rules.
+
+### C. Provider Abstraction Unification (`provider_abstraction.py`)
+- **Single Canonical Abstraction:** `VideoPublishingProvider` is the sole interface consumed by domain orchestration.
+- **Legacy Adapter Bridge:** `LegacyAdapterBridgeProvider` adapts legacy `BasePlatformAdapter` instances (including `YouTubeAdapter`) behind `VideoPublishingProvider`.
+- Real provider accounts remain unmutated (`P25A_REAL_PROVIDER_MUTATED = NO`).
+
+### D. Multi-Entrypoint Convergence
+All entry points (direct API, legacy API, background Celery worker, and reconciliation) converge on `PublishingService`.
+Replaying or concurrently executing the same intent across different entry points yields exactly **one** provider object (`provider.total_media_count == 1`).
+
+---
+
+## 4. Publish Eligibility Gate & Fail-Closed Taxonomy
 The `PublishEligibilityGate` strictly enforces fail-closed validation before any publish intent can be prepared or submitted.
 A production is ineligible if ANY upstream evidence is missing, stale, or contradictory.
 
@@ -31,7 +123,7 @@ A production is ineligible if ANY upstream evidence is missing, stale, or contra
 
 ---
 
-## 3. PublishIntent & Canonical Payload Checksum
+## 5. PublishIntent & Canonical Payload Checksum
 A `PublishIntent` is effectively immutable once prepared.
 It deterministically captures:
 - `production_request_id`
@@ -49,7 +141,7 @@ It deterministically captures:
 
 ---
 
-## 4. Publish State Machine
+## 6. Publish State Machine
 Transitions adhere to a strict 11-state deterministic lifecycle (`PublishingState`):
 1. `PREPARED`: Initial eligibility passed, intent prepared.
 2. `ELIGIBLE`: Pre-execution validation verified.
@@ -67,27 +159,7 @@ Illegal transitions fail closed by raising `IllegalPublishStateTransitionError`.
 
 ---
 
-## 5. Provider Abstraction & Fake Implementation
-Orchestration never invokes external vendor SDKs directly.
-The `VideoPublishingProvider` interface abstracts:
-- `upload_media(intent, attempt_id)`
-- `apply_metadata(intent, attempt_id, external_media_id)`
-- `apply_thumbnail(intent, attempt_id, external_media_id)`
-- `apply_visibility(intent, attempt_id, external_media_id)`
-- `schedule_publication(intent, attempt_id, external_media_id)`
-- `fetch_publication_state(platform_account_id, external_media_id)`
-
-The offline `FakePublishingProvider` supports deterministic simulation of:
-- Clean end-to-end publish flows
-- Idempotent duplicates (verifying provider media count remains 1)
-- Retryable failures (transient 503s)
-- Terminal policy rejections
-- Lost local responses (client drop after provider upload succeeds)
-- Authoritative remote state queries
-
----
-
-## 6. PublishReceipt & Secret Boundary
+## 7. PublishReceipt & Secret Boundary
 `PublishReceipt` represents the immutable record of provider truth:
 - `publish_receipt_id`
 - `publish_intent_id`
@@ -104,14 +176,6 @@ The offline `FakePublishingProvider` supports deterministic simulation of:
 ### Secret Boundary:
 - `PublishReceipt` automatically redacts sensitive tokens (`access_token`, `refresh_token`, `client_secret`, `session_token`, `bearer`) in post-initialization hooks.
 - No tokens are logged in structured JSON logs or stored in receipt records.
-
----
-
-## 7. Partial Failure Recovery & Reconciliation
-When execution fails mid-stream (e.g., video uploaded but thumbnail failed, or process restarted after network timeout):
-- `reconcile_publish(intent_id)` queries the provider via `fetch_publication_state`.
-- If the media object exists on the provider, it recovers the `external_media_id` and resumes only the missing steps (metadata, thumbnail, visibility) without re-uploading the video binary.
-- Worker concurrency is fenced via transactional lease claims (`submitting_worker_id`, lease timestamps), preventing parallel executions of the same intent.
 
 ---
 

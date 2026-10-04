@@ -530,8 +530,111 @@ class PublishExecutionService:
         session: AsyncSession,
         task_id: UUID,
         worker_id: str | None = None,
+        provider: Any = None,
     ) -> PublishAttempt:
-        """Main execution loop for a publish task."""
+        """Main execution loop for a publish task — delegates to canonical PublishingService.
+
+        Enforces P25-A Publish Eligibility Gate fail-closed before delegating
+        execution to omega.application.publisher.publishing_service.PublishingService.
+        """
+        now = datetime.now(UTC)
+        settings = get_settings()
+        vault = get_credential_vault()
+        effective_worker_id = worker_id or f"worker-{os.getpid()}"
+
+        # ── 1. Find latest or active PublishIntent for task ──
+        intent_stmt = (
+            select(PublishIntent)
+            .where(
+                PublishIntent.task_id == task_id,
+                (
+                    (PublishIntent.state == PublishIntentState.APPROVED.value)
+                    | (
+                        (PublishIntent.state == PublishIntentState.CLAIMED.value)
+                        & (PublishIntent.lease_expires_at <= now)
+                    )
+                    | (PublishIntent.state == PublishIntentState.PUBLISHED.value)
+                ),
+            )
+            .order_by(PublishIntent.revision_number.desc())
+            .limit(1)
+        )
+        intent_res = await session.execute(intent_stmt)
+        intent = intent_res.scalar_one_or_none()
+        if not intent:
+            raise PublishExecutionError(
+                f"No approved or reclaimable PublishIntent found for Task {task_id}."
+            )
+
+        # ── 2. CANONICAL P25-A GATE ENFORCEMENT ──
+        artifact = await session.get(MediaArtifact, intent.media_artifact_id)
+        if not artifact:
+            raise PublishExecutionError(
+                "Publication blocked by canonical PublishEligibilityGate: NO_CURRENT_ARTIFACT."
+            )
+
+        is_current = getattr(artifact, "is_current", True)
+        status_val = getattr(artifact, "status", None)
+        if not is_current or status_val in ("IS_SUPERSEDED", "PURGED", "FAILED"):
+            raise PublishExecutionError(
+                "Publication blocked by canonical PublishEligibilityGate: STALE_ARTIFACT."
+            )
+
+        from omega.infrastructure.models import ProductionRuntimeTruth
+
+        rt_stmt = select(ProductionRuntimeTruth).where(
+            ProductionRuntimeTruth.artifact_id == artifact.id
+        )
+        runtime_truth = (await session.execute(rt_stmt)).scalar_one_or_none()
+        if not runtime_truth and getattr(artifact, "production_request_id", None) is not None:
+            raise PublishExecutionError(
+                "Publication blocked by canonical PublishEligibilityGate: RUNTIME_TRUTH_MISSING."
+            )
+
+        custom_opts = intent.platform_custom_options or {}
+        cqa_status = custom_opts.get("creative_qa_status")
+        cqa_accepted = custom_opts.get("creative_qa_accepted")
+
+        if cqa_status in ("FAIL", "REVISE") or cqa_accepted is False:
+            raise PublishExecutionError(
+                "Publication blocked by canonical PublishEligibilityGate: CREATIVE_QA_NOT_PASS."
+            )
+
+        # ── 3. CANONICAL PUBLISHING ORCHESTRATION ──
+        from omega.application.publisher.publishing_service import PublishingService
+
+        receipt = await PublishingService.execute_publish(
+            session=session,
+            publish_intent_id=intent.id,
+            provider=provider,
+            worker_id=effective_worker_id,
+        )
+
+        attempt = await session.get(PublishAttempt, receipt.publish_attempt_id)
+        if not attempt:
+            att_stmt = (
+                select(PublishAttempt)
+                .where(PublishAttempt.publish_intent_id == intent.id)
+                .order_by(PublishAttempt.attempt_number.desc())
+                .limit(1)
+            )
+            attempt = (await session.execute(att_stmt)).scalar_one_or_none()
+
+        if not attempt:
+            raise PublishExecutionError(
+                f"PublishAttempt not found after successful canonical execution for intent {intent.id}."
+            )
+
+        return attempt
+
+    @classmethod
+    async def _legacy_execute_internal(
+        cls,
+        session: AsyncSession,
+        task_id: UUID,
+        worker_id: str | None = None,
+    ) -> PublishAttempt:
+        """Internal legacy fallback execution flow retained strictly for reference."""
         now = datetime.now(UTC)
         settings = get_settings()
         vault = get_credential_vault()
