@@ -68,3 +68,39 @@ models/
 backend/models/
 *.onnx
 *.bin
+
+# ============================================================================
+# OMEGA local canary / acceptance artifacts
+# Historical local outputs preserved outside source control.
+# ============================================================================
+
+# General scratch / generated outputs
+/scratch/
+/backend/scratch/
+/backend/artifacts/
+/backend/manual-test-output/
+/manual-test-output/
+/kokoro_samples/
+
+# Historical visual/audio canary outputs
+/p15a-frames/
+/p15a-subtitles/
+/p15c2_canaries/
+/OMEGA-Retry6-Final.mp4
+/P19G2B_CANARY_MASTER.mp4
+/p15a-final.mp4
+/p10_core_review_bundle.txt
+
+# Historical isolated runtime overrides
+/docker-compose.or2.yml
+/docker-compose.or3.yml
+
+# Historical local acceptance/canary harnesses
+/backend/scripts/profile_canary.py
+/backend/scripts/run_p19g2b_canary.py
+/backend/scripts/run_t1b_real_production.py
+/backend/scripts/run_t1c_p18g1_rerender.py
+/backend/scripts/run_t1d2_acceptance.py
+/backend/scripts/run_t1d3_acceptance.py
+
+# ============================================================================
