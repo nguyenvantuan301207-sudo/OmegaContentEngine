@@ -27,9 +27,9 @@ ARG IMAGE_TAG=unknown
 LABEL org.opencontainers.image.title="OMEGA Content Engine" \
       org.opencontainers.image.description="Autonomous Content Operating System" \
       org.opencontainers.image.source="https://github.com/nguyenvantuan301207-sudo/OmegaContentEngine" \
-      org.opencontainers.image.revision="" \
-      org.opencontainers.image.created="" \
-      org.opencontainers.image.version=""
+      org.opencontainers.image.revision="${GIT_COMMIT}" \
+      org.opencontainers.image.created="${BUILD_TIMESTAMP}" \
+      org.opencontainers.image.version="${IMAGE_TAG}"
 
 WORKDIR /app
 
@@ -49,7 +49,7 @@ COPY . .
 RUN chmod +x /app/entrypoint.sh
 
 # Record immutable build provenance metadata for authenticated /ops/status (H5)
-RUN python -c "import json; json.dump({'git_commit': '', 'image_tag': '', 'build_timestamp': ''}, open('/app/build_metadata.json', 'w'))"
+RUN python -c 'import json, os; json.dump({"git_commit": os.environ["GIT_COMMIT"], "image_tag": os.environ["IMAGE_TAG"], "build_timestamp": os.environ["BUILD_TIMESTAMP"]}, open("/app/build_metadata.json", "w"))'
 
 EXPOSE 8000
 
