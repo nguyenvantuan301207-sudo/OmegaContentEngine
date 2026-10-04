@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import enum
 import hashlib
+import json
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
@@ -153,6 +154,10 @@ class ExperimentVariant(BaseModel):
         default=CreativeQAStatus.FAIL,
         description="P24-D CreativeQA status. Must be PASS to participate in experiments.",
     )
+    variant_snapshot_hash: str = Field(
+        default="",
+        description="Deterministic SHA-256 fingerprint of the variant's creative attributes.",
+    )
     provenance: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(frozen=True)
@@ -160,6 +165,20 @@ class ExperimentVariant(BaseModel):
     def is_eligible_for_experiment(self) -> bool:
         """Every variant must independently satisfy P24 acceptance and CreativeQA PASS."""
         return self.is_accepted_p24 and self.creative_qa_status == CreativeQAStatus.PASS
+
+    def get_snapshot_hash(self) -> str:
+        """Compute or return deterministic SHA-256 fingerprint."""
+        if self.variant_snapshot_hash:
+            return self.variant_snapshot_hash
+        payload = {
+            "artifact": str(self.media_artifact_id),
+            "title": self.title or "",
+            "thumbnail": self.thumbnail_ref or "",
+            "dimension": self.change_dimension.value if hasattr(self.change_dimension, "value") else str(self.change_dimension),
+            "packaging_plan": str(self.packaging_plan_id) if self.packaging_plan_id else "",
+        }
+        encoded = json.dumps(payload, sort_keys=True).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
 
 # ── Experiment Definition ─────────────────────────────────────────────────────
@@ -169,7 +188,10 @@ class ExperimentDefinition(BaseModel):
     """Authoritative definition of a controlled experiment."""
 
     experiment_id: UUID = Field(default_factory=uuid4)
+    experiment_root_id: UUID | None = None
     channel_id: UUID
+    target_scope_type: str = Field(default="MEDIA_ARTIFACT")
+    target_scope_id: str = Field(default="")
     experiment_type: ExperimentType
     hypothesis: str = Field(..., min_length=5, description="Falsifiable causal hypothesis statement.")
     primary_metric: str = Field(
@@ -234,7 +256,9 @@ class ExperimentExposure(BaseModel):
     exposure_id: UUID = Field(default_factory=uuid4)
     experiment_id: UUID
     variant_id: UUID
+    exposure_mode: str = Field(default="AGGREGATE")
     subject_id: str = Field(..., description="Subject identity or aggregate window bucket identifier.")
+    subject_key: str | None = None
     exposed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     aggregate_sample_count: int = Field(default=1, ge=1)
     provenance: dict[str, Any] = Field(default_factory=dict)
@@ -272,6 +296,7 @@ class AttributionResult(BaseModel):
     treatment_variant_id: UUID
     primary_metric: str
     analysis_window: str
+    input_lineage_fingerprint: str = Field(default="")
     control_value: float | None = None
     treatment_value: float | None = None
     absolute_difference: float | None = None

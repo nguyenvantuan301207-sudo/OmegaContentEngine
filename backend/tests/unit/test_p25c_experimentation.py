@@ -61,7 +61,7 @@ def valid_control_variant(base_artifact_id) -> ExperimentVariant:
         role=VariantRole.CONTROL,
         change_dimension=ChangeDimension.TITLE,
         media_artifact_id=base_artifact_id,
-        title="Control Video Title",
+        title="Valid Control Title",
         is_accepted_p24=True,
         creative_qa_status=CreativeQAStatus.PASS,
     )
@@ -74,8 +74,8 @@ def valid_treatment_variant(base_artifact_id) -> ExperimentVariant:
         experiment_id=uuid4(),
         role=VariantRole.TREATMENT,
         change_dimension=ChangeDimension.TITLE,
-        media_artifact_id=base_artifact_id,
-        title="Treatment Video Title",
+        media_artifact_id=base_artifact_id,  # Same video artifact
+        title="Valid Treatment Title",
         is_accepted_p24=True,
         creative_qa_status=CreativeQAStatus.PASS,
     )
@@ -84,10 +84,11 @@ def valid_treatment_variant(base_artifact_id) -> ExperimentVariant:
 # ── Matrix A: Experiment Definition ──────────────────────────────────────────
 
 
-def test_matrix_a_valid_experiment_definition(valid_control_variant, valid_treatment_variant):
+@pytest.mark.asyncio
+async def test_matrix_a_valid_experiment_definition(valid_control_variant, valid_treatment_variant):
     """Valid experiment definition initializes with DRAFT status."""
     channel_id = uuid4()
-    exp, variants = AttributionService.create_experiment(
+    exp, variants = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="A more descriptive title increases click-through rate.",
@@ -100,11 +101,12 @@ def test_matrix_a_valid_experiment_definition(valid_control_variant, valid_treat
     assert len(variants) == 2
 
 
-def test_matrix_a_invalid_primary_metric(valid_control_variant, valid_treatment_variant):
+@pytest.mark.asyncio
+async def test_matrix_a_invalid_primary_metric(valid_control_variant, valid_treatment_variant):
     """Unknown primary metric is rejected by validation."""
     channel_id = uuid4()
     with pytest.raises(ValueError) as exc:
-        AttributionService.create_experiment(
+        await AttributionService.create_experiment(
             channel_id=channel_id,
             experiment_type=ExperimentType.TITLE,
             hypothesis="Testing invalid metric.",
@@ -118,7 +120,8 @@ def test_matrix_a_invalid_primary_metric(valid_control_variant, valid_treatment_
 # ── Matrix B: Variants & Creative Gate ────────────────────────────────────────
 
 
-def test_matrix_b_unaccepted_variant_blocked(base_artifact_id, valid_control_variant):
+@pytest.mark.asyncio
+async def test_matrix_b_unaccepted_variant_blocked(base_artifact_id, valid_control_variant):
     """Variant not accepted by CreativeQA is blocked from participating."""
     unaccepted_treatment = ExperimentVariant(
         variant_id=uuid4(),
@@ -131,7 +134,7 @@ def test_matrix_b_unaccepted_variant_blocked(base_artifact_id, valid_control_var
     )
     channel_id = uuid4()
     with pytest.raises(ValueError) as exc:
-        AttributionService.create_experiment(
+        await AttributionService.create_experiment(
             channel_id=channel_id,
             experiment_type=ExperimentType.TITLE,
             hypothesis="Testing unaccepted variant.",
@@ -142,7 +145,8 @@ def test_matrix_b_unaccepted_variant_blocked(base_artifact_id, valid_control_var
     assert "does not satisfy P24 creative acceptance" in str(exc.value)
 
 
-def test_matrix_b_treatment_isolation_artifact_mismatch(valid_control_variant):
+@pytest.mark.asyncio
+async def test_matrix_b_treatment_isolation_artifact_mismatch(valid_control_variant):
     """Packaging experiment with different underlying video artifacts is rejected."""
     different_artifact_id = uuid4()
     confounded_treatment = ExperimentVariant(
@@ -156,7 +160,7 @@ def test_matrix_b_treatment_isolation_artifact_mismatch(valid_control_variant):
     )
     channel_id = uuid4()
     with pytest.raises(ValueError) as exc:
-        AttributionService.create_experiment(
+        await AttributionService.create_experiment(
             channel_id=channel_id,
             experiment_type=ExperimentType.TITLE,
             hypothesis="Testing artifact mismatch.",
@@ -189,10 +193,11 @@ def test_matrix_c_deterministic_assignment():
 # ── Matrix D: Exposure ────────────────────────────────────────────────────────
 
 
-def test_matrix_d_exposure_recording(valid_control_variant, valid_treatment_variant):
+@pytest.mark.asyncio
+async def test_matrix_d_exposure_recording(valid_control_variant, valid_treatment_variant):
     """Exposures are recorded explicitly without fabricating impression identity."""
     channel_id = uuid4()
-    exp, _ = AttributionService.create_experiment(
+    exp, _ = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="Testing exposure recording.",
@@ -200,10 +205,10 @@ def test_matrix_d_exposure_recording(valid_control_variant, valid_treatment_vari
         control_variant=valid_control_variant,
         treatment_variants=[valid_treatment_variant],
     )
-    exp = AttributionService.validate_experiment(exp.experiment_id)
-    exp = AttributionService.start_experiment(exp.experiment_id)
+    exp = await AttributionService.validate_experiment(exp.experiment_id)
+    exp = await AttributionService.start_experiment(exp.experiment_id)
 
-    exp_rec = AttributionService.record_exposure(
+    exp_rec = await AttributionService.record_exposure(
         experiment_id=exp.experiment_id,
         variant_id=valid_control_variant.variant_id,
         subject_id="aggregate-bucket-1h",
@@ -220,7 +225,7 @@ def test_matrix_d_exposure_recording(valid_control_variant, valid_treatment_vari
 async def test_matrix_e_delayed_data_maturity(valid_control_variant, valid_treatment_variant):
     """Delayed provider analytics gates analysis; does not force a winner."""
     channel_id = uuid4()
-    exp, _ = AttributionService.create_experiment(
+    exp, _ = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="Testing delayed freshness.",
@@ -228,8 +233,8 @@ async def test_matrix_e_delayed_data_maturity(valid_control_variant, valid_treat
         control_variant=valid_control_variant,
         treatment_variants=[valid_treatment_variant],
     )
-    exp = AttributionService.validate_experiment(exp.experiment_id)
-    exp = AttributionService.start_experiment(exp.experiment_id)
+    exp = await AttributionService.validate_experiment(exp.experiment_id)
+    exp = await AttributionService.start_experiment(exp.experiment_id)
 
     fake_provider = FakeExperimentProvider()
     fake_provider.configure_freshness(exp.experiment_id, "DELAYED")
@@ -267,7 +272,7 @@ def test_matrix_f_effect_size_calculations():
 async def test_matrix_g_sample_sufficiency_gate(valid_control_variant, valid_treatment_variant):
     """Sample sizes below minimum threshold return INSUFFICIENT_DATA without calling winner."""
     channel_id = uuid4()
-    exp, _ = AttributionService.create_experiment(
+    exp, _ = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="Testing sample sufficiency.",
@@ -276,8 +281,8 @@ async def test_matrix_g_sample_sufficiency_gate(valid_control_variant, valid_tre
         treatment_variants=[valid_treatment_variant],
         minimum_sample_size=1000,
     )
-    exp = AttributionService.validate_experiment(exp.experiment_id)
-    exp = AttributionService.start_experiment(exp.experiment_id)
+    exp = await AttributionService.validate_experiment(exp.experiment_id)
+    exp = await AttributionService.start_experiment(exp.experiment_id)
 
     fake_provider = FakeExperimentProvider()
     fake_provider.configure_variant_metrics(
@@ -299,7 +304,7 @@ async def test_matrix_g_sample_sufficiency_gate(valid_control_variant, valid_tre
 async def test_matrix_h_treatment_better_attribution(valid_control_variant, valid_treatment_variant):
     """Statistically significant positive lift classifies as TREATMENT_BETTER."""
     channel_id = uuid4()
-    exp, _ = AttributionService.create_experiment(
+    exp, _ = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="Treatment title performs better.",
@@ -308,8 +313,8 @@ async def test_matrix_h_treatment_better_attribution(valid_control_variant, vali
         treatment_variants=[valid_treatment_variant],
         minimum_sample_size=5000,
     )
-    exp = AttributionService.validate_experiment(exp.experiment_id)
-    exp = AttributionService.start_experiment(exp.experiment_id)
+    exp = await AttributionService.validate_experiment(exp.experiment_id)
+    exp = await AttributionService.start_experiment(exp.experiment_id)
 
     fake_provider = FakeExperimentProvider()
     # 10,000 impressions each: control=0.05 (500 clicks), treatment=0.062 (620 clicks)
@@ -332,7 +337,7 @@ async def test_matrix_h_treatment_better_attribution(valid_control_variant, vali
 async def test_matrix_h_inconclusive_supported_no_forced_winner(valid_control_variant, valid_treatment_variant):
     """Non-significant difference returns INCONCLUSIVE; never forces a winner."""
     channel_id = uuid4()
-    exp, _ = AttributionService.create_experiment(
+    exp, _ = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="Inconclusive test.",
@@ -341,8 +346,8 @@ async def test_matrix_h_inconclusive_supported_no_forced_winner(valid_control_va
         treatment_variants=[valid_treatment_variant],
         minimum_sample_size=500,
     )
-    exp = AttributionService.validate_experiment(exp.experiment_id)
-    exp = AttributionService.start_experiment(exp.experiment_id)
+    exp = await AttributionService.validate_experiment(exp.experiment_id)
+    exp = await AttributionService.start_experiment(exp.experiment_id)
 
     fake_provider = FakeExperimentProvider()
     # 500 impressions: 0.05 vs 0.052 -> not statistically significant
@@ -361,10 +366,11 @@ async def test_matrix_h_inconclusive_supported_no_forced_winner(valid_control_va
 # ── Matrix I: Overlapping Guard & Confounding ─────────────────────────────────
 
 
-def test_matrix_i_overlapping_experiment_guard(valid_control_variant, valid_treatment_variant):
+@pytest.mark.asyncio
+async def test_matrix_i_overlapping_experiment_guard(valid_control_variant, valid_treatment_variant):
     """Simultaneous active experiments manipulating same dimension on same channel are blocked."""
     channel_id = uuid4()
-    exp1, _ = AttributionService.create_experiment(
+    exp1, _ = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="Experiment 1.",
@@ -372,11 +378,11 @@ def test_matrix_i_overlapping_experiment_guard(valid_control_variant, valid_trea
         control_variant=valid_control_variant,
         treatment_variants=[valid_treatment_variant],
     )
-    AttributionService.validate_experiment(exp1.experiment_id)
+    await AttributionService.validate_experiment(exp1.experiment_id)
 
     # Attempt to create second TITLE experiment on same channel while first is READY
     with pytest.raises(ValueError) as exc:
-        AttributionService.create_experiment(
+        await AttributionService.create_experiment(
             channel_id=channel_id,
             experiment_type=ExperimentType.TITLE,
             hypothesis="Experiment 2 overlapping.",
@@ -394,7 +400,7 @@ def test_matrix_i_overlapping_experiment_guard(valid_control_variant, valid_trea
 async def test_matrix_j_historical_preservation(valid_control_variant, valid_treatment_variant):
     """AttributionResult remains immutable historical evidence."""
     channel_id = uuid4()
-    exp, _ = AttributionService.create_experiment(
+    exp, _ = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="Preservation test.",
@@ -403,8 +409,8 @@ async def test_matrix_j_historical_preservation(valid_control_variant, valid_tre
         treatment_variants=[valid_treatment_variant],
         minimum_sample_size=1000,
     )
-    exp = AttributionService.validate_experiment(exp.experiment_id)
-    exp = AttributionService.start_experiment(exp.experiment_id)
+    exp = await AttributionService.validate_experiment(exp.experiment_id)
+    exp = await AttributionService.start_experiment(exp.experiment_id)
 
     fake_provider = FakeExperimentProvider()
     fake_provider.configure_variant_metrics(
@@ -415,7 +421,7 @@ async def test_matrix_j_historical_preservation(valid_control_variant, valid_tre
     )
 
     result = await AttributionService.analyze_experiment(exp.experiment_id, provider=fake_provider)
-    stored = AttributionService.get_experiment_result(exp.experiment_id)
+    stored = await AttributionService.get_experiment_result(exp.experiment_id)
     assert stored is not None
     assert stored.result_id == result.result_id
     assert stored.classification == result.classification

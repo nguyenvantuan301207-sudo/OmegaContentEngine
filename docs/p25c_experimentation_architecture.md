@@ -22,19 +22,21 @@ graph TD
     J -.-> K[P25-D Future Learning Loop - Inactive]
 ```
 
+---
+
 ## 2. Core Concepts & Boundaries
 
 ### 2.1 Experiment Authority
-`AttributionService` acts as the single canonical seam for experiment lifecycle management (`create_experiment`, `validate_experiment`, `start_experiment`, `record_exposure`, `analyze_experiment`, `complete_experiment`, `invalidate_experiment`). No API handler or external client executes statistical calculations or attribution logic directly.
+`AttributionService` acts as the single canonical entry point for experiment lifecycle management (`create_experiment`, `validate_experiment`, `start_experiment`, `record_exposure`, `analyze_experiment`, `complete_experiment`, `invalidate_experiment`). In-memory dictionaries (`_cache_*`) operate strictly as ephemeral `TEST_ONLY` / `CACHE_ONLY` structures. All authoritative experiment state is persisted in and queried from the relational database via `ExperimentRepository`.
 
 ### 2.2 Variant Semantics & Creative Acceptance Gate
-Each variant (`ExperimentVariant`) models exactly one controlled difference (`TITLE`, `THUMBNAIL`, `TITLE_AND_THUMBNAIL`, `DESCRIPTION`, `PACKAGING_BUNDLE`).
+Each variant (`ExperimentVariant`) models controlled differences across dimensions (`TITLE`, `THUMBNAIL`, `TITLE_AND_THUMBNAIL`, `DESCRIPTION`, `PACKAGING_BUNDLE`).
 - **Independent Acceptance**: Every variant must independently satisfy all P24 acceptance criteria (`is_accepted_p24 = True` and `creative_qa_status = CreativeQAStatus.PASS`). Unaccepted variants cannot enter an experiment.
 - **Treatment Isolation**: For packaging experiments, the underlying video artifact identity (`media_artifact_id`) must remain identical between control and treatment variants. Any variation in the underlying render constitutes an invalid, confounded experiment (`INVALID_EXPERIMENT`).
 
 ### 2.3 Assignment Unit & Deterministic Policy
-Experiments explicitly declare their experimental unit (`IMPRESSION`, `VIEWER`, `PUBLICATION`, `TIME_BUCKET`).
-- **Deterministic Allocation**: Assignments use cryptographically salted SHA-256 hash hashing of the subject identity against a persisted `randomization_seed` and `allocation_ratio`. `Math.random()` or unrecorded ephemeral assignments are strictly disallowed.
+Experiments explicitly declare their experimental unit (`IMPRESSION`, `VIEW`, `TIME_BUCKET`, `PUBLICATION`).
+- **Deterministic Allocation**: Assignments use cryptographically salted SHA-256 hashing of the subject identity against a persisted `randomization_seed` and `control_allocation_ratio`. `Math.random()` or unrecorded ephemeral assignments are strictly disallowed.
 
 ### 2.4 Exposure Model & Temporal Boundary
 An assignment is not an exposure. Deliveries must explicitly record when a subject receives a variant (`ExperimentExposure`).
@@ -63,7 +65,7 @@ P25-C respects P25-B freshness states:
 
 ### 2.10 Confounding Guard, Overlap Guard & Variant Immutability
 - **Confounding Guard**: Mismatched video renders, unaccepted variants, or divergent observation windows trigger an immediate `INVALID_EXPERIMENT` classification.
-- **Overlap Guard**: Simultaneous experiments altering the same dimension on the same channel/population are blocked at creation.
+- **Overlap Guard**: Active experiments manipulating overlapping creative dimensions on the same target scope are deterministically blocked at creation.
 - **Variant Immutability**: Variant snapshots are frozen upon `start_experiment`. Any modification to an active variant invalidates the experiment.
 
 ### 2.11 Historical Preservation & Replay Idempotency
@@ -73,93 +75,101 @@ Completed and mature attribution results (`AttributionResult`) are immutable his
 - **P25-B Input Boundary**: P25-C ingests canonical metric definitions (`CTR`, `watch_time`, `views`) and snapshot freshness states from P25-B without redefining metric semantics.
 - **P25-D Output Boundary**: P25-C reports descriptive causal findings (e.g. `TREATMENT_BETTER for impressions_ctr with +24.0% lift`). It **never** mutates ChannelDNA, generates recommendations, or modifies creative strategies. Those responsibilities are strictly deferred to P25-D.
 
-## 3. Durability & Historical Persistence Architecture Audit
+---
 
-### 3.1 Persistence Audit & Process-Local State Findings
-An exhaustive audit of schema 027 and `backend/src/omega/` revealed that authoritative experiment state is currently held in process-local dictionaries within `AttributionService`:
-- `_experiments`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, ExperimentDefinition]`)
-- `_variants`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, list[ExperimentVariant]]`)
-- `_exposures`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, list[ExperimentExposure]]`)
-- `_results`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, AttributionResult]`)
-- `_variant_snapshots`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, dict[UUID, dict[str, Any]]]`)
+## 3. Durable Relational Persistence Architecture (Migration 028)
 
-While replay idempotency, confounding guards, and variant immutability fully pass within a single process runtime, **authoritative experiment history does not survive process, worker, or container restarts**.
+### 3.1 Single Durable Experiment Authority
+Authoritative state does not live in process memory. `AttributionService` delegates all persistence and query operations to `ExperimentRepository`. In-memory dictionaries exist strictly as non-authoritative caches (`_cache_*`).
 
-### 3.2 Schema 027 Analysis
-Existing schema 027 tables cannot safely or faithfully represent P25-C controlled experiment truth:
-1. `attribution_delivery_evidence` (Migration 018): Designed strictly for copyright/content citation delivery evidence, bound by check constraints (`delivery_channel IN ('PHYSICAL_RENDER', 'PUBLISH_METADATA', 'EXPORT_SIDECAR')`).
-2. `content_campaigns` (Migration 020): Designed for multi-video publishing campaigns without variant, split, or exposure semantics.
-3. `learning_hypotheses` & `learning_hypothesis_evaluations` (Migration 013): Designed for P13 observational cohort learning. They lack variant models, require foreign keys to `learning_cohorts` and `learning_baselines`, enforce incompatible evaluation status enums (`SUPPORTED`, `WEAKENED`, `CONTRADICTED`), and conflate causal attribution with the P25-D learning loop.
+### 3.2 Durable Revision Model
+Experiment configuration history is durable and immutable across revisions:
+- **`experiment_roots`**: Stable root identity (`id`), channel ownership (`channel_id`), target scope (`target_scope_type`, `target_scope_id`), operational status (`DRAFT`, `READY`, `RUNNING`, `PAUSED`, `COMPLETED`, `CANCELLED`, `INVALIDATED`), `start_at`, `end_at`, and pointer to `current_revision_id`.
+- **`experiment_revisions`**: Immutable revision record pinning:
+  - `experiment_root_id`
+  - `revision_number` (strictly positive: `>= 1`)
+  - `supersedes_revision_id` (chaining historical revisions)
+  - `experiment_type`
+  - `hypothesis`
+  - `primary_metric` & `secondary_metrics`
+  - `assignment_policy`
+  - `experiment_unit`
+  - `minimum_sample_size`
+  - `analysis_window_hours`
+  - `provenance`
 
-### 3.3 Proposed Relational Persistence Specification (Migration 028 Request)
-Under the strict Schema Rule, migration 028 was **NOT** created. Durable persistence requires explicit user/system authorization for migration 028 with the following schema:
+### 3.3 Normalized Variant Authority
+Variant membership is canonical and normalized:
+- **`experiment_variants`**:
+  - `id`: Variant identity
+  - `experiment_revision_id`: Pinned to the immutable revision
+  - `role`: `CONTROL` or `TREATMENT`
+  - `change_dimension`: Single manipulated dimension
+  - `media_artifact_id`: Foreign key to `media_artifacts(id)`
+  - `title`, `thumbnail_concept_id`, `thumbnail_ref`: Creative snapshots
+  - `is_accepted_p24`: Boolean gate
+  - `creative_qa_status`: CreativeQA status gate
+  - `variant_snapshot_hash`: Deterministic SHA-256 fingerprint of creative payload
+  - `provenance`: P24 acceptance and QA evidence snapshot
+  - **Database Constraint**: Unique partial index `uq_variant_single_control` (`UNIQUE (experiment_revision_id) WHERE role = 'CONTROL'`) enforces exactly one control variant per revision.
 
-1. **`experiment_definitions` Table**:
-   - `id`: `UUID PRIMARY KEY`
-   - `channel_id`: `UUID NOT NULL REFERENCES channels(id) ON DELETE RESTRICT`
-   - `experiment_type`: `VARCHAR(32) NOT NULL` (Check: `TITLE`, `THUMBNAIL`, `TITLE_AND_THUMBNAIL`, `DESCRIPTION`, `PACKAGING_BUNDLE`)
-   - `hypothesis`: `TEXT NOT NULL`
-   - `primary_metric`: `VARCHAR(64) NOT NULL`
-   - `secondary_metrics`: `JSONB NOT NULL DEFAULT '[]'`
-   - `control_variant_id`: `UUID NOT NULL`
-   - `treatment_variant_ids`: `JSONB NOT NULL`
-   - `assignment_policy`: `JSONB NOT NULL`
-   - `experiment_unit`: `VARCHAR(32) NOT NULL` (Check: `IMPRESSION`, `VIEWER`, `PUBLICATION`, `TIME_BUCKET`)
-   - `minimum_sample_size`: `INTEGER NOT NULL DEFAULT 1000`
-   - `status`: `VARCHAR(32) NOT NULL` (Check: `DRAFT`, `READY`, `RUNNING`, `PAUSED`, `COMPLETED`, `CANCELLED`, `INVALIDATED`)
-   - `start_at`: `TIMESTAMPTZ NULL`
-   - `end_at`: `TIMESTAMPTZ NULL`
-   - `analysis_window_hours`: `INTEGER NOT NULL DEFAULT 24`
-   - `revision_number`: `INTEGER NOT NULL DEFAULT 1`
-   - `provenance`: `JSONB NOT NULL DEFAULT '{}'`
-   - `created_at`: `TIMESTAMPTZ NOT NULL DEFAULT now()`
-   - Unique Partial Index for Overlap Guard: `CREATE UNIQUE INDEX uq_active_channel_experiment_type ON experiment_definitions (channel_id, experiment_type) WHERE status IN ('READY', 'RUNNING');`
+### 3.4 P24 Evidence Snapshotting (No Invented FKs)
+Entities such as `PackagingPlan`, `CreativeQAResult`, `CreativeStylePlan`, and thumbnail concepts are ephemeral domain models without backing relational tables. Migration 028 **does not** create dangling foreign keys to non-existent tables. Instead, immutable evidence (acceptance signatures, QA status, reviewer provenance, and SHA-256 content hashes) is snapshotted into `variant_snapshot_hash` and `provenance`.
 
-2. **`experiment_variants` Table**:
-   - `id`: `UUID PRIMARY KEY`
-   - `experiment_id`: `UUID NOT NULL REFERENCES experiment_definitions(id) ON DELETE CASCADE`
-   - `role`: `VARCHAR(16) NOT NULL` (Check: `CONTROL`, `TREATMENT`)
-   - `change_dimension`: `VARCHAR(32) NOT NULL`
-   - `media_artifact_id`: `UUID NOT NULL REFERENCES media_artifacts(id) ON DELETE RESTRICT`
-   - `packaging_plan_id`: `UUID NULL`
-   - `title`: `TEXT NULL`
-   - `thumbnail_concept_id`: `UUID NULL`
-   - `thumbnail_ref`: `TEXT NULL`
-   - `is_accepted_p24`: `BOOLEAN NOT NULL DEFAULT FALSE`
-   - `creative_qa_status`: `VARCHAR(16) NOT NULL DEFAULT 'FAIL'`
-   - `variant_snapshot_hash`: `VARCHAR(64) NOT NULL`
-   - `provenance`: `JSONB NOT NULL DEFAULT '{}'`
-   - `created_at`: `TIMESTAMPTZ NOT NULL DEFAULT now()`
-   - Constraints: `UNIQUE (experiment_id, id)`, `UNIQUE (experiment_id, role) WHERE role = 'CONTROL'`
+### 3.5 Target Scope & Normalized Overlap Guard
+Every experiment defines an explicit target scope (`target_scope_type`, `target_scope_id`).
+- For packaging experiments, `target_scope_type = "MEDIA_ARTIFACT"` and `target_scope_id` pins the underlying video artifact.
+- Overlap detection does not use a simplistic channel-wide uniqueness rule. Instead, creative dimensions are normalized in `experiment_revision_dimensions`.
+- Active experiments (`status IN ('READY', 'RUNNING')`) are checked for overlapping dimensions on the same target scope. Two experiments on different publications/artifacts proceed concurrently; two experiments altering `TITLE` (or `TITLE_AND_THUMBNAIL`) on the same publication are deterministically rejected.
 
-3. **`experiment_exposures` Table**:
-   - `id`: `UUID PRIMARY KEY`
-   - `experiment_id`: `UUID NOT NULL REFERENCES experiment_definitions(id) ON DELETE CASCADE`
-   - `variant_id`: `UUID NOT NULL`
-   - `subject_id`: `VARCHAR(128) NOT NULL`
-   - `exposed_at`: `TIMESTAMPTZ NOT NULL DEFAULT now()`
-   - `aggregate_sample_count`: `INTEGER NOT NULL DEFAULT 1`
-   - Foreign Key: `FOREIGN KEY (experiment_id, variant_id) REFERENCES experiment_variants(experiment_id, id) ON DELETE CASCADE`
+### 3.6 Durable Exposure Model & Privacy
+- **`experiment_exposures`**:
+  - `experiment_revision_id` & `variant_id`
+  - `exposure_mode`: `INDIVIDUAL`, `AGGREGATE`, or `PROVIDER_NATIVE`
+  - `subject_key`: Optional pseudonymous identifier (e.g. SHA-256 hash with salt). Zero raw PII (emails, names, IP addresses) is stored.
+  - `sample_count`: Non-negative sample count (`>= 1`)
+  - `exposed_at` & `source_lineage`
+  - In `AGGREGATE` and `PROVIDER_NATIVE` modes, no synthetic viewer identities are invented.
 
-4. **`experiment_attribution_results` Table**:
-   - `id`: `UUID PRIMARY KEY`
-   - `experiment_id`: `UUID NOT NULL REFERENCES experiment_definitions(id) ON DELETE RESTRICT`
-   - `revision_number`: `INTEGER NOT NULL DEFAULT 1`
-   - `control_variant_id`: `UUID NOT NULL`
-   - `treatment_variant_id`: `UUID NOT NULL`
-   - `primary_metric`: `VARCHAR(64) NOT NULL`
-   - `analysis_window`: `VARCHAR(32) NOT NULL`
-   - `control_value`: `DOUBLE PRECISION NULL`
-   - `treatment_value`: `DOUBLE PRECISION NULL`
-   - `absolute_difference`: `DOUBLE PRECISION NULL`
-   - `relative_lift`: `DOUBLE PRECISION NULL`
-   - `sample_basis`: `JSONB NOT NULL DEFAULT '{}'`
-   - `statistical_inference`: `JSONB NULL`
-   - `data_maturity`: `VARCHAR(32) NOT NULL`
-   - `classification`: `VARCHAR(32) NOT NULL`
-   - `findings`: `JSONB NOT NULL DEFAULT '[]'`
-   - `input_snapshot_ids`: `JSONB NOT NULL DEFAULT '[]'` (Lineage to exact P25-B snapshots)
-   - `evaluated_at`: `TIMESTAMPTZ NOT NULL DEFAULT now()`
-   - `provenance`: `JSONB NOT NULL DEFAULT '{}'`
-   - Unique Constraint: `UNIQUE (experiment_id, revision_number, analysis_window)` (Guarantees replay idempotency across process restarts)
+### 3.7 Analysis Input Lineage
+Historical attribution analyses pin the exact P25-B performance data used:
+- **`experiment_analysis_inputs`**:
+  - `attribution_result_id`: Foreign key to `experiment_attribution_results(id)`
+  - `provider_snapshot_id`: Foreign key to `analytics_provider_snapshots(id)`
+  - `retrieved_at` & `lineage_metadata`
+  - Enables 100% bitwise-reproducible historical re-evaluation.
 
+### 3.8 Attribution Result Identity & Replay Idempotency
+- **`experiment_attribution_results`**:
+  - Append-only immutable record.
+  - Deterministic unique constraint:
+    `UNIQUE (experiment_revision_id, control_variant_id, treatment_variant_id, metric, analysis_window, input_lineage_fingerprint)`
+  - Replay with identical inputs returns the existing result row without inserting duplicates.
+  - Re-evaluation with updated window or newer provider snapshots inserts a new immutable historical row.
+
+---
+
+## 4. Data Growth Policy & Indexing Strategy
+
+| Table | Expected Volume / Rate | Indexing Strategy | Retention / Growth Policy |
+| :--- | :--- | :--- | :--- |
+| `experiment_roots` | ~1,000 / year | PK (`id`), `idx_experiment_roots_channel` (`channel_id`), `idx_experiment_roots_scope` (`target_scope_type`, `target_scope_id`) | Indefinite retention (canonical business metadata) |
+| `experiment_revisions` | ~1,500 / year | PK (`id`), `idx_experiment_revisions_root` (`experiment_root_id`), `uq_experiment_revisions_root_num` | Immutable append-only history |
+| `experiment_revision_dimensions` | ~3,000 / year | `idx_exp_dim_lookup` (`experiment_revision_id`, `dimension`) | Cascade deletes with root in test teardown; persistent in prod |
+| `experiment_variants` | ~3,000 / year | PK (`id`), `idx_experiment_variants_revision` (`experiment_revision_id`), `uq_variant_single_control` | Immutable variant records |
+| `experiment_exposures` (Aggregate) | ~50,000 / year | `idx_exposures_rev_variant` (`experiment_revision_id`, `variant_id`), `idx_exposures_time` (`exposed_at`) | Aggregate mode keeps volume bounded; individual mode requires partitioning if enabled |
+| `experiment_attribution_results` | ~5,000 / year | PK (`id`), `idx_exp_results_revision` (`experiment_revision_id`), `uq_exp_attribution_replay_identity` | Append-only historical causal findings |
+| `experiment_analysis_inputs` | ~10,000 / year | `idx_exp_analysis_inputs_pair` (`attribution_result_id`, `provider_snapshot_id`) | Normalized snapshot lineage |
+
+---
+
+## 5. Production Boundary & Migration Rule
+
+- **Authorized Scope**: Migration 028 is strictly authorized and applied **ONLY** to development and isolated test databases (`postgresql+asyncpg://omega:omega_isolated_pw@localhost:5433/p20c_final_test`).
+- **Production Environment**:
+  - `PRODUCTION_DB_REVISION = 026`
+  - Production image: `omega:p20-d2-db-hardened-fd26f244`
+  - Publisher absent
+  - P21–P25 undeployed
+  - Zero external platform mutation
+  - `P25C_028_PRODUCTION_MUTATED = NO`

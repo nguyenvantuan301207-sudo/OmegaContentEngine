@@ -6381,3 +6381,304 @@ class PipelineAnalyticsRollup(Base):
             f"<PipelineAnalyticsRollup id={self.id} family={self.metric_family} "
             f"dim={self.dimension_type}:{self.dimension_value} start={self.bucket_start}>"
         )
+
+
+# ── P25-C Controlled Experimentation & Causal Attribution Models ─────────────
+
+
+class ExperimentRoot(Base):
+    """Stable root identity, target scope, and operational state for controlled experiments."""
+
+    __tablename__ = "experiment_roots"
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('DRAFT', 'READY', 'RUNNING', 'PAUSED', 'COMPLETED', 'CANCELLED', 'INVALIDATED')",
+            name="ck_experiment_roots_status",
+        ),
+        CheckConstraint(
+            "target_scope_type IN ('MEDIA_ARTIFACT', 'PUBLICATION', 'CONTENT_PRODUCTION', 'CHANNEL_TIME_BUCKET')",
+            name="ck_experiment_roots_scope_type",
+        ),
+        Index("idx_experiment_roots_target_scope", "target_scope_type", "target_scope_id"),
+        Index("idx_experiment_roots_status", "status"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    target_scope_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    target_scope_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="DRAFT", server_default="DRAFT")
+    current_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("experiment_revisions.id", ondelete="SET NULL", name="fk_experiment_roots_current_revision"),
+        nullable=True,
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    revisions: Mapped[list[ExperimentRevision]] = relationship(
+        "ExperimentRevision",
+        back_populates="root",
+        foreign_keys="ExperimentRevision.experiment_root_id",
+        cascade="all, delete-orphan",
+    )
+
+
+class ExperimentRevision(Base):
+    """Immutable causal configuration revision pinning hypothesis, metrics, and parameters."""
+
+    __tablename__ = "experiment_revisions"
+
+    __table_args__ = (
+        UniqueConstraint("experiment_root_id", "revision_number", name="uq_experiment_revisions_root_rev"),
+        CheckConstraint(
+            "experiment_type IN ('TITLE', 'THUMBNAIL', 'TITLE_AND_THUMBNAIL', 'DESCRIPTION', 'PACKAGING_BUNDLE')",
+            name="ck_experiment_revisions_type",
+        ),
+        CheckConstraint(
+            "experiment_unit IN ('IMPRESSION', 'VIEWER', 'PUBLICATION', 'TIME_BUCKET')",
+            name="ck_experiment_revisions_unit",
+        ),
+        CheckConstraint("revision_number >= 1", name="ck_experiment_revisions_rev_pos"),
+        CheckConstraint("minimum_sample_size >= 1", name="ck_experiment_revisions_min_sample_pos"),
+        CheckConstraint("analysis_window_hours >= 1", name="ck_experiment_revisions_window_pos"),
+        Index("idx_experiment_revisions_root", "experiment_root_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    experiment_root_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("experiment_roots.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    supersedes_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("experiment_revisions.id", ondelete="SET NULL"), nullable=True
+    )
+    experiment_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    hypothesis: Mapped[str] = mapped_column(Text, nullable=False)
+    primary_metric: Mapped[str] = mapped_column(String(64), nullable=False)
+    secondary_metrics: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    assignment_policy: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    experiment_unit: Mapped[str] = mapped_column(String(32), nullable=False)
+    minimum_sample_size: Mapped[int] = mapped_column(Integer, nullable=False, default=1000, server_default="1000")
+    analysis_window_hours: Mapped[int] = mapped_column(Integer, nullable=False, default=24, server_default="24")
+    start_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    end_at: Mapped[DateTime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    root: Mapped[ExperimentRoot] = relationship(
+        "ExperimentRoot", back_populates="revisions", foreign_keys=[experiment_root_id]
+    )
+    dimensions: Mapped[list[ExperimentRevisionDimension]] = relationship(
+        "ExperimentRevisionDimension", back_populates="revision", cascade="all, delete-orphan"
+    )
+    variants: Mapped[list[ExperimentVariantModel]] = relationship(
+        "ExperimentVariantModel", back_populates="revision", cascade="all, delete-orphan"
+    )
+
+
+class ExperimentRevisionDimension(Base):
+    """Normalized changed creative dimension for precise overlap guard detection."""
+
+    __tablename__ = "experiment_revision_dimensions"
+
+    __table_args__ = (
+        UniqueConstraint("experiment_revision_id", "dimension", name="uq_exp_rev_dim"),
+        CheckConstraint(
+            "dimension IN ('TITLE', 'THUMBNAIL', 'DESCRIPTION', 'PACKAGING_BUNDLE', 'AUDIO_MIX', 'VIDEO_RENDER')",
+            name="ck_exp_rev_dim_valid",
+        ),
+        Index("idx_exp_rev_dim_dim", "dimension"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    experiment_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("experiment_revisions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    dimension: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    revision: Mapped[ExperimentRevision] = relationship("ExperimentRevision", back_populates="dimensions")
+
+
+class ExperimentVariantModel(Base):
+    """Normalized experiment variant with pinned media artifact and P24 acceptance snapshot."""
+
+    __tablename__ = "experiment_variants"
+
+    __table_args__ = (
+        UniqueConstraint("experiment_revision_id", "id", name="uq_exp_variants_rev_id"),
+        CheckConstraint("role IN ('CONTROL', 'TREATMENT')", name="ck_exp_variants_role"),
+        CheckConstraint("creative_qa_status IN ('PASS', 'REVISE', 'FAIL')", name="ck_exp_variants_qa_status"),
+        Index(
+            "uq_exp_variants_single_control",
+            "experiment_revision_id",
+            unique=True,
+            postgresql_where=text("role = 'CONTROL'"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    experiment_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("experiment_revisions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    change_dimension: Mapped[str] = mapped_column(String(32), nullable=False)
+    media_artifact_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("media_artifacts.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    packaging_plan_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    thumbnail_concept_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    thumbnail_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_accepted_p24: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    creative_qa_status: Mapped[str] = mapped_column(String(16), nullable=False, default="FAIL", server_default="FAIL")
+    variant_snapshot_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    revision: Mapped[ExperimentRevision] = relationship("ExperimentRevision", back_populates="variants")
+
+
+class ExperimentExposureModel(Base):
+    """Durable exposure record supporting individual, aggregate, and provider-native modes."""
+
+    __tablename__ = "experiment_exposures"
+
+    __table_args__ = (
+        CheckConstraint(
+            "exposure_mode IN ('INDIVIDUAL', 'AGGREGATE', 'PROVIDER_NATIVE')",
+            name="ck_exp_exposures_mode",
+        ),
+        CheckConstraint("sample_count >= 1", name="ck_exp_exposures_sample_pos"),
+        ForeignKeyConstraint(
+            ["experiment_revision_id", "variant_id"],
+            ["experiment_variants.experiment_revision_id", "experiment_variants.id"],
+            ondelete="CASCADE",
+            name="fk_exp_exposures_variant",
+        ),
+        Index("idx_exp_exposures_rev_var", "experiment_revision_id", "variant_id"),
+        Index("idx_exp_exposures_exposed_at", "exposed_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    experiment_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("experiment_revisions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    variant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    exposure_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    subject_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    exposed_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    source_lineage: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class ExperimentAttributionResultModel(Base):
+    """Immutable, append-only causal attribution result with deterministic replay identity."""
+
+    __tablename__ = "experiment_attribution_results"
+
+    __table_args__ = (
+        CheckConstraint(
+            "data_maturity IN ('FRESH', 'MATURE', 'DELAYED', 'STALE', 'UNAVAILABLE', 'INSUFFICIENT_DATA')",
+            name="ck_attr_results_maturity",
+        ),
+        CheckConstraint(
+            "classification IN ('INCONCLUSIVE', 'CONTROL_BETTER', 'TREATMENT_BETTER', 'NO_MEANINGFUL_DIFFERENCE', 'INSUFFICIENT_DATA', 'INVALID_EXPERIMENT')",
+            name="ck_attr_results_classification",
+        ),
+        ForeignKeyConstraint(
+            ["experiment_revision_id", "control_variant_id"],
+            ["experiment_variants.experiment_revision_id", "experiment_variants.id"],
+            ondelete="RESTRICT",
+            name="fk_attr_res_control",
+        ),
+        ForeignKeyConstraint(
+            ["experiment_revision_id", "treatment_variant_id"],
+            ["experiment_variants.experiment_revision_id", "experiment_variants.id"],
+            ondelete="RESTRICT",
+            name="fk_attr_res_treatment",
+        ),
+        UniqueConstraint(
+            "experiment_revision_id",
+            "control_variant_id",
+            "treatment_variant_id",
+            "metric",
+            "analysis_window",
+            "input_lineage_fingerprint",
+            name="uq_attr_results_deterministic_identity",
+        ),
+        Index("idx_attr_results_eval_at", "evaluated_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    experiment_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("experiment_revisions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    control_variant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    treatment_variant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    metric: Mapped[str] = mapped_column(String(64), nullable=False)
+    analysis_window: Mapped[str] = mapped_column(String(32), nullable=False)
+    input_lineage_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    control_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    treatment_value: Mapped[float | None] = mapped_column(Float, nullable=True)
+    absolute_difference: Mapped[float | None] = mapped_column(Float, nullable=True)
+    relative_lift: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_basis: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+    statistical_inference: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    data_maturity: Mapped[str] = mapped_column(String(32), nullable=False)
+    classification: Mapped[str] = mapped_column(String(32), nullable=False)
+    findings: Mapped[list[Any]] = mapped_column(JSONB, nullable=False, default=list, server_default="[]")
+    evaluated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    provenance: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
+
+    analysis_inputs: Mapped[list[ExperimentAnalysisInputModel]] = relationship(
+        "ExperimentAnalysisInputModel", back_populates="attribution_result", cascade="all, delete-orphan"
+    )
+
+
+class ExperimentAnalysisInputModel(Base):
+    """Normalized lineage pinning exact P25-B performance snapshots used for an attribution analysis."""
+
+    __tablename__ = "experiment_analysis_inputs"
+
+    __table_args__ = (
+        UniqueConstraint("attribution_result_id", "snapshot_checksum", name="uq_analysis_input_checksum"),
+        Index("idx_analysis_inputs_attr", "attribution_result_id"),
+        Index("idx_analysis_inputs_snap", "snapshot_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    attribution_result_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("experiment_attribution_results.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("analytics_provider_snapshots.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    snapshot_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_checksum: Mapped[str] = mapped_column(String(64), nullable=False)
+    retrieval_timestamp: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    attribution_result: Mapped[ExperimentAttributionResultModel] = relationship(
+        "ExperimentAttributionResultModel", back_populates="analysis_inputs"
+    )

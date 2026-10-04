@@ -85,7 +85,7 @@ async def test_section_39_isolated_experiment_canary(capsys):
     )
 
     # 2. Define Experiment with locked primary metric
-    exp_def, bound_variants = AttributionService.create_experiment(
+    exp_def, bound_variants = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE_AND_THUMBNAIL,
         hypothesis="A question-driven title and event horizon thumbnail increases CTR by >15%.",
@@ -101,10 +101,10 @@ async def test_section_39_isolated_experiment_canary(capsys):
     bound_trt = bound_variants[1]
 
     # 3. Validate and Start Experiment
-    validated_exp = AttributionService.validate_experiment(exp_def.experiment_id)
+    validated_exp = await AttributionService.validate_experiment(exp_def.experiment_id)
     assert validated_exp.status == ExperimentStatus.READY
 
-    running_exp = AttributionService.start_experiment(exp_def.experiment_id)
+    running_exp = await AttributionService.start_experiment(exp_def.experiment_id)
     assert running_exp.status == ExperimentStatus.RUNNING
 
     # 4. Configure Deterministic Fake Experiment Provider
@@ -229,7 +229,7 @@ async def test_section_40_case_a_different_underlying_video_artifacts():
 
     # Creation gate strictly blocks this confounding design
     with pytest.raises(ValueError) as exc:
-        AttributionService.create_experiment(
+        await AttributionService.create_experiment(
             channel_id=channel_id,
             experiment_type=ExperimentType.TITLE,
             hypothesis="Testing title with mismatched video renders",
@@ -265,7 +265,7 @@ async def test_section_40_case_b_treatment_data_delayed():
         creative_qa_status=CreativeQAStatus.PASS,
     )
 
-    exp_def, _ = AttributionService.create_experiment(
+    exp_def, _ = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="Title test under delayed provider ingestion",
@@ -273,8 +273,8 @@ async def test_section_40_case_b_treatment_data_delayed():
         control_variant=control_variant,
         treatment_variants=[treatment_variant],
     )
-    AttributionService.validate_experiment(exp_def.experiment_id)
-    AttributionService.start_experiment(exp_def.experiment_id)
+    await AttributionService.validate_experiment(exp_def.experiment_id)
+    await AttributionService.start_experiment(exp_def.experiment_id)
 
     fake_provider = FakeExperimentProvider(provider_name="FAKE")
     # Simulate provider ingestion lag
@@ -314,7 +314,7 @@ async def test_section_40_case_c_variant_changed_after_start():
         creative_qa_status=CreativeQAStatus.PASS,
     )
 
-    exp_def, bound_variants = AttributionService.create_experiment(
+    exp_def, bound_variants = await AttributionService.create_experiment(
         channel_id=channel_id,
         experiment_type=ExperimentType.TITLE,
         hypothesis="Title test where treatment mutates after start",
@@ -323,8 +323,8 @@ async def test_section_40_case_c_variant_changed_after_start():
         treatment_variants=[treatment_variant],
     )
     bound_trt = bound_variants[1]
-    AttributionService.validate_experiment(exp_def.experiment_id)
-    AttributionService.start_experiment(exp_def.experiment_id)
+    await AttributionService.validate_experiment(exp_def.experiment_id)
+    await AttributionService.start_experiment(exp_def.experiment_id)
 
     # Tamper with variant after start
     tampered_variant = ExperimentVariant(
@@ -347,5 +347,5 @@ async def test_section_40_case_c_variant_changed_after_start():
     assert any("variant immutability violated" in f for f in result.findings)
 
     # Experiment definition status marked INVALIDATED
-    updated_exp = AttributionService.get_experiment(exp_def.experiment_id)
+    updated_exp = await AttributionService.get_experiment(exp_def.experiment_id)
     assert updated_exp.status == ExperimentStatus.INVALIDATED
