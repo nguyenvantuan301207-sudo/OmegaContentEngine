@@ -21,6 +21,7 @@ from omega.infrastructure.models import (
     AnalyticsComputedMetric,
     AnalyticsMetricLatestPointer,
     AnalyticsMetricObservation,
+    AnalyticsProviderSnapshot,
     AnalyticsQuotaBucket,
     AnalyticsWindow,
 )
@@ -507,3 +508,132 @@ async def get_pipeline_analytics_historical(
         },
         "series": series,
     }
+
+
+# ── P25-B Published Performance Analytics Endpoints ─────────────────────────
+
+
+class PublishedPerformanceApiResponse(BaseModel):
+    status: str  # NO_DATA, DELAYED, AVAILABLE, STALE, PROVIDER_UNAVAILABLE
+    receipt_id: UUID
+    data: dict[str, Any] | None = None
+
+
+@router.get("/performance/{receipt_id}/latest")
+async def get_published_performance_latest(
+    receipt_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> PublishedPerformanceApiResponse:
+    """Read-only query for latest published performance snapshot.
+
+    Never triggers provider mutation or public publishing.
+    """
+    _check_analytics_api_gate()
+
+    # Look up asset by publish_intent_id or asset id
+    stmt = select(AnalyticsAsset).where(
+        (AnalyticsAsset.publish_intent_id == receipt_id) | (AnalyticsAsset.id == receipt_id)
+    )
+    asset = (await session.execute(stmt)).scalar_one_or_none()
+
+    if not asset:
+        return PublishedPerformanceApiResponse(
+            status="NO_DATA",
+            receipt_id=receipt_id,
+            data=None,
+        )
+
+    if asset.asset_status in ("PROVIDER_DELETED", "UNAVAILABLE"):
+        return PublishedPerformanceApiResponse(
+            status="PROVIDER_UNAVAILABLE",
+            receipt_id=receipt_id,
+            data={"asset_status": asset.asset_status},
+        )
+
+    # Fetch latest snapshot
+    stmt_snap = (
+        select(AnalyticsProviderSnapshot)
+        .where(AnalyticsProviderSnapshot.asset_id == asset.id)
+        .order_by(AnalyticsProviderSnapshot.retrieval_timestamp.desc())
+        .limit(1)
+    )
+    snap = (await session.execute(stmt_snap)).scalar_one_or_none()
+
+    if not snap:
+        return PublishedPerformanceApiResponse(
+            status="NO_DATA",
+            receipt_id=receipt_id,
+            data=None,
+        )
+
+    now_utc = datetime.now(UTC)
+    snap_time = snap.retrieval_timestamp if snap.retrieval_timestamp.tzinfo else snap.retrieval_timestamp.replace(tzinfo=UTC)
+    is_stale = (now_utc - snap_time) > timedelta(days=7)
+    status_label = "STALE" if is_stale else "AVAILABLE"
+
+    # Fetch latest observations
+    stmt_obs = select(AnalyticsMetricObservation).where(AnalyticsMetricObservation.snapshot_id == snap.id)
+    obs_list = (await session.execute(stmt_obs)).scalars().all()
+    metrics = {
+        obs.metric_name: {
+            "value": obs.integer_value if obs.integer_value is not None else obs.numeric_value,
+            "quality": obs.metric_quality,
+        }
+        for obs in obs_list
+    }
+
+    return PublishedPerformanceApiResponse(
+        status=status_label,
+        receipt_id=receipt_id,
+        data={
+            "snapshot_id": str(snap.id),
+            "provider": asset.provider,
+            "external_media_id": asset.provider_video_id,
+            "observed_at": snap.retrieval_timestamp.isoformat(),
+            "metrics": metrics,
+        },
+    )
+
+
+@router.get("/performance/{receipt_id}/history")
+async def get_published_performance_history(
+    receipt_id: UUID,
+    session: Annotated[AsyncSession, Depends(get_db)],
+) -> PublishedPerformanceApiResponse:
+    """Read-only query for chronological performance history."""
+    _check_analytics_api_gate()
+
+    stmt = select(AnalyticsAsset).where(
+        (AnalyticsAsset.publish_intent_id == receipt_id) | (AnalyticsAsset.id == receipt_id)
+    )
+    asset = (await session.execute(stmt)).scalar_one_or_none()
+
+    if not asset:
+        return PublishedPerformanceApiResponse(
+            status="NO_DATA",
+            receipt_id=receipt_id,
+            data=None,
+        )
+
+    stmt_snaps = (
+        select(AnalyticsProviderSnapshot)
+        .where(AnalyticsProviderSnapshot.asset_id == asset.id)
+        .order_by(AnalyticsProviderSnapshot.retrieval_timestamp.asc())
+    )
+    snaps = (await session.execute(stmt_snaps)).scalars().all()
+
+    timeline = []
+    for s in snaps:
+        timeline.append(
+            {
+                "snapshot_id": str(s.id),
+                "observed_at": s.retrieval_timestamp.isoformat(),
+                "payload_checksum": s.payload_checksum,
+            }
+        )
+
+    return PublishedPerformanceApiResponse(
+        status="AVAILABLE" if timeline else "NO_DATA",
+        receipt_id=receipt_id,
+        data={"timeline": timeline, "total_snapshots": len(timeline)},
+    )
