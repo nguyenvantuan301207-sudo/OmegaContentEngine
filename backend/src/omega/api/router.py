@@ -21,6 +21,7 @@ from omega.api.brand_assets import router as brand_assets_router
 from omega.api.campaigns import router as campaigns_router
 from omega.api.channels import router as channels_router
 from omega.api.content import router as content_router
+from omega.api.experiments import router as experiments_router
 from omega.api.guardian import router as guardian_router
 from omega.api.health import router as health_router
 from omega.api.jobs import router as jobs_router
@@ -59,3 +60,4 @@ api_router.include_router(publisher_operations_router)
 api_router.include_router(analytics_router)
 api_router.include_router(learning_router)
 api_router.include_router(autonomy_router)
+api_router.include_router(experiments_router)
