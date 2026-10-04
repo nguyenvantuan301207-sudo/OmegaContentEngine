@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.main import app
+from tests.research_fixtures import seed_sufficient_research
 
 
 @pytest.mark.asyncio
@@ -137,6 +138,7 @@ async def test_content_engine_full_smoke(db_session: AsyncSession) -> None:
         assert ev2_res.status_code == 201
 
         # Run Research to produce ResearchBrief v1
+        await seed_sufficient_research(client, channel_id, research_req_id)
         brief_run_res = await client.post(
             f"/api/v1/channels/{channel_id}/research/{research_req_id}/run"
         )
@@ -153,7 +155,7 @@ async def test_content_engine_full_smoke(db_session: AsyncSession) -> None:
                 "topic_candidate_id": cand_id,
                 "research_brief_id": brief_v1_id,
                 "content_type": "YOUTUBE_LONGFORM",
-                "target_duration_seconds": 480,
+                "target_duration_seconds": 720,
             },
         )
         assert content_req_res.status_code == 201

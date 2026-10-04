@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.main import app
+from tests.research_fixtures import seed_sufficient_research
 
 
 @pytest.mark.asyncio
@@ -39,6 +40,7 @@ async def test_script_revisions_v1_to_v2_and_immutability(db_session: AsyncSessi
             json={"topic_candidate_id": cand_id, "research_question": "Q1"},
         )
         research_req_id = r_res.json()["id"]
+        await seed_sufficient_research(client, channel_id, research_req_id)
         b_res = await client.post(f"/api/v1/channels/{channel_id}/research/{research_req_id}/run")
         brief_id = b_res.json()["id"]
 

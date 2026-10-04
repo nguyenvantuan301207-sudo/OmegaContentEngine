@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.main import app
+from tests.research_fixtures import seed_sufficient_research
 
 
 @pytest.mark.asyncio
@@ -79,6 +80,7 @@ async def test_content_request_stays_pinned_to_brief_v1_after_brief_v2(
             },
         )
 
+        await seed_sufficient_research(client, channel_id, research_req_id)
         run_v1_res = await client.post(
             f"/api/v1/channels/{channel_id}/research/{research_req_id}/run"
         )

@@ -43,6 +43,7 @@ from omega.domain.content import (
     ScriptVersionResponse,
     ScriptVersionSummaryResponse,
 )
+from omega.domain.research import ResearchOutcome
 from omega.domain.topic import TopicStatus
 from omega.infrastructure.models import (
     Channel,
@@ -68,6 +69,18 @@ from omega.logging import get_logger
 logger = get_logger("omega-content-service")
 
 
+def _require_sufficient_brief(brief: ResearchBrief | None) -> None:
+    """Enforce the authority boundary for the exact pinned research revision."""
+    if brief is None:
+        raise ValueError("Pinned ResearchBrief does not exist.")
+    if brief.outcome != ResearchOutcome.SUFFICIENT.value:
+        raise ValueError(
+            f"ResearchBrief '{brief.id}' has outcome {brief.outcome}. "
+            "Content generation requires a SUFFICIENT ResearchBrief; "
+            "PARTIAL or INSUFFICIENT research cannot become authoritative content input."
+        )
+
+
 async def create_request(
     session: AsyncSession,
     channel_id: UUID,
@@ -81,6 +94,7 @@ async def create_request(
         )
         existing = (await session.execute(stmt_existing)).scalar_one_or_none()
         if existing:
+            _require_sufficient_brief(await session.get(ResearchBrief, existing.research_brief_id))
             return ContentGenerationRequestResponse.model_validate(existing)
     # 1. Validate Channel
     chan_res = await session.execute(select(Channel).where(Channel.id == channel_id))
@@ -116,6 +130,7 @@ async def create_request(
         raise ValueError(
             f"ResearchBrief with ID '{request_in.research_brief_id}' does not exist or does not match channel/topic."
         )
+    _require_sufficient_brief(brief)
 
     # 4. Resolve Context Mode and Pin ChannelDNARevision
     mode: ContentGenerationMode
@@ -204,6 +219,7 @@ async def create_request(
             )
             existing = (await session.execute(stmt_existing)).scalar_one_or_none()
             if existing:
+                _require_sufficient_brief(await session.get(ResearchBrief, existing.research_brief_id))
                 return ContentGenerationRequestResponse.model_validate(existing)
         raise
 
@@ -296,6 +312,8 @@ async def generate_content(
     req = req_res.scalar_one_or_none()
     if not req:
         raise ValueError(f"ContentGenerationRequest '{request_id}' not found.")
+
+    _require_sufficient_brief(req.research_brief)
 
     if req.status == ContentRequestStatus.RUNNING.value:
         raise ValueError("Content generation request is already running.")

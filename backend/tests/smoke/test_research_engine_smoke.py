@@ -94,11 +94,12 @@ async def test_research_engine_e2e_smoke(db_session: AsyncSession) -> None:
                 "title": "Synchronous WSGI vs ASGI Comparison",
                 "publisher": "Legacy Systems Digest",
                 "url": "https://legacysystems.org/wsgi-vs-asgi",
-                "primary_source_status": "CLAIMED",
+                "primary_source_status": "CONFIRMED",
                 "content_excerpt": "ASGI provides no throughput advantages over standard gunicorn WSGI synchronous workers.",
             },
         )
         assert src3_res.status_code == 201
+        assert src3_res.json()["quality_score"] >= 50.0
         src3_id = src3_res.json()["id"]
 
         # Step 5: Add Claims and First-Class Evidence

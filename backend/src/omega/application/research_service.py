@@ -516,7 +516,11 @@ async def run_research(
     )
     sources = src_res.scalars().all()
 
-    # 3. Cluster source independence
+    # Stored sources remain auditable; only qualifying sources have evidence authority.
+    eligible_sources = [s for s in sources if s.quality_score >= req.minimum_source_quality]
+    eligible_source_ids = {s.id for s in eligible_sources}
+
+    # 3. Cluster effective source independence without rewriting stored source rows.
     sources_data = [
         {
             "id": s.id,
@@ -528,11 +532,11 @@ async def run_research(
             "quality_score": s.quality_score,
             "primary_source_status": PrimarySourceStatus(s.primary_source_status),
         }
-        for s in sources
+        for s in eligible_sources
     ]
     clusters = cluster_source_independence(sources_data)
-    for s in sources:
-        s.independence_cluster_id = clusters.get(s.id)
+    for source_data in sources_data:
+        source_data["independence_cluster_id"] = clusters[source_data["id"]]
 
     # 4. Extract claims from sources if no claims have been added yet
     claim_res = await session.execute(
@@ -543,7 +547,7 @@ async def run_research(
     claims = list(claim_res.scalars().all())
 
     if not claims:
-        for s in sources:
+        for s in eligible_sources:
             extracted = extract_deterministic_claims_from_source(
                 source_title=s.title,
                 source_excerpt=s.content_excerpt,
@@ -588,6 +592,7 @@ async def run_research(
                 "strength_score": e.strength_score,
             }
             for e in c.evidence
+            if e.source_id in eligible_source_ids
         ]
         detected = detect_claim_conflicts(c.id, c.claim_text, ev_data)
         for conf_dict in detected:
@@ -616,6 +621,7 @@ async def run_research(
                 "strength_score": e.strength_score,
             }
             for e in c.evidence
+            if e.source_id in eligible_source_ids
         ]
         claim_conflicts = [conf for conf in open_conflicts if conf.get("claim_id") == c.id]
         metrics = evaluate_claim_confidence(
@@ -637,12 +643,10 @@ async def run_research(
     # 7. Calculate overall metrics and outcome
     verified_claims = [c for c in claims if c.is_verified]
     uncertain_claims = [c for c in claims if not c.is_verified]
-    independent_clusters_count = len(
-        {s.independence_cluster_id for s in sources if s.independence_cluster_id}
-    )
+    independent_clusters_count = len(set(clusters.values()))
 
     outcome = determine_research_outcome(
-        sources_count=len(sources),
+        sources_count=len(eligible_sources),
         independent_sources_count=independent_clusters_count,
         verified_claims_count=len(verified_claims),
         open_high_conflicts_count=len(open_conflicts),
@@ -676,6 +680,8 @@ async def run_research(
     for c in verified_claims:
         citations = []
         for e in c.evidence:
+            if e.source_id not in eligible_source_ids:
+                continue
             src_obj = next((s for s in sources if s.id == e.source_id), None)
             citations.append(
                 {
@@ -743,7 +749,8 @@ async def run_research(
     topic_title = req.topic_candidate.title if req.topic_candidate else "Research Topic"
     summary_text = (
         f"Research briefing for '{topic_title}'. "
-        f"Analyzed {len(sources)} sources across {independent_clusters_count} independent clusters. "
+        f"Analyzed {len(eligible_sources)} qualifying sources of {len(sources)} stored sources "
+        f"across {independent_clusters_count} independent clusters. "
         f"Verified {len(verified_claims)} factual claims with {len(open_conflicts)} open conflicts. "
         f"Outcome: {outcome.value}."
     )
@@ -775,10 +782,12 @@ async def run_research(
         ],
         sources_summary={
             "total_sources": len(sources),
+            "eligible_sources": len(eligible_sources),
+            "below_quality_threshold_sources": len(sources) - len(eligible_sources),
             "independent_clusters": independent_clusters_count,
-            "high_quality_sources": sum(1 for s in sources if s.quality_score >= 70.0),
+            "high_quality_sources": sum(1 for s in eligible_sources if s.quality_score >= 70.0),
             "confirmed_primary_sources": sum(
-                1 for s in sources if s.primary_source_status == PrimarySourceStatus.CONFIRMED.value
+                1 for s in eligible_sources if s.primary_source_status == PrimarySourceStatus.CONFIRMED.value
             ),
         },
     )

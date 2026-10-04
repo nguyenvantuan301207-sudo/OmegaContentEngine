@@ -58,6 +58,10 @@ import {
   WorkflowTabs,
 } from "@/components/workflow/WorkflowPrimitives";
 import { useOperatorContext } from "@/lib/operator-context";
+import {
+  formatResearchConfidence,
+  isSufficientResearchBrief,
+} from "@/lib/research-authority";
 
 type ContentView = "script" | "intent" | "outline" | "citations" | "qa";
 
@@ -203,6 +207,7 @@ export default function ContentEnginePage({
     void loadData();
   }, [loadData]);
   const archived = channel?.state === "ARCHIVED";
+  const selectedBrief = briefs.find((brief) => brief.id === briefId);
 
   async function perform(
     action: () => Promise<unknown>,
@@ -233,7 +238,7 @@ export default function ContentEnginePage({
     try {
       const values = await listResearchBriefs(channelId, id);
       setBriefs(values);
-      setBriefId(values[0]?.id || "");
+      setBriefId(values.find(isSufficientResearchBrief)?.id || "");
     } catch (reason: unknown) {
       setError(
         reason instanceof Error
@@ -247,6 +252,10 @@ export default function ContentEnginePage({
   async function createRequest(event: React.FormEvent) {
     event.preventDefault();
     if (!topicId || !briefId) return;
+    if (!isSufficientResearchBrief(selectedBrief)) {
+      setError("Content generation requires a SUFFICIENT research brief.");
+      return;
+    }
     await perform(async () => {
       await createContentRequest(channelId, {
         topic_candidate_id: topicId,
@@ -563,7 +572,7 @@ export default function ContentEnginePage({
               className="btn btn-primary"
               type="submit"
               form="content-request-form"
-              disabled={busy || !topicId || !briefId}
+              disabled={busy || !topicId || !isSufficientResearchBrief(selectedBrief)}
             >
               Create request
             </button>
@@ -594,8 +603,8 @@ export default function ContentEnginePage({
             label="Research brief"
             required
             description={
-              topicId && briefs.length === 0
-                ? "No brief is currently available for this topic."
+              topicId && !briefs.some(isSufficientResearchBrief)
+                ? "No SUFFICIENT research brief is available for this topic. Complete research before creating content."
                 : undefined
             }
           >
@@ -606,9 +615,14 @@ export default function ContentEnginePage({
             >
               <option value="">Choose a brief</option>
               {briefs.map((briefItem) => (
-                <option value={briefItem.id} key={briefItem.id}>
+                <option
+                  value={briefItem.id}
+                  key={briefItem.id}
+                  disabled={!isSufficientResearchBrief(briefItem)}
+                >
                   v{briefItem.version} · {briefItem.outcome} ·{" "}
-                  {Math.round(briefItem.overall_confidence * 100)}%
+                  {formatResearchConfidence(briefItem.overall_confidence)}
+                  {!isSufficientResearchBrief(briefItem) && " (blocked for content)"}
                 </option>
               ))}
             </select>

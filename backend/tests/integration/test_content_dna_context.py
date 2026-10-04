@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.infrastructure.models import MissionExecution
 from omega.main import app
+from tests.research_fixtures import seed_sufficient_research
 
 
 @pytest.mark.asyncio
@@ -41,6 +42,7 @@ async def test_archived_channel_rejects_content_creation(db_session: AsyncSessio
             json={"topic_candidate_id": cand_id, "research_question": "Q1"},
         )
         r_id = r_res.json()["id"]
+        await seed_sufficient_research(client, channel_id, r_id)
         b_res = await client.post(f"/api/v1/channels/{channel_id}/research/{r_id}/run")
         brief_id = b_res.json()["id"]
 
@@ -104,6 +106,7 @@ async def test_mission_execution_mode_enforces_selected_topic(db_session: AsyncS
             json={"topic_candidate_id": cand_id, "research_question": "Q1"},
         )
         r_id = r_res.json()["id"]
+        await seed_sufficient_research(client, channel_id, r_id)
         b_res = await client.post(f"/api/v1/channels/{channel_id}/research/{r_id}/run")
         brief_id = b_res.json()["id"]
 

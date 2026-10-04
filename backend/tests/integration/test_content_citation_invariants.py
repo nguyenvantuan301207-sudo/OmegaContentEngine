@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from omega.application import content_service
 from omega.domain.content import ContentGenerationRequestCreate
 from omega.main import app
+from tests.research_fixtures import seed_sufficient_research
 
 
 class ForeignBriefLeakingProvider:
@@ -132,6 +133,7 @@ async def test_cross_brief_citation_rejection(db_session: AsyncSession) -> None:
         )
         research_req_id = r_res.json()["id"]
 
+        await seed_sufficient_research(client, channel_id, research_req_id)
         run_res = await client.post(f"/api/v1/channels/{channel_id}/research/{research_req_id}/run")
         genuine_brief_id = uuid.UUID(run_res.json()["id"])
 
@@ -192,6 +194,7 @@ async def test_cross_channel_request_creation_rejection(db_session: AsyncSession
             json={"topic_candidate_id": t_id, "research_question": "Q1"},
         )
         r_id = r_res.json()["id"]
+        await seed_sufficient_research(client, chan1_id, r_id)
         b_res = await client.post(f"/api/v1/channels/{chan1_id}/research/{r_id}/run")
         brief1_id = b_res.json()["id"]
 

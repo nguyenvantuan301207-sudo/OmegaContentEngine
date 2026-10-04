@@ -8,6 +8,38 @@ import {
   validateCampaignDraftItems,
 } from "../src/lib/content-workflow.ts";
 import { getBreadcrumbs, getChannelNavigation } from "../src/lib/navigation.ts";
+import { readFileSync } from "node:fs";
+import { formatResearchConfidence, isSufficientResearchBrief } from "../src/lib/research-authority.ts";
+
+test("research confidence preserves the backend 0..100 percentage scale", () => {
+  assert.equal(formatResearchConfidence(50.45), "50.45%");
+  assert.equal(formatResearchConfidence(0), "0%");
+  assert.equal(formatResearchConfidence(100), "100%");
+  assert.equal(formatResearchConfidence(0.5), "0.5%");
+  assert.equal(formatResearchConfidence(Number.NaN), "Unavailable");
+  for (const page of ["content", "research"]) {
+    const source = readFileSync(new URL(`../src/app/channels/[id]/${page}/page.tsx`, import.meta.url), "utf8");
+    assert.ok(source.includes("formatResearchConfidence("));
+    assert.doesNotMatch(source, /(?:overall_confidence|confidence_score)\s*\*\s*100/);
+  }
+});
+
+test("only sufficient briefs are selectable and historical blocked evidence remains visible", () => {
+  const briefs = [{ id: "partial", outcome: "PARTIAL" }, { id: "insufficient", outcome: "INSUFFICIENT" }, { id: "sufficient", outcome: "SUFFICIENT" }];
+  assert.equal(isSufficientResearchBrief(briefs[0]), false);
+  assert.equal(isSufficientResearchBrief(briefs[1]), false);
+  assert.equal(isSufficientResearchBrief(briefs[2]), true);
+  assert.equal(isSufficientResearchBrief(undefined), false);
+  assert.equal(isSufficientResearchBrief({ outcome: "UNKNOWN" }), false);
+  assert.equal(briefs.find(isSufficientResearchBrief)?.id, "sufficient");
+  assert.equal(briefs.slice(0, 2).find(isSufficientResearchBrief), undefined);
+  assert.equal(briefs.length, 3);
+  const page = readFileSync(new URL("../src/app/channels/[id]/content/page.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes("disabled={!isSufficientResearchBrief(briefItem)}"));
+  assert.ok(page.includes("values.find(isSufficientResearchBrief)"));
+  assert.ok(page.includes("!isSufficientResearchBrief(selectedBrief)"));
+  assert.ok(page.includes("No SUFFICIENT research brief"));
+});
 
 test("canonical selection eligibility and bounds", () => {
   for (const status of ["DISCOVERED", "EVALUATED", "RECOMMENDED"] as const) assert.equal(isCanonicalSelectionCandidateEligible({ status }), true);

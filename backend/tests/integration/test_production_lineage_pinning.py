@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.main import app
+from tests.research_fixtures import seed_sufficient_research
 
 
 async def _create_test_script(client: AsyncClient, channel_id: str) -> tuple[str, str, str]:
@@ -66,6 +67,7 @@ async def _create_test_script(client: AsyncClient, channel_id: str) -> tuple[str
         },
     )
 
+    await seed_sufficient_research(client, channel_id, r_req_id)
     synth_res = await client.post(f"/api/v1/channels/{channel_id}/research/{r_req_id}/run")
     assert synth_res.status_code == 200
     brief_id = synth_res.json()["id"]

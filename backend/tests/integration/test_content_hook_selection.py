@@ -10,6 +10,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.main import app
+from tests.research_fixtures import seed_sufficient_research
 
 
 @pytest.mark.asyncio
@@ -39,6 +40,7 @@ async def test_single_selected_hook_invariant(db_session: AsyncSession) -> None:
             json={"topic_candidate_id": cand_id, "research_question": "Q1"},
         )
         r_id = r_res.json()["id"]
+        await seed_sufficient_research(client, channel_id, r_id)
         b_res = await client.post(f"/api/v1/channels/{channel_id}/research/{r_id}/run")
         brief_id = b_res.json()["id"]
 
@@ -120,6 +122,7 @@ async def test_concurrent_hook_selection_safety(db_session: AsyncSession) -> Non
             json={"topic_candidate_id": cand_id, "research_question": "Q1"},
         )
         r_id = r_res.json()["id"]
+        await seed_sufficient_research(client, channel_id, r_id)
         b_res = await client.post(f"/api/v1/channels/{channel_id}/research/{r_id}/run")
         brief_id = b_res.json()["id"]
 

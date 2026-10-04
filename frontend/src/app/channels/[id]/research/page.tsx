@@ -1,5 +1,7 @@
 "use client";
 
+import { formatResearchConfidence } from "@/lib/research-authority";
+
 import Link from "next/link";
 import { use, useCallback, useEffect, useState } from "react";
 import {
@@ -493,7 +495,7 @@ export default function ResearchEnginePage({
                           metrics={[
                             {
                               label: "Confidence",
-                              value: `${Math.round(brief.overall_confidence * 100)}%`,
+                              value: formatResearchConfidence(brief.overall_confidence),
                             },
                             {
                               label: "Verified",
@@ -589,7 +591,7 @@ export default function ResearchEnginePage({
                               <div className="workflow-data-row">
                                 <span>Confidence</span>
                                 <strong>
-                                  {Math.round(claim.confidence_score * 100)}%
+                                  {formatResearchConfidence(claim.confidence_score)}
                                 </strong>
                               </div>
                             </div>

@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.main import app
+from tests.research_fixtures import seed_sufficient_research
 
 
 @pytest.mark.asyncio
@@ -97,6 +98,7 @@ async def test_production_engine_e2e_smoke(
             },
         )
 
+        await seed_sufficient_research(client, channel_id, r_req_id)
         synth_res = await client.post(f"/api/v1/channels/{channel_id}/research/{r_req_id}/run")
         assert synth_res.status_code == 200
         brief_id = synth_res.json()["id"]
