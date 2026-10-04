@@ -6682,3 +6682,533 @@ class ExperimentAnalysisInputModel(Base):
     attribution_result: Mapped[ExperimentAttributionResultModel] = relationship(
         "ExperimentAttributionResultModel", back_populates="analysis_inputs"
     )
+
+
+# ==============================================================================
+# P25-D DURABLE LEARNING LOOP PERSISTENCE MODELS
+# ==============================================================================
+
+class LearningPolicyRootModel(Base):
+    """Stable policy root identity."""
+
+    __tablename__ = "learning_policy_roots"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    policy_name: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    current_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("learning_policy_revisions.id", name="fk_policy_roots_current_revision", ondelete="SET NULL", use_alter=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    revisions: Mapped[list[LearningPolicyRevisionModel]] = relationship(
+        "LearningPolicyRevisionModel",
+        back_populates="root",
+        cascade="all, delete-orphan",
+        foreign_keys="[LearningPolicyRevisionModel.policy_root_id]",
+    )
+
+
+class LearningPolicyRevisionModel(Base):
+    """Immutable versioned policy configuration pinning thresholds and weights."""
+
+    __tablename__ = "learning_policy_revisions"
+
+    __table_args__ = (
+        UniqueConstraint("policy_root_id", "revision_number", name="uq_policy_root_rev_num"),
+        UniqueConstraint("policy_root_id", "configuration_fingerprint", name="uq_policy_config"),
+        CheckConstraint("revision_number > 0 AND recency_half_life_days > 0 AND replication_threshold > 0", name="ck_policy_revision_positive"),
+    )
+
+    configuration: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    configuration_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    policy_root_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_policy_roots.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    evidence_tier_weights: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    recency_half_life_days: Mapped[float] = mapped_column(Float, nullable=False, default=90.0, server_default="90.0")
+    replication_threshold: Mapped[int] = mapped_column(Integer, nullable=False, default=2, server_default="2")
+    confidence_thresholds: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    generalization_policy: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    ranking_policy: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    goodhart_rules: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    tradeoff_rules: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    brand_safety_policy_version: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="v1.0", server_default="v1.0"
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    root: Mapped[LearningPolicyRootModel] = relationship(
+        "LearningPolicyRootModel",
+        back_populates="revisions",
+        foreign_keys=[policy_root_id],
+    )
+
+
+class LearningLoopEvidenceModel(Base):
+    """Immutable durable evidence records pinning exact P25-C and P25-B source truth."""
+
+    __tablename__ = "learning_loop_evidence"
+
+    __table_args__ = (
+        CheckConstraint(
+            "causal_status IN ('CAUSAL', 'ASSOCIATIONAL', 'DESCRIPTIVE', 'HEURISTIC', 'INSUFFICIENT')",
+            name="ck_learning_evidence_causality",
+        ),
+        CheckConstraint(
+            "evidence_tier IN ('TIER_1_CAUSAL_EXPERIMENT', 'TIER_2_REPLICATED_CAUSAL', 'TIER_2_CAUSAL_REPLICATED', 'TIER_3_CONTROLLED_OBSERVATION', 'TIER_3_MULTI_PRODUCTION_OBSERVATIONAL', 'TIER_4_DESCRIPTIVE_ASSOCIATION', 'TIER_4_SINGLE_PRODUCTION_DESCRIPTIVE', 'TIER_5_HEURISTIC')",
+            name="ck_learning_evidence_tier",
+        ),
+        UniqueConstraint("channel_id", "source_fingerprint", name="uq_learning_evidence_source_fp"),
+        CheckConstraint("causal_status != 'CAUSAL' OR (source_phase = 'P25-C' AND attribution_result_id IS NOT NULL AND evidence_tier IN ('TIER_1_CAUSAL_EXPERIMENT', 'TIER_2_REPLICATED_CAUSAL'))", name="ck_learning_causal_source"),
+        CheckConstraint("source_phase != 'P25-B' OR (snapshot_id IS NOT NULL AND causal_status != 'CAUSAL')", name="ck_learning_descriptive_source"),
+        Index("idx_learning_evidence_lookup", "channel_id", "metric", "evidence_tier"),
+    )
+
+    domain_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    evidence_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_phase: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    attribution_result_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("experiment_attribution_results.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    snapshot_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("analytics_provider_snapshots.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    scope_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    creative_dimensions: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    metric: Mapped[str] = mapped_column(String(64), nullable=False)
+    effect_direction: Mapped[str] = mapped_column(String(32), nullable=False)
+    effect_magnitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    sample_basis: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    data_maturity: Mapped[str] = mapped_column(String(32), nullable=False)
+    causal_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    evidence_tier: Mapped[str] = mapped_column(String(64), nullable=False)
+    quality_flags: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    source_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    observed_at: Mapped[DateTime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+    memberships: Mapped[list[LearningEvaluationEvidenceMembershipModel]] = relationship(
+        "LearningEvaluationEvidenceMembershipModel", back_populates="evidence"
+    )
+
+
+class LearningHypothesisRootModel(Base):
+    """Stable hypothesis identity with durable deduplication fingerprint."""
+
+    __tablename__ = "learning_hypothesis_roots"
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PROPOSED', 'EVALUATING', 'SUPPORTED', 'WEAKENED', 'CONTRADICTED', 'INCONCLUSIVE', 'RETIRED')",
+            name="ck_hypothesis_root_status",
+        ),
+        UniqueConstraint("channel_id", "dedup_fingerprint", name="uq_hypothesis_root_dedup"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    channel_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("channels.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    dedup_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_dimension: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_metric: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PROPOSED", server_default="PROPOSED")
+    current_revision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("learning_hypothesis_revisions.id", name="fk_hypothesis_roots_current_revision", ondelete="SET NULL", use_alter=True), nullable=True)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    revisions: Mapped[list[LearningHypothesisRevisionModel]] = relationship(
+        "LearningHypothesisRevisionModel",
+        back_populates="root",
+        cascade="all, delete-orphan",
+        foreign_keys="[LearningHypothesisRevisionModel.hypothesis_root_id]",
+    )
+
+
+class LearningHypothesisRevisionModel(Base):
+    """Immutable versioned hypothesis definitions pinning claim and scope."""
+
+    __tablename__ = "learning_hypothesis_revisions"
+
+    __table_args__ = (
+        UniqueConstraint("hypothesis_root_id", "revision_number", name="uq_hypothesis_root_rev_num"),
+        UniqueConstraint("hypothesis_root_id", "definition_fingerprint", name="uq_hypothesis_definition"),
+        CheckConstraint("revision_number > 0", name="ck_hypothesis_revision_positive"),
+    )
+
+    domain_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    definition_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hypothesis_root_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_hypothesis_roots.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    revision_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    claim: Mapped[str] = mapped_column(Text, nullable=False)
+    target_dimension: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_metric: Mapped[str] = mapped_column(String(64), nullable=False)
+    predicted_direction: Mapped[str] = mapped_column(String(32), nullable=False)
+    scope_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    generalization_scope: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="LOCAL", server_default="LOCAL"
+    )
+    evidence_requirements: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    root: Mapped[LearningHypothesisRootModel] = relationship(
+        "LearningHypothesisRootModel",
+        back_populates="revisions",
+        foreign_keys=[hypothesis_root_id],
+    )
+
+
+class LearningEvaluationModel(Base):
+    """Append-only immutable hypothesis evaluations with replay identity."""
+
+    __tablename__ = "learning_evaluations"
+
+    __table_args__ = (
+        UniqueConstraint("id", "hypothesis_revision_id", "policy_revision_id", name="uq_learning_eval_lineage"),
+        CheckConstraint(
+            "confidence IN ('VERY_LOW', 'LOW', 'MODERATE', 'HIGH')",
+            name="ck_learning_eval_confidence",
+        ),
+        CheckConstraint(
+            "resulting_status IN ('PROPOSED', 'EVALUATING', 'SUPPORTED', 'WEAKENED', 'CONTRADICTED', 'INCONCLUSIVE', 'RETIRED')",
+            name="ck_learning_eval_status",
+        ),
+        UniqueConstraint(
+            "hypothesis_revision_id",
+            "policy_revision_id",
+            "evidence_set_fingerprint",
+            name="uq_learning_eval_replay",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    hypothesis_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_hypothesis_revisions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    policy_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_policy_revisions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    evidence_set_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    causal_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    resulting_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False)
+    net_effect_magnitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    tradeoffs_detected: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    limitations: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    evaluated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+    memberships: Mapped[list[LearningEvaluationEvidenceMembershipModel]] = relationship(
+        "LearningEvaluationEvidenceMembershipModel",
+        back_populates="evaluation",
+        cascade="all, delete-orphan",
+    )
+    insights: Mapped[list[LearningInsightModel]] = relationship(
+        "LearningInsightModel", back_populates="evaluation", foreign_keys="LearningInsightModel.evaluation_id"
+    )
+
+
+class LearningEvaluationEvidenceMembershipModel(Base):
+    """Normalized M2M link pinning evidence role (SUPPORTING, CONTRADICTING, CONTEXT, TRADEOFF)."""
+
+    __tablename__ = "learning_evaluation_evidence_memberships"
+
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('SUPPORTING', 'CONTRADICTING', 'CONTEXT', 'TRADEOFF')",
+            name="ck_eval_evidence_role",
+        ),
+        UniqueConstraint("evaluation_id", "evidence_id", "role", name="uq_eval_evidence_membership"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_evaluations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    evidence_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_loop_evidence.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    role: Mapped[str] = mapped_column(String(32), nullable=False)
+    weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0, server_default="1.0")
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    evaluation: Mapped[LearningEvaluationModel] = relationship(
+        "LearningEvaluationModel", back_populates="memberships"
+    )
+    evidence: Mapped[LearningLoopEvidenceModel] = relationship(
+        "LearningLoopEvidenceModel", back_populates="memberships"
+    )
+
+
+class LearningInsightModel(Base):
+    """Immutable learning insight synthesis linked to evaluations."""
+
+    __tablename__ = "learning_insights"
+
+    __table_args__ = (
+        UniqueConstraint("id", "evaluation_id", "policy_revision_id", name="uq_learning_insight_lineage"),
+        ForeignKeyConstraint(["evaluation_id", "hypothesis_revision_id", "policy_revision_id"], ["learning_evaluations.id", "learning_evaluations.hypothesis_revision_id", "learning_evaluations.policy_revision_id"], name="fk_learning_insight_lineage", ondelete="RESTRICT"),
+        CheckConstraint(
+            "confidence IN ('VERY_LOW', 'LOW', 'MODERATE', 'HIGH')",
+            name="ck_learning_insight_confidence",
+        ),
+        UniqueConstraint("evaluation_id", name="uq_learning_insight_evaluation"),
+    )
+
+    domain_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_evaluations.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    hypothesis_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_hypothesis_revisions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    policy_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_policy_revisions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    scope_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    causal_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False)
+    metric_impact: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    tradeoffs: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    limitations: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    generated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+
+    evaluation: Mapped[LearningEvaluationModel] = relationship(
+        "LearningEvaluationModel", back_populates="insights", foreign_keys=[evaluation_id]
+    )
+    recommendations: Mapped[list[LearningRecommendationModel]] = relationship(
+        "LearningRecommendationModel", back_populates="insight", foreign_keys="LearningRecommendationModel.insight_id"
+    )
+
+
+class LearningRecommendationModel(Base):
+    """Actionable recommendations with safety snapshots and deterministic ranking."""
+
+    __tablename__ = "learning_recommendations"
+
+    __table_args__ = (
+        ForeignKeyConstraint(["insight_id", "evaluation_id", "policy_revision_id"], ["learning_insights.id", "learning_insights.evaluation_id", "learning_insights.policy_revision_id"], name="fk_learning_recommendation_lineage", ondelete="RESTRICT"),
+        CheckConstraint(
+            "action IN ('CONSIDER_TITLE_STYLE', 'CONSIDER_THUMBNAIL_STYLE', 'CONSIDER_PACING_CHANGE', 'CONSIDER_VISUAL_DENSITY', 'CONSIDER_AUDIO_DENSITY', 'CONSIDER_FORMAT_STRATEGY', 'RUN_FOLLOWUP_EXPERIMENT', 'KEEP_CURRENT_POLICY')",
+            name="ck_recommendation_action",
+        ),
+        CheckConstraint(
+            "confidence IN ('VERY_LOW', 'LOW', 'MODERATE', 'HIGH')",
+            name="ck_recommendation_confidence",
+        ),
+        CheckConstraint("ranking_score >= 0.0", name="ck_recommendation_ranking_pos"),
+        UniqueConstraint(
+            "insight_id",
+            "action",
+            "target_dimension",
+            "replay_fingerprint",
+            name="uq_recommendation_replay",
+        ),
+    )
+
+    domain_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    insight_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_insights.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    evaluation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_evaluations.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    policy_revision_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_policy_revisions.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    action: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_authority: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_dimension: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False)
+    ranking_score: Mapped[float] = mapped_column(Float, nullable=False, default=0.0, server_default="0.0")
+    risk_level: Mapped[str] = mapped_column(String(32), nullable=False, default="LOW", server_default="LOW")
+    expected_metric_effect: Mapped[str] = mapped_column(String(64), nullable=False)
+    safety_snapshot: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    validation_requirements: Mapped[list[Any]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default="[]"
+    )
+    explanation: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    replay_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    generated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    insight: Mapped[LearningInsightModel] = relationship(
+        "LearningInsightModel", back_populates="recommendations", foreign_keys=[insight_id]
+    )
+    adaptations: Mapped[list[LearningCandidateAdaptationModel]] = relationship(
+        "LearningCandidateAdaptationModel", back_populates="recommendation"
+    )
+
+
+class LearningCandidateAdaptationModel(Base):
+    """Unapplied proposals with strict approval lifecycle states."""
+
+    __tablename__ = "learning_candidate_adaptations"
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('PROPOSED', 'APPROVED', 'REJECTED', 'EXPIRED', 'SUPERSEDED')",
+            name="ck_candidate_adaptation_status",
+        ),
+        UniqueConstraint("recommendation_id", name="uq_learning_candidate_recommendation"),
+    )
+
+    domain_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    recommendation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_recommendations.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    target_authority: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_field: Mapped[str] = mapped_column(String(64), nullable=False)
+    current_value_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    proposed_value: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    scope_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    confidence: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="PROPOSED", server_default="PROPOSED"
+    )
+    validation_requirement: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
+    )
+
+    recommendation: Mapped[LearningRecommendationModel] = relationship(
+        "LearningRecommendationModel", back_populates="adaptations"
+    )
+    approval_history: Mapped[list[LearningAdaptationApprovalHistoryModel]] = relationship(
+        "LearningAdaptationApprovalHistoryModel",
+        back_populates="candidate_adaptation",
+        cascade="all, delete-orphan",
+    )
+
+
+class LearningAdaptationApprovalHistoryModel(Base):
+    """Immutable audit history of candidate adaptation state transitions."""
+
+    __tablename__ = "learning_adaptation_approval_history"
+
+    __table_args__ = (
+        Index("idx_adaptation_approval_hist", "candidate_adaptation_id", "transitioned_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    candidate_adaptation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("learning_candidate_adaptations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    from_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    to_status: Mapped[str] = mapped_column(String(32), nullable=False)
+    transition_reason: Mapped[str] = mapped_column(Text, nullable=False)
+    actor: Mapped[str] = mapped_column(String(64), nullable=False)
+    evidence_context: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default="{}"
+    )
+    transitioned_at: Mapped[DateTime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    candidate_adaptation: Mapped[LearningCandidateAdaptationModel] = relationship(
+        "LearningCandidateAdaptationModel", back_populates="approval_history"
+    )

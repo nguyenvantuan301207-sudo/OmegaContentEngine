@@ -16,14 +16,12 @@ from __future__ import annotations
 
 import enum
 import hashlib
-import json
 import math
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 
 # ============================================================================
 # 1. Evidence Hierarchy & Causality Semantics
@@ -35,7 +33,9 @@ class EvidenceTier(enum.IntEnum):
 
     TIER_1_CAUSAL_EXPERIMENT = 1  # Valid completed P25-C causal attribution result
     TIER_2_REPLICATED_CAUSAL = 2  # Repeated consistent causal experiment results
-    TIER_3_CONTROLLED_OBSERVATION = 3  # Multi-production observational evidence with controlled context
+    TIER_3_CONTROLLED_OBSERVATION = (
+        3  # Multi-production observational evidence with controlled context
+    )
     TIER_4_DESCRIPTIVE_ASSOCIATION = 4  # Single-production descriptive association (P25-B)
     TIER_5_HEURISTIC = 5  # Heuristic or insufficient evidence basis
 
@@ -106,18 +106,30 @@ class LearningEvidence(BaseModel):
     evidence_tier: EvidenceTier
     causal_status: CausalityStatus
     source_phase: str = Field(..., description="Upstream authority phase, e.g. P25-C or P25-B.")
-    source_ids: list[str] = Field(..., min_length=1, description="Exact durable IDs of upstream records.")
+    source_ids: list[str] = Field(
+        ..., min_length=1, description="Exact durable IDs of upstream records."
+    )
     channel_id: UUID
     target_scope_type: str = Field(default="MEDIA_ARTIFACT")
     target_scope_id: str = Field(default="")
-    content_format: str = Field(default="DEFAULT", description="Format context, e.g. TUTORIAL, SHORT, ESSAY.")
+    content_format: str = Field(
+        default="DEFAULT", description="Format context, e.g. TUTORIAL, SHORT, ESSAY."
+    )
     content_pillar: str = Field(default="GENERAL", description="Content pillar context.")
-    creative_dimensions: list[str] = Field(default_factory=list, description="Affected creative dimensions.")
+    creative_dimensions: list[str] = Field(
+        default_factory=list, description="Affected creative dimensions."
+    )
     metric: str = Field(..., description="Canonical metric evaluated.")
     effect_direction: str = Field(..., description="POSITIVE, NEGATIVE, or NEUTRAL.")
-    effect_magnitude: float = Field(..., description="Signed effect size or relative lift (e.g. +0.24 for +24%).")
-    sample_basis: dict[str, Any] = Field(default_factory=dict, description="Sample counts, impressions, or exposures.")
-    quality_score: float = Field(default=1.0, ge=0.0, le=1.0, description="Deterministic quality weighting.")
+    effect_magnitude: float = Field(
+        ..., description="Signed effect size or relative lift (e.g. +0.24 for +24%)."
+    )
+    sample_basis: dict[str, Any] = Field(
+        default_factory=dict, description="Sample counts, impressions, or exposures."
+    )
+    quality_score: float = Field(
+        default=1.0, ge=0.0, le=1.0, description="Deterministic quality weighting."
+    )
     observed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     provenance: dict[str, Any] = Field(default_factory=dict)
 
@@ -130,8 +142,13 @@ class LearningEvidence(BaseModel):
         tier = info.data.get("evidence_tier")
         source = info.data.get("source_phase")
         if v == CausalityStatus.CAUSAL:
-            if tier not in (EvidenceTier.TIER_1_CAUSAL_EXPERIMENT, EvidenceTier.TIER_2_REPLICATED_CAUSAL):
-                raise ValueError("Only Tier 1 or Tier 2 evidence from valid experiments may be marked CAUSAL.")
+            if tier not in (
+                EvidenceTier.TIER_1_CAUSAL_EXPERIMENT,
+                EvidenceTier.TIER_2_REPLICATED_CAUSAL,
+            ):
+                raise ValueError(
+                    "Only Tier 1 or Tier 2 evidence from valid experiments may be marked CAUSAL."
+                )
             if source == "P25-B":
                 raise ValueError("P25-B performance data alone must NEVER be marked CAUSAL.")
         return v
@@ -144,7 +161,9 @@ class LearningHypothesis(BaseModel):
     channel_id: UUID
     target_scope_type: str = "MEDIA_ARTIFACT"
     target_scope_id: str = ""
-    creative_dimension: str = Field(..., description="Single creative dimension, e.g. TITLE, THUMBNAIL.")
+    creative_dimension: str = Field(
+        ..., description="Single creative dimension, e.g. TITLE, THUMBNAIL."
+    )
     content_pillar: str = "GENERAL"
     content_format: str = "DEFAULT"
     predicted_metric: str = Field(..., description="Canonical metric under test.")
@@ -165,7 +184,8 @@ class LearningHypothesis(BaseModel):
         """Compute normalized deterministic identity (Section 9)."""
         raw = (
             f"{self.channel_id}:{self.creative_dimension}:{self.content_pillar}:"
-            f"{self.content_format}:{self.predicted_metric}:{self.predicted_direction}"
+            f"{self.content_format}:{self.predicted_metric}:{self.predicted_direction}:"
+            f"{self.target_scope_type}:{self.target_scope_id}"
         )
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
@@ -175,6 +195,9 @@ class LearningInsight(BaseModel):
 
     insight_id: UUID = Field(default_factory=uuid4)
     hypothesis_id: UUID
+    evaluation_id: UUID | None = None
+    hypothesis_revision_id: UUID | None = None
+    policy_revision_id: UUID | None = None
     scope: str
     summary: str
     causal_status: CausalityStatus
@@ -198,7 +221,9 @@ class CandidateAdaptation(BaseModel):
     """
 
     adaptation_id: UUID = Field(default_factory=uuid4)
-    target_authority: str = Field(..., description="ChannelDNA, CreativeStylePlan, PackagingPlan, etc.")
+    target_authority: str = Field(
+        ..., description="ChannelDNA, CreativeStylePlan, PackagingPlan, etc."
+    )
     target_dimension: str
     current_value: Any
     proposed_value: Any
@@ -257,11 +282,19 @@ class LearningPolicy(BaseModel):
     """Versioned configuration for evidence weighting, thresholds, and ranking (Section 42)."""
 
     policy_version: str = "1.0.0"
-    recency_half_life_days: float = 90.0
-    min_causal_replications_for_high: int = 2
-    min_sample_size_per_evidence: int = 1000
+    recency_half_life_days: float = Field(default=90.0, gt=0)
+    min_causal_replications_for_high: int = Field(default=2, ge=1)
+    min_sample_size_per_evidence: int = Field(default=1000, ge=1)
     tradeoff_negative_threshold_pct: float = -5.0  # -5% drop triggers explicit tradeoff surfacing
-    generalization_min_replications: int = 3
+    generalization_min_replications: int = Field(default=3, ge=1)
+    causal_weight: float = Field(default=1.5, gt=0)
+    support_ratio: float = Field(default=2.0, gt=0)
+    followup_rank: float = Field(default=0.85, ge=0, le=1)
+    high_rank: float = Field(default=0.9, ge=0, le=1)
+    moderate_rank: float = Field(default=0.75, ge=0, le=1)
+    lift_rank_weight: float = Field(default=0.2, ge=0)
+    brand_safety_policy_version: str = "P24-producer-review-v1"
+    algorithm_version: str = "p25d-evaluation-v1"
 
     model_config = ConfigDict(frozen=True)
 
