@@ -72,3 +72,94 @@ Completed and mature attribution results (`AttributionResult`) are immutable his
 ### 2.12 Authority Boundaries: P25-B and P25-D
 - **P25-B Input Boundary**: P25-C ingests canonical metric definitions (`CTR`, `watch_time`, `views`) and snapshot freshness states from P25-B without redefining metric semantics.
 - **P25-D Output Boundary**: P25-C reports descriptive causal findings (e.g. `TREATMENT_BETTER for impressions_ctr with +24.0% lift`). It **never** mutates ChannelDNA, generates recommendations, or modifies creative strategies. Those responsibilities are strictly deferred to P25-D.
+
+## 3. Durability & Historical Persistence Architecture Audit
+
+### 3.1 Persistence Audit & Process-Local State Findings
+An exhaustive audit of schema 027 and `backend/src/omega/` revealed that authoritative experiment state is currently held in process-local dictionaries within `AttributionService`:
+- `_experiments`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, ExperimentDefinition]`)
+- `_variants`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, list[ExperimentVariant]]`)
+- `_exposures`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, list[ExperimentExposure]]`)
+- `_results`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, AttributionResult]`)
+- `_variant_snapshots`: `AUTHORITATIVE_STATE` (in-memory `dict[UUID, dict[UUID, dict[str, Any]]]`)
+
+While replay idempotency, confounding guards, and variant immutability fully pass within a single process runtime, **authoritative experiment history does not survive process, worker, or container restarts**.
+
+### 3.2 Schema 027 Analysis
+Existing schema 027 tables cannot safely or faithfully represent P25-C controlled experiment truth:
+1. `attribution_delivery_evidence` (Migration 018): Designed strictly for copyright/content citation delivery evidence, bound by check constraints (`delivery_channel IN ('PHYSICAL_RENDER', 'PUBLISH_METADATA', 'EXPORT_SIDECAR')`).
+2. `content_campaigns` (Migration 020): Designed for multi-video publishing campaigns without variant, split, or exposure semantics.
+3. `learning_hypotheses` & `learning_hypothesis_evaluations` (Migration 013): Designed for P13 observational cohort learning. They lack variant models, require foreign keys to `learning_cohorts` and `learning_baselines`, enforce incompatible evaluation status enums (`SUPPORTED`, `WEAKENED`, `CONTRADICTED`), and conflate causal attribution with the P25-D learning loop.
+
+### 3.3 Proposed Relational Persistence Specification (Migration 028 Request)
+Under the strict Schema Rule, migration 028 was **NOT** created. Durable persistence requires explicit user/system authorization for migration 028 with the following schema:
+
+1. **`experiment_definitions` Table**:
+   - `id`: `UUID PRIMARY KEY`
+   - `channel_id`: `UUID NOT NULL REFERENCES channels(id) ON DELETE RESTRICT`
+   - `experiment_type`: `VARCHAR(32) NOT NULL` (Check: `TITLE`, `THUMBNAIL`, `TITLE_AND_THUMBNAIL`, `DESCRIPTION`, `PACKAGING_BUNDLE`)
+   - `hypothesis`: `TEXT NOT NULL`
+   - `primary_metric`: `VARCHAR(64) NOT NULL`
+   - `secondary_metrics`: `JSONB NOT NULL DEFAULT '[]'`
+   - `control_variant_id`: `UUID NOT NULL`
+   - `treatment_variant_ids`: `JSONB NOT NULL`
+   - `assignment_policy`: `JSONB NOT NULL`
+   - `experiment_unit`: `VARCHAR(32) NOT NULL` (Check: `IMPRESSION`, `VIEWER`, `PUBLICATION`, `TIME_BUCKET`)
+   - `minimum_sample_size`: `INTEGER NOT NULL DEFAULT 1000`
+   - `status`: `VARCHAR(32) NOT NULL` (Check: `DRAFT`, `READY`, `RUNNING`, `PAUSED`, `COMPLETED`, `CANCELLED`, `INVALIDATED`)
+   - `start_at`: `TIMESTAMPTZ NULL`
+   - `end_at`: `TIMESTAMPTZ NULL`
+   - `analysis_window_hours`: `INTEGER NOT NULL DEFAULT 24`
+   - `revision_number`: `INTEGER NOT NULL DEFAULT 1`
+   - `provenance`: `JSONB NOT NULL DEFAULT '{}'`
+   - `created_at`: `TIMESTAMPTZ NOT NULL DEFAULT now()`
+   - Unique Partial Index for Overlap Guard: `CREATE UNIQUE INDEX uq_active_channel_experiment_type ON experiment_definitions (channel_id, experiment_type) WHERE status IN ('READY', 'RUNNING');`
+
+2. **`experiment_variants` Table**:
+   - `id`: `UUID PRIMARY KEY`
+   - `experiment_id`: `UUID NOT NULL REFERENCES experiment_definitions(id) ON DELETE CASCADE`
+   - `role`: `VARCHAR(16) NOT NULL` (Check: `CONTROL`, `TREATMENT`)
+   - `change_dimension`: `VARCHAR(32) NOT NULL`
+   - `media_artifact_id`: `UUID NOT NULL REFERENCES media_artifacts(id) ON DELETE RESTRICT`
+   - `packaging_plan_id`: `UUID NULL`
+   - `title`: `TEXT NULL`
+   - `thumbnail_concept_id`: `UUID NULL`
+   - `thumbnail_ref`: `TEXT NULL`
+   - `is_accepted_p24`: `BOOLEAN NOT NULL DEFAULT FALSE`
+   - `creative_qa_status`: `VARCHAR(16) NOT NULL DEFAULT 'FAIL'`
+   - `variant_snapshot_hash`: `VARCHAR(64) NOT NULL`
+   - `provenance`: `JSONB NOT NULL DEFAULT '{}'`
+   - `created_at`: `TIMESTAMPTZ NOT NULL DEFAULT now()`
+   - Constraints: `UNIQUE (experiment_id, id)`, `UNIQUE (experiment_id, role) WHERE role = 'CONTROL'`
+
+3. **`experiment_exposures` Table**:
+   - `id`: `UUID PRIMARY KEY`
+   - `experiment_id`: `UUID NOT NULL REFERENCES experiment_definitions(id) ON DELETE CASCADE`
+   - `variant_id`: `UUID NOT NULL`
+   - `subject_id`: `VARCHAR(128) NOT NULL`
+   - `exposed_at`: `TIMESTAMPTZ NOT NULL DEFAULT now()`
+   - `aggregate_sample_count`: `INTEGER NOT NULL DEFAULT 1`
+   - Foreign Key: `FOREIGN KEY (experiment_id, variant_id) REFERENCES experiment_variants(experiment_id, id) ON DELETE CASCADE`
+
+4. **`experiment_attribution_results` Table**:
+   - `id`: `UUID PRIMARY KEY`
+   - `experiment_id`: `UUID NOT NULL REFERENCES experiment_definitions(id) ON DELETE RESTRICT`
+   - `revision_number`: `INTEGER NOT NULL DEFAULT 1`
+   - `control_variant_id`: `UUID NOT NULL`
+   - `treatment_variant_id`: `UUID NOT NULL`
+   - `primary_metric`: `VARCHAR(64) NOT NULL`
+   - `analysis_window`: `VARCHAR(32) NOT NULL`
+   - `control_value`: `DOUBLE PRECISION NULL`
+   - `treatment_value`: `DOUBLE PRECISION NULL`
+   - `absolute_difference`: `DOUBLE PRECISION NULL`
+   - `relative_lift`: `DOUBLE PRECISION NULL`
+   - `sample_basis`: `JSONB NOT NULL DEFAULT '{}'`
+   - `statistical_inference`: `JSONB NULL`
+   - `data_maturity`: `VARCHAR(32) NOT NULL`
+   - `classification`: `VARCHAR(32) NOT NULL`
+   - `findings`: `JSONB NOT NULL DEFAULT '[]'`
+   - `input_snapshot_ids`: `JSONB NOT NULL DEFAULT '[]'` (Lineage to exact P25-B snapshots)
+   - `evaluated_at`: `TIMESTAMPTZ NOT NULL DEFAULT now()`
+   - `provenance`: `JSONB NOT NULL DEFAULT '{}'`
+   - Unique Constraint: `UNIQUE (experiment_id, revision_number, analysis_window)` (Guarantees replay idempotency across process restarts)
+
