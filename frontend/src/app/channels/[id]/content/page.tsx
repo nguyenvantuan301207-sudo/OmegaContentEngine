@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { use, useCallback, useEffect, useState } from "react";
+import { use, useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelContentRequest,
   createContentRequest,
@@ -15,6 +15,7 @@ import {
   listContentHooks,
   listContentRequests,
   listResearchBriefs,
+  listResearchRequests,
   listScriptVersions,
   listTopics,
   regenerateScript,
@@ -61,6 +62,7 @@ import {
 } from "@/components/workflow/WorkflowPrimitives";
 import { useOperatorContext } from "@/lib/operator-context";
 import {
+  fetchTopicResearchBriefs,
   formatResearchConfidence,
   isSufficientResearchBrief,
 } from "@/lib/research-authority";
@@ -101,6 +103,8 @@ export default function ContentEnginePage({
     "regenerate" | "cancel" | null
   >(null);
   const [topicId, setTopicId] = useState("");
+  const topicIdRef = useRef("");
+  topicIdRef.current = topicId;
   const [briefId, setBriefId] = useState("");
   const [contentType, setContentType] =
     useState<ContentType>("YOUTUBE_LONGFORM");
@@ -172,6 +176,37 @@ export default function ContentEnginePage({
     [channelId, loadVersion],
   );
 
+  const loadBriefsForTopic = useCallback(
+    async (candidateId: string) => {
+      setBriefId("");
+      setBriefs([]);
+      if (!candidateId) return [];
+      setBusy(true);
+      try {
+        const values = await fetchTopicResearchBriefs(
+          channelId,
+          candidateId,
+          listResearchRequests,
+          listResearchBriefs,
+        );
+        setBriefs(values);
+        const sufficient = values.find(isSufficientResearchBrief);
+        setBriefId(sufficient?.id || "");
+        return values;
+      } catch (reason: unknown) {
+        setError(
+          reason instanceof Error
+            ? reason.message
+            : "Research briefs could not be loaded",
+        );
+        return [];
+      } finally {
+        setBusy(false);
+      }
+    },
+    [channelId],
+  );
+
   const loadData = useCallback(async () => {
     setLoading(true);
     setError(null);
@@ -199,7 +234,18 @@ export default function ContentEnginePage({
         setScript(null);
         setQa(null);
       }
-      if (!topicId && eligible[0]) setTopicId(eligible[0].id);
+      const targetTopic =
+        eligible.find((t) => t.id === topicIdRef.current) || eligible[0] || null;
+      const initialTopicId = targetTopic?.id || "";
+      if (!topicIdRef.current && eligible[0]) {
+        setTopicId(eligible[0].id);
+      }
+      if (initialTopicId) {
+        await loadBriefsForTopic(initialTopicId);
+      } else {
+        setBriefs([]);
+        setBriefId("");
+      }
     } catch (reason: unknown) {
       setError(
         reason instanceof Error
@@ -209,7 +255,7 @@ export default function ContentEnginePage({
     } finally {
       setLoading(false);
     }
-  }, [channelId, loadDetails, setSelectedChannelId, topicId]);
+  }, [channelId, loadBriefsForTopic, loadDetails, setSelectedChannelId]);
 
   useEffect(() => {
     void loadData();
@@ -239,23 +285,7 @@ export default function ContentEnginePage({
   }
   async function changeTopic(id: string) {
     setTopicId(id);
-    setBriefId("");
-    setBriefs([]);
-    if (!id) return;
-    setBusy(true);
-    try {
-      const values = await listResearchBriefs(channelId, id);
-      setBriefs(values);
-      setBriefId(values.find(isSufficientResearchBrief)?.id || "");
-    } catch (reason: unknown) {
-      setError(
-        reason instanceof Error
-          ? reason.message
-          : "Research briefs could not be loaded",
-      );
-    } finally {
-      setBusy(false);
-    }
+    await loadBriefsForTopic(id);
   }
   async function createRequest(event: React.FormEvent) {
     event.preventDefault();
@@ -327,7 +357,7 @@ export default function ContentEnginePage({
           disabled={archived}
           onClick={() => {
             setCreateOpen(true);
-            if (topicId) void changeTopic(topicId);
+            if (topicId && briefs.length === 0) void loadBriefsForTopic(topicId);
           }}
             >
               New content request
@@ -402,7 +432,7 @@ export default function ContentEnginePage({
               type="button"
               onClick={() => {
                 setCreateOpen(true);
-                if (topicId) void changeTopic(topicId);
+                if (topicId && briefs.length === 0) void loadBriefsForTopic(topicId);
               }}
               >
                 Create content request
@@ -614,7 +644,9 @@ export default function ContentEnginePage({
             label="Research brief"
             required
             description={
-              topicId && !briefs.some(isSufficientResearchBrief)
+              topicId && briefs.length === 0
+                ? "No research requests or briefs found for this topic. Run research before generating content."
+                : topicId && !briefs.some(isSufficientResearchBrief)
                 ? "No SUFFICIENT research brief is available for this topic. Complete research before creating content."
                 : undefined
             }
@@ -624,7 +656,11 @@ export default function ContentEnginePage({
               value={briefId}
               onChange={(event) => setBriefId(event.target.value)}
             >
-              <option value="">Choose a brief</option>
+              <option value="">
+                {topicId && briefs.length === 0
+                  ? "No research briefs available"
+                  : "Choose a brief"}
+              </option>
               {briefs.map((briefItem) => (
                 <option
                   value={briefItem.id}

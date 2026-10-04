@@ -9,7 +9,14 @@ import {
 } from "../src/lib/content-workflow.ts";
 import { getBreadcrumbs, getChannelNavigation } from "../src/lib/navigation.ts";
 import { readFileSync } from "node:fs";
-import { formatResearchConfidence, isSufficientResearchBrief } from "../src/lib/research-authority.ts";
+import {
+  fetchTopicResearchBriefs,
+  formatResearchConfidence,
+  getBriefEmptyStateMessage,
+  isSufficientResearchBrief,
+  sortResearchBriefs,
+} from "../src/lib/research-authority.ts";
+import type { ResearchBriefSummary, ResearchRequest } from "../src/lib/api.ts";
 
 test("research confidence preserves the backend 0..100 percentage scale", () => {
   assert.equal(formatResearchConfidence(50.45), "50.45%");
@@ -148,4 +155,241 @@ test("Narrative Plan surface preserves section order, grounding, QA and script l
   assert.ok(panel.includes("a.section_order - b.section_order"));
   assert.ok(panel.includes("Research Brief \u2192 Narrative Plan \u2192 Script"));
   assert.ok(panel.includes("Historical script without a narrative plan."));
+});
+
+test("topic candidate ID resolves through research requests and is not passed to listResearchBriefs", async () => {
+  const channelId = "chan-omega-1";
+  const topicCandidateId = "topic-concrete-cracks";
+  const requestCalls: Array<{ channelId: string; status?: string; topicCandidateId?: string }> = [];
+  const briefCalls: Array<{ channelId: string; requestId: string }> = [];
+
+  const mockFetchRequests = async (cId: string, status?: string, tId?: string): Promise<ResearchRequest[]> => {
+    requestCalls.push({ channelId: cId, status, topicCandidateId: tId });
+    return [
+      {
+        id: "req-hist-1",
+        channel_id: cId,
+        topic_candidate_id: tId || "",
+        mode: "INTERACTIVE",
+        status: "SUCCEEDED",
+        created_at: "2026-10-01T10:00:00Z",
+        language: "en",
+        region: "US",
+        max_sources: 5,
+        minimum_source_quality: 0.5,
+        minimum_claim_confidence: 0.5,
+      },
+    ];
+  };
+
+  const mockFetchBriefs = async (cId: string, rId: string): Promise<ResearchBriefSummary[]> => {
+    briefCalls.push({ channelId: cId, requestId: rId });
+    return [
+      {
+        id: "brief-hist-1",
+        research_request_id: rId,
+        version: 1,
+        is_current: false,
+        outcome: "INSUFFICIENT",
+        overall_confidence: 45.2,
+        verified_claims_count: 2,
+        contradictions_count: 1,
+        created_at: "2026-10-01T10:05:00Z",
+      },
+    ];
+  };
+
+  const results = await fetchTopicResearchBriefs(channelId, topicCandidateId, mockFetchRequests, mockFetchBriefs);
+
+  // 1. Research requests are first resolved by topic_candidate_id
+  assert.equal(requestCalls.length, 1);
+  assert.equal(requestCalls[0].channelId, channelId);
+  assert.equal(requestCalls[0].topicCandidateId, topicCandidateId);
+
+  // 2. TopicCandidate ID is NOT passed directly to listResearchBriefs; researchRequest.id IS passed
+  assert.equal(briefCalls.length, 1);
+  assert.equal(briefCalls[0].channelId, channelId);
+  assert.equal(briefCalls[0].requestId, "req-hist-1");
+  assert.notEqual(briefCalls[0].requestId, topicCandidateId);
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].id, "brief-hist-1");
+});
+
+test("briefs from multiple research requests for the same topic are aggregated and sorted newest first", async () => {
+  const channelId = "chan-omega-1";
+  const topicCandidateId = "topic-concrete-cracks";
+
+  const mockRequests: ResearchRequest[] = [
+    {
+      id: "req-historical-insufficient",
+      channel_id: channelId,
+      topic_candidate_id: topicCandidateId,
+      mode: "INTERACTIVE",
+      status: "SUCCEEDED",
+      created_at: "2026-10-01T10:00:00Z",
+      language: "en",
+      region: "US",
+      max_sources: 5,
+      minimum_source_quality: 0.5,
+      minimum_claim_confidence: 0.5,
+    },
+    {
+      id: "req-newer-sufficient",
+      channel_id: channelId,
+      topic_candidate_id: topicCandidateId,
+      mode: "INTERACTIVE",
+      status: "SUCCEEDED",
+      created_at: "2026-10-02T10:00:00Z",
+      language: "en",
+      region: "US",
+      max_sources: 5,
+      minimum_source_quality: 0.5,
+      minimum_claim_confidence: 0.5,
+    },
+  ];
+
+  const briefMap: Record<string, ResearchBriefSummary[]> = {
+    "req-historical-insufficient": [
+      {
+        id: "brief-v1-insufficient",
+        research_request_id: "req-historical-insufficient",
+        version: 1,
+        is_current: false,
+        outcome: "INSUFFICIENT",
+        overall_confidence: 42.1,
+        verified_claims_count: 1,
+        contradictions_count: 2,
+        created_at: "2026-10-01T10:30:00Z",
+      },
+    ],
+    "req-newer-sufficient": [
+      {
+        id: "brief-v2-sufficient",
+        research_request_id: "req-newer-sufficient",
+        version: 2,
+        is_current: true,
+        outcome: "SUFFICIENT",
+        overall_confidence: 72.35,
+        verified_claims_count: 8,
+        contradictions_count: 0,
+        created_at: "2026-10-02T11:00:00Z",
+      },
+    ],
+  };
+
+  const results = await fetchTopicResearchBriefs(
+    channelId,
+    topicCandidateId,
+    async () => mockRequests,
+    async (_cid, reqId) => briefMap[reqId] || [],
+  );
+
+  // Aggregated from both requests without discarding historical briefs
+  assert.equal(results.length, 2);
+
+  // Sorted deterministically, newest first by created_at
+  assert.equal(results[0].id, "brief-v2-sufficient");
+  assert.equal(results[1].id, "brief-v1-insufficient");
+
+  // SUFFICIENT brief is selectable
+  assert.equal(isSufficientResearchBrief(results[0]), true);
+  assert.equal(results[0].overall_confidence, 72.35);
+
+  // INSUFFICIENT / PARTIAL brief is disabled (not sufficient)
+  assert.equal(isSufficientResearchBrief(results[1]), false);
+
+  // Selector finds the SUFFICIENT brief
+  const selectedBrief = results.find(isSufficientResearchBrief);
+  assert.equal(selectedBrief?.id, "brief-v2-sufficient");
+});
+
+test("zero research requests returns empty briefs and provides clear empty-state message", async () => {
+  const emptyResults = await fetchTopicResearchBriefs(
+    "chan-1",
+    "topic-no-research",
+    async () => [],
+    async () => [],
+  );
+  assert.deepEqual(emptyResults, []);
+
+  // Empty state messages
+  assert.equal(
+    getBriefEmptyStateMessage(true, 0, false),
+    "No research requests or briefs found for this topic. Run research before generating content.",
+  );
+  assert.equal(
+    getBriefEmptyStateMessage(true, 1, false),
+    "No SUFFICIENT research brief is available for this topic. Complete research before creating content.",
+  );
+  assert.equal(getBriefEmptyStateMessage(true, 1, true), undefined);
+  assert.equal(getBriefEmptyStateMessage(false, 0, false), undefined);
+});
+
+test("Content Studio page implements helper extraction, automatic initial load, and stale selection clearing", () => {
+  const page = readFileSync(new URL("../src/app/channels/[id]/content/page.tsx", import.meta.url), "utf8");
+
+  // Helper loadBriefsForTopic is extracted and reused
+  assert.ok(page.includes("loadBriefsForTopic = useCallback"));
+  assert.ok(page.includes("async function changeTopic(id: string)"));
+  assert.ok(page.includes("await loadBriefsForTopic(id)"));
+
+  // Initial load auto-selects default topic and calls loadBriefsForTopic immediately
+  assert.ok(page.includes("await loadBriefsForTopic(initialTopicId)"));
+
+  // Stale brief selection is cleared on topic change
+  assert.ok(page.includes('setBriefId("")'));
+  assert.ok(page.includes("setBriefs([])"));
+
+  // TopicCandidate ID is NOT passed directly to listResearchBriefs in content/page.tsx
+  assert.doesNotMatch(page, /listResearchBriefs\(\s*channelId\s*,\s*id\s*\)/);
+
+  // Routes discovery through fetchTopicResearchBriefs
+  assert.ok(page.includes("fetchTopicResearchBriefs("));
+
+  // Empty-state messages in dialog FormField
+  assert.ok(page.includes("No research requests or briefs found for this topic"));
+  assert.ok(page.includes("No research briefs available"));
+});
+
+test("sortResearchBriefs sorts deterministically newest first with tiebreakers", () => {
+  const b1: ResearchBriefSummary = {
+    id: "brief-old",
+    research_request_id: "req-1",
+    version: 1,
+    is_current: false,
+    outcome: "INSUFFICIENT",
+    overall_confidence: 40,
+    verified_claims_count: 1,
+    contradictions_count: 0,
+    created_at: "2026-10-01T00:00:00Z",
+  };
+  const b2: ResearchBriefSummary = {
+    id: "brief-new",
+    research_request_id: "req-2",
+    version: 1,
+    is_current: true,
+    outcome: "SUFFICIENT",
+    overall_confidence: 72,
+    verified_claims_count: 5,
+    contradictions_count: 0,
+    created_at: "2026-10-02T00:00:00Z",
+  };
+  const b3: ResearchBriefSummary = {
+    id: "brief-same-time-v2",
+    research_request_id: "req-3",
+    version: 2,
+    is_current: true,
+    outcome: "SUFFICIENT",
+    overall_confidence: 80,
+    verified_claims_count: 6,
+    contradictions_count: 0,
+    created_at: "2026-10-02T00:00:00Z",
+  };
+
+  const sorted = sortResearchBriefs([b1, b2, b3]);
+  assert.deepEqual(
+    sorted.map((b) => b.id),
+    ["brief-same-time-v2", "brief-new", "brief-old"],
+  );
 });
