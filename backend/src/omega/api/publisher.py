@@ -7,7 +7,7 @@ All secrets (tokens, verifiers, full session URIs) are strictly redacted.
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -66,6 +66,36 @@ class ExecutePublishRequest(BaseModel):
     """Request to trigger immediate execution of a task with an approved intent."""
 
     task_id: UUID
+
+
+class PreparePublishRequest(BaseModel):
+    """P25-A request to evaluate eligibility and prepare PublishIntent."""
+
+    production_request_id: UUID
+    artifact_id: UUID
+    platform_account_id: UUID
+    packaging_plan: dict[str, Any]
+    creative_qa_result: dict[str, Any]
+    visibility: str = "PRIVATE"
+    schedule: dict[str, Any] | None = None
+    verify_physical_thumbnail: bool = False
+
+
+class PreparePublishResponse(BaseModel):
+    """P25-A response containing prepared intent and eligibility results."""
+
+    is_eligible: bool
+    denial_reasons: list[str] = Field(default_factory=list)
+    publish_intent_id: UUID | None = None
+    intent_checksum: str | None = None
+    revision_number: int | None = None
+
+
+class ExecuteP25Request(BaseModel):
+    """P25-A execution request."""
+
+    publish_intent_id: UUID
+    worker_id: str | None = None
 
 
 # ── Account & OAuth Endpoints ──
@@ -299,6 +329,114 @@ async def execute_publish(
         return attempt
     except Exception as exc:
         logger.error("Publish execution error", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/prepare", response_model=PreparePublishResponse)
+async def prepare_publish_p25(
+    payload: PreparePublishRequest,
+    session: DBSession,
+) -> PreparePublishResponse:
+    """P25-A endpoint to evaluate eligibility and prepare PublishIntent."""
+    from omega.application.publisher.publishing_service import (
+        PublishingEligibilityDeniedError,
+        PublishingService,
+    )
+    from omega.domain.creative_qa import CreativeQAResult
+    from omega.domain.packaging import PackagingPlan
+    from omega.domain.publishing import PublishScheduleSpec, PublishVisibility
+
+    try:
+        pkg_plan = PackagingPlan.model_validate(payload.packaging_plan)
+        cqa_res = CreativeQAResult.model_validate(payload.creative_qa_result)
+        sched = (
+            PublishScheduleSpec.model_validate(payload.schedule)
+            if payload.schedule
+            else None
+        )
+        vis = PublishVisibility(payload.visibility.upper())
+
+        intent, elig = await PublishingService.prepare_publish(
+            session=session,
+            production_request_id=payload.production_request_id,
+            artifact_id=payload.artifact_id,
+            platform_account_id=payload.platform_account_id,
+            packaging_plan=pkg_plan,
+            creative_qa_result=cqa_res,
+            visibility=vis,
+            schedule=sched,
+            verify_physical_thumbnail=payload.verify_physical_thumbnail,
+        )
+
+        return PreparePublishResponse(
+            is_eligible=True,
+            denial_reasons=[],
+            publish_intent_id=intent.id,
+            intent_checksum=intent.intent_checksum,
+            revision_number=intent.revision_number,
+        )
+    except PublishingEligibilityDeniedError as exc:
+        return PreparePublishResponse(
+            is_eligible=False,
+            denial_reasons=[r.value for r in exc.eligibility_result.denial_reasons],
+        )
+    except Exception as exc:
+        logger.error("Failed to prepare publish intent", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/execute-p25")
+async def execute_publish_p25(
+    payload: ExecuteP25Request,
+    session: DBSession,
+) -> dict[str, Any]:
+    """P25-A endpoint to execute publish and return non-secret PublishReceipt."""
+    from omega.application.publisher.publishing_service import PublishingService
+
+    try:
+        receipt = await PublishingService.execute_publish(
+            session=session,
+            publish_intent_id=payload.publish_intent_id,
+            worker_id=payload.worker_id,
+        )
+        return receipt.model_dump()
+    except Exception as exc:
+        logger.error("P25 publication execution error", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+@router.post("/reconcile/{intent_id}")
+async def reconcile_publish_p25(
+    intent_id: UUID,
+    session: DBSession,
+) -> dict[str, Any]:
+    """P25-A endpoint to reconcile an interrupted publication attempt."""
+    from omega.application.publisher.publishing_service import PublishingService
+
+    try:
+        receipt = await PublishingService.reconcile_publish(
+            session=session,
+            publish_intent_id=intent_id,
+        )
+        if not receipt:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Unable to reconcile publication for intent {intent_id}.",
+            )
+        return receipt.model_dump()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("P25 publication reconciliation error", error=str(exc))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
