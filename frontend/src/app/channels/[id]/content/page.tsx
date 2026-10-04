@@ -1,10 +1,12 @@
 "use client";
 
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { use, useCallback, useEffect, useRef, useState } from "react";
 import {
   cancelContentRequest,
   createContentRequest,
+  createProductionRequest,
   generateContent,
   getChannel,
   getContentIntent,
@@ -14,6 +16,7 @@ import {
   getScriptVersion,
   listContentHooks,
   listContentRequests,
+  listProductionRequests,
   listResearchBriefs,
   listResearchRequests,
   listScriptVersions,
@@ -68,6 +71,11 @@ import {
 } from "@/lib/research-authority";
 
 import { NarrativePlanPanel } from "@/components/workflow/NarrativePlanPanel";
+import {
+  isScriptEligibleForProduction,
+  proceedToProductionHandoff,
+  resolveCurrentScript,
+} from "@/lib/content-production-handoff";
 
 type ContentView = "narrative" | "script" | "intent" | "outline" | "citations" | "qa";
 
@@ -76,6 +84,7 @@ export default function ContentEnginePage({
 }: {
   params: Promise<{ id: string }>;
 }) {
+  const router = useRouter();
   const { id: channelId } = use(params);
   const { setSelectedChannelId } = useOperatorContext();
   const [channel, setChannel] = useState<Channel | null>(null);
@@ -96,6 +105,7 @@ export default function ContentEnginePage({
   const [loading, setLoading] = useState(true);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [proceedingProduction, setProceedingProduction] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -342,6 +352,48 @@ export default function ContentEnginePage({
       );
   }
 
+  const currentScript = resolveCurrentScript(scripts);
+  const effectiveQaStatus =
+    script && script.id === currentScript?.id && qa?.status
+      ? qa.status
+      : currentScript?.qa_status;
+  const isQaEligible = isScriptEligibleForProduction(effectiveQaStatus);
+
+  async function handleProceedToProduction() {
+    if (!currentScript) {
+      setError("A current script version is required to proceed to production.");
+      return;
+    }
+    if (!isQaEligible) {
+      setError(
+        `Script QA status is ${effectiveQaStatus || currentScript.qa_status}. Only scripts with PASSED or PASSED_WITH_WARNINGS status can proceed to production.`,
+      );
+      return;
+    }
+
+    setProceedingProduction(true);
+    setError(null);
+    try {
+      await proceedToProductionHandoff({
+        channelId,
+        scripts,
+        currentQaStatus: effectiveQaStatus,
+        listRequests: listProductionRequests,
+        createRequest: createProductionRequest,
+      });
+      void setSelectedChannelId(channelId);
+      router.push("/production");
+    } catch (reason: unknown) {
+      setError(
+        reason instanceof Error
+          ? reason.message
+          : "Failed to proceed to production with current script.",
+      );
+    } finally {
+      setProceedingProduction(false);
+    }
+  }
+
   return (
     <div className="workflow-page ui-page-stack">
       <ChannelContextBar currentTab="content" />
@@ -495,17 +547,34 @@ export default function ContentEnginePage({
                           <button
                             className="btn btn-secondary btn-sm"
                             type="button"
-                            disabled={busy || archived}
+                            disabled={busy || archived || proceedingProduction}
                             onClick={() => setConfirmAction("regenerate")}
                           >
                             Regenerate
                           </button>
-                          <Link
+                          <button
                             className="btn btn-primary btn-sm"
-                            href={`/channels/${channelId}/production`}
+                            type="button"
+                            disabled={
+                              busy ||
+                              archived ||
+                              proceedingProduction ||
+                              !currentScript ||
+                              !isQaEligible
+                            }
+                            onClick={() => void handleProceedToProduction()}
+                            title={
+                              !currentScript
+                                ? "No script available"
+                                : !isQaEligible
+                                  ? `Script QA status is ${effectiveQaStatus || currentScript.qa_status}. Only PASSED or PASSED_WITH_WARNINGS can proceed.`
+                                  : "Proceed to production with current script"
+                            }
                           >
-                            Proceed to production
-                          </Link>
+                            {proceedingProduction
+                              ? "Preparing production…"
+                              : "Proceed to production"}
+                          </button>
                         </>
                       ) : null}
                       {selected.status === "RUNNING" ? (

@@ -16,7 +16,17 @@ import {
   isSufficientResearchBrief,
   sortResearchBriefs,
 } from "../src/lib/research-authority.ts";
-import type { ResearchBriefSummary, ResearchRequest } from "../src/lib/api.ts";
+import type {
+  ProductionRequest,
+  ResearchBriefSummary,
+  ResearchRequest,
+  ScriptVersionSummary,
+} from "../src/lib/api.ts";
+import {
+  isScriptEligibleForProduction,
+  proceedToProductionHandoff,
+  resolveCurrentScript,
+} from "../src/lib/content-production-handoff.ts";
 
 test("research confidence preserves the backend 0..100 percentage scale", () => {
   assert.equal(formatResearchConfidence(50.45), "50.45%");
@@ -392,4 +402,311 @@ test("sortResearchBriefs sorts deterministically newest first with tiebreakers",
     sorted.map((b) => b.id),
     ["brief-same-time-v2", "brief-new", "brief-old"],
   );
+});
+
+test("proceed to production uses current ScriptVersion and historical script v1 is excluded when script v2 is current", () => {
+  const v1Historical: ScriptVersionSummary = {
+    id: "script-v1-hist",
+    content_request_id: "req-1",
+    version: 1,
+    is_current: false,
+    title: "Script v1",
+    estimated_word_count: 500,
+    estimated_duration_seconds: 120,
+    qa_status: "PASSED",
+    created_at: "2026-10-01T00:00:00Z",
+  };
+  const v2Current: ScriptVersionSummary = {
+    id: "script-v2-curr",
+    content_request_id: "req-1",
+    version: 2,
+    is_current: true,
+    title: "Script v2",
+    estimated_word_count: 520,
+    estimated_duration_seconds: 125,
+    qa_status: "PASSED",
+    created_at: "2026-10-02T00:00:00Z",
+  };
+
+  // When both v1 and v2 are present in any order, resolveCurrentScript always picks v2
+  assert.equal(resolveCurrentScript([v1Historical, v2Current])?.id, "script-v2-curr");
+  assert.equal(resolveCurrentScript([v2Current, v1Historical])?.id, "script-v2-curr");
+  assert.equal(resolveCurrentScript([v1Historical, v2Current])?.is_current, true);
+
+  // Single script fallback
+  assert.equal(resolveCurrentScript([v1Historical])?.id, "script-v1-hist");
+  assert.equal(resolveCurrentScript([]), null);
+});
+
+test("QA PASSED and PASSED_WITH_WARNINGS allow proceeding; BLOCKED and other states block proceeding", () => {
+  assert.equal(isScriptEligibleForProduction("PASSED"), true);
+  assert.equal(isScriptEligibleForProduction("PASSED_WITH_WARNINGS"), true);
+  assert.equal(isScriptEligibleForProduction("BLOCKED"), false);
+  assert.equal(isScriptEligibleForProduction("PENDING"), false);
+  assert.equal(isScriptEligibleForProduction("FAILED"), false);
+  assert.equal(isScriptEligibleForProduction(null), false);
+  assert.equal(isScriptEligibleForProduction(undefined), false);
+});
+
+test("proceedToProductionHandoff reuses existing ProductionRequest without creating duplicate", async () => {
+  const v1Historical: ScriptVersionSummary = {
+    id: "script-v1-hist",
+    content_request_id: "req-1",
+    version: 1,
+    is_current: false,
+    title: "Script v1",
+    estimated_word_count: 500,
+    estimated_duration_seconds: 120,
+    qa_status: "PASSED",
+    created_at: "2026-10-01T00:00:00Z",
+  };
+  const v2Current: ScriptVersionSummary = {
+    id: "script-v2-curr",
+    content_request_id: "req-1",
+    version: 2,
+    is_current: true,
+    title: "Script v2",
+    estimated_word_count: 520,
+    estimated_duration_seconds: 125,
+    qa_status: "PASSED",
+    created_at: "2026-10-02T00:00:00Z",
+  };
+
+  const existingProduction: ProductionRequest = {
+    id: "prod-existing-1",
+    channel_id: "chan-1",
+    script_version_id: "script-v2-curr",
+    content_request_id: "req-1",
+    channel_dna_revision_id: "dna-1",
+    mode: "INTERACTIVE",
+    status: "READY",
+    target_width: 1920,
+    target_height: 1080,
+    fps: 30,
+    video_codec: "h264",
+    audio_codec: "aac",
+    container_format: "mp4",
+    created_at: "2026-10-03T00:00:00Z",
+  };
+
+  let listCalled = 0;
+  let createCalled = 0;
+
+  const result = await proceedToProductionHandoff({
+    channelId: "chan-1",
+    scripts: [v1Historical, v2Current],
+    listRequests: async (ch) => {
+      listCalled++;
+      assert.equal(ch, "chan-1");
+      return [existingProduction];
+    },
+    createRequest: async () => {
+      createCalled++;
+      throw new Error("Should not be called when request already exists");
+    },
+  });
+
+  assert.equal(listCalled, 1);
+  assert.equal(createCalled, 0); // No duplicate created
+  assert.equal(result.reused, true);
+  assert.equal(result.requestId, "prod-existing-1");
+  assert.equal(result.scriptVersionId, "script-v2-curr");
+});
+
+test("proceedToProductionHandoff creates a new ProductionRequest pinned to current ScriptVersion v2 when missing", async () => {
+  const v1Historical: ScriptVersionSummary = {
+    id: "script-v1-hist",
+    content_request_id: "req-1",
+    version: 1,
+    is_current: false,
+    title: "Script v1",
+    estimated_word_count: 500,
+    estimated_duration_seconds: 120,
+    qa_status: "PASSED",
+    created_at: "2026-10-01T00:00:00Z",
+  };
+  const v2Current: ScriptVersionSummary = {
+    id: "script-v2-curr",
+    content_request_id: "req-1",
+    version: 2,
+    is_current: true,
+    title: "Script v2",
+    estimated_word_count: 520,
+    estimated_duration_seconds: 125,
+    qa_status: "PASSED_WITH_WARNINGS",
+    created_at: "2026-10-02T00:00:00Z",
+  };
+
+  // Existing production is pinned to historical v1, NOT v2
+  const oldProduction: ProductionRequest = {
+    id: "prod-old-v1",
+    channel_id: "chan-1",
+    script_version_id: "script-v1-hist",
+    content_request_id: "req-1",
+    channel_dna_revision_id: "dna-1",
+    mode: "INTERACTIVE",
+    status: "READY",
+    target_width: 1920,
+    target_height: 1080,
+    fps: 30,
+    video_codec: "h264",
+    audio_codec: "aac",
+    container_format: "mp4",
+    created_at: "2026-10-01T05:00:00Z",
+  };
+
+  let createPayloadReceived: { script_version_id: string } | null = null;
+
+  const result = await proceedToProductionHandoff({
+    channelId: "chan-1",
+    scripts: [v1Historical, v2Current],
+    listRequests: async () => [oldProduction],
+    createRequest: async (_ch, payload) => {
+      createPayloadReceived = payload;
+      return {
+        id: "prod-new-v2",
+        channel_id: "chan-1",
+        script_version_id: payload.script_version_id,
+        content_request_id: "req-1",
+        channel_dna_revision_id: "dna-1",
+        mode: "INTERACTIVE",
+        status: "READY",
+        target_width: 1920,
+        target_height: 1080,
+        fps: 30,
+        video_codec: "h264",
+        audio_codec: "aac",
+        container_format: "mp4",
+        created_at: "2026-10-04T00:00:00Z",
+      };
+    },
+  });
+
+  assert.equal(result.reused, false);
+  assert.equal(result.requestId, "prod-new-v2");
+  assert.equal(result.scriptVersionId, "script-v2-curr");
+  assert.deepEqual(createPayloadReceived, { script_version_id: "script-v2-curr" });
+  assert.notEqual(createPayloadReceived?.script_version_id, "script-v1-hist");
+});
+
+test("proceedToProductionHandoff rejects when current script is BLOCKED", async () => {
+  const v2Blocked: ScriptVersionSummary = {
+    id: "script-v2-blocked",
+    content_request_id: "req-1",
+    version: 2,
+    is_current: true,
+    title: "Script v2",
+    estimated_word_count: 520,
+    estimated_duration_seconds: 125,
+    qa_status: "BLOCKED",
+    created_at: "2026-10-02T00:00:00Z",
+  };
+
+  let listCalled = false;
+  let createCalled = false;
+
+  await assert.rejects(
+    async () => {
+      await proceedToProductionHandoff({
+        channelId: "chan-1",
+        scripts: [v2Blocked],
+        listRequests: async () => {
+          listCalled = true;
+          return [];
+        },
+        createRequest: async () => {
+          createCalled = true;
+          throw new Error("unreachable");
+        },
+      });
+    },
+    /Script QA status is BLOCKED/,
+  );
+
+  assert.equal(listCalled, false);
+  assert.equal(createCalled, false);
+});
+
+test("proceedToProductionHandoff surfaces API failures from listRequests or createRequest", async () => {
+  const v2Current: ScriptVersionSummary = {
+    id: "script-v2-curr",
+    content_request_id: "req-1",
+    version: 2,
+    is_current: true,
+    title: "Script v2",
+    estimated_word_count: 520,
+    estimated_duration_seconds: 125,
+    qa_status: "PASSED",
+    created_at: "2026-10-02T00:00:00Z",
+  };
+
+  await assert.rejects(
+    async () => {
+      await proceedToProductionHandoff({
+        channelId: "chan-1",
+        scripts: [v2Current],
+        listRequests: async () => {
+          throw new Error("Network connection dropped");
+        },
+        createRequest: async () => {
+          throw new Error("unreachable");
+        },
+      });
+    },
+    /Network connection dropped/,
+  );
+
+  await assert.rejects(
+    async () => {
+      await proceedToProductionHandoff({
+        channelId: "chan-1",
+        scripts: [v2Current],
+        listRequests: async () => [],
+        createRequest: async () => {
+          throw new Error("Backend production validation failure");
+        },
+      });
+    },
+    /Backend production validation failure/,
+  );
+});
+
+test("Content Studio page statically verifies proceed to production wiring, navigation, and state safeguards", () => {
+  const page = readFileSync(
+    new URL("../src/app/channels/[id]/content/page.tsx", import.meta.url),
+    "utf8",
+  );
+
+  // Must import handoff logic
+  assert.ok(page.includes("proceedToProductionHandoff"));
+  assert.ok(page.includes("resolveCurrentScript"));
+  assert.ok(page.includes("isScriptEligibleForProduction"));
+  assert.ok(page.includes("createProductionRequest"));
+  assert.ok(page.includes("listProductionRequests"));
+
+  // Passive Link must NOT be used for Proceed to production
+  assert.doesNotMatch(page, /<Link[^>]*>[^<]*Proceed to production[^<]*<\/Link>/);
+
+  // Must use action button
+  assert.ok(page.includes("handleProceedToProduction"));
+  assert.ok(page.includes("proceedingProduction"));
+  assert.ok(page.includes("router.push(\"/production\")"));
+
+  // Disabled guard checks
+  assert.ok(page.includes("!isQaEligible"));
+  assert.ok(page.includes("!currentScript"));
+});
+
+test("Production Studio page provides authoritative empty state guidance back to Content Studio", () => {
+  const prodPage = readFileSync(
+    new URL("../src/app/production/page.tsx", import.meta.url),
+    "utf8",
+  );
+
+  assert.ok(
+    prodPage.includes(
+      "No persisted production exists for this channel. Return to Content Studio and proceed from an eligible current script.",
+    ),
+  );
+  assert.ok(prodPage.includes("Return to Content Studio"));
 });
