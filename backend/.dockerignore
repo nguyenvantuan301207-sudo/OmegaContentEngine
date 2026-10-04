@@ -1,7 +1,22 @@
 __pycache__/
+**/__pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+.pytest-tmp*/
+
+# Local Python environments (never build or runtime dependencies)
+.venv/
+venv/
+env/
+**/.venv/
+**/venv/
+**/env/
+
 models/
 *.onnx
 *.bin
@@ -24,6 +39,9 @@ models/
 data/
 storage/
 scratch/
+artifacts/
+manual-test-output/
+celerybeat-schedule*
 media/
 *.mp4
 *.wav
@@ -39,4 +57,6 @@ scripts/
 .pytest_cache/
 .coverage*
 htmlcov/
+**/.coverage*
+**/htmlcov/
 *.egg-info/
