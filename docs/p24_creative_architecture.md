@@ -294,3 +294,91 @@ P24-C preserves and never mutates `ChannelDNARevision`, `CreativeStylePlan`, `Na
 - **P25 Publishing Boundary (`.to_p25_publish_payload()`)**: Formats publish-ready candidate payload strictly for P25-A ingestion.
 - **No Publishing**: P24-C has zero publishing capability; no live uploads, no API mutation, no scheduling.
 
+
+## P24-D Creative QA & Brand Acceptance
+
+P24-D implements the final cross-domain Creative QA & Brand Acceptance layer. It evaluates the finished creative package against:
+- pinned `ChannelDNARevision` v2
+- `CreativeStylePlan`
+- accepted `NarrativePlan`
+- visual decisions / rendered visual context
+- audio decisions / P23 QA context
+- `PackagingPlan`
+- physical thumbnail artifact
+- final video artifact where available
+
+### Single Authority Chain & Non-Duplication Rule
+
+P24-D preserves the canonical authority chain without duplicating domain-level QA:
+1. `ChannelDNARevision`: Channel identity authority
+2. `CreativeStylePlan`: Production-specific creative direction
+3. `P21 Narrative QA`: Narrative-domain factual/structure QA
+4. `P22 Visual QA`: Visual-domain rendering/continuity QA
+5. `P23 Audio QA`: Audio-domain mix/loudness/license QA
+6. `P24-C Packaging validation`: Packaging candidate/physical image QA
+7. `P24-D Creative QA`: Cross-modal creative coherence, brand compliance, and hard constraint gate
+8. `ProductionQAEngine` (P20): Technical artifact integrity (17 canonical rules)
+9. `Guardian`: Production safety & runtime gate
+10. `RuntimeTruth`: Immutable state persistence authority
+11. `P25 Publishing`: Platform distribution (strictly downstream)
+
+P24-D does NOT rewrite plans, re-render visuals, re-mix audio, regenerate packaging, or publish.
+
+### CreativeQAResult & Severity Policy
+
+`CreativeQAResult` represents the structured, inspectable acceptance decision:
+- `status`: `PASS`, `REVISE`, `FAIL`
+- `highest_severity`: `INFO`, `WARNING`, `ERROR`, `BLOCKER`
+- `findings`: Tuple of `CreativeQAFinding` (code, severity, subsystem, affected artifact, explanation, source authority, recommended remediation, lineage)
+- `recommendations`: Tuple of actionable `CreativeQARecommendation` (action, subsystem, description, affected field)
+- `provenance`: Traceable lineage back to `ChannelDNARevision`, `CreativeStylePlan`, `PackagingPlan`, `NarrativePlan`, and `video_artifact_id`.
+
+#### Typed Severity Policy:
+- `INFO`: Neutral stylistic observations or telemetry notes.
+- `WARNING`: Minor stylistic deviations or non-critical drifts that do not invalidate brand alignment (Result status remains `PASS`).
+- `ERROR`: Correctable creative/brand inconsistencies (e.g. style drift without arc justification, missing attribution block, camera motion intensity mismatch). Result status becomes `REVISE`.
+- `BLOCKER`: Hard constraint violations, ungrounded/misleading title, overpromising thumbnail claim, channel DNA revision mismatch, or missing physical thumbnail. Result status becomes `FAIL`.
+
+### Hard Constraint Gate
+
+Hard constraints are non-negotiable boundaries defined in `HardConstraints` and `AvoidPatterns`:
+- `no_fabricated_claims`
+- `no_misleading_clickbait`
+- `no_unsupported_medical_claims`
+- `no_profanity`
+- `prohibited_vocabulary` / `custom_prohibitions`
+Any true hard-constraint violation unconditionally produces a `BLOCKER` finding and forces `CreativeQAStatus.FAIL`.
+
+### Editorial Voice & Modality Style QA
+
+1. **Editorial Voice QA**: Compares narrative and packaging tone against `EditorialVoice` (formality, depth, energy, expressiveness, technicality, character). Production-context variations are permitted when documented in `CreativeStylePlan.style_rationale`.
+2. **Narrative Style QA**: Validates hook intensity, context depth, explanation density, and payoff emphasis against `NarrativeStyleDirection`.
+3. **Visual & Camera Style QA**: Verifies visual density, B-roll tendencies, and camera motion intent against `CameraStyleDirection` and `AvoidPatterns.overactive_camera_motion`.
+4. **Audio Style QA**: Validates music energy, vocal policy, and SFX density against `AudioStyleDirection` and `AvoidPatterns.constant_sfx`.
+5. **Graphic & Data-Vis QA**: Asserts explanatory graphics remain compatible with brand style and readability.
+
+### Title, Thumbnail & Packaging Coherence QA
+
+1. **Title QA**: Validates selected and candidate titles for brand fit, style plan fit, grounding status, promise/payoff consistency, tone, and clickbait risk. Previously rejected candidates are barred from revival.
+2. **Thumbnail QA**: Evaluates visual hierarchy, text density policy (max words), safe zone margins, and claim consistency. Consumes P24-C physical thumbnail result (file existence, dimensions, format, non-blankness).
+3. **Description & Metadata QA**: Validates description voice, CTA policy conformance, keywords/tags restraint, and attribution presence.
+4. **Packaging Coherence QA**: Detects title-thumbnail promise mismatches, title-description divergences, and packaging-content conflicts.
+5. **Promise / Payoff QA**: Detects `OVERPROMISE`, `PAYOFF_NOT_DELIVERED`, and `MISLEADING_OUTCOME_FRAMING`.
+
+### Cross-Modal Coherence & Style Drift Detection
+
+- **Cross-Modal Coherence**: Evaluates harmony across narrative energy, visual motion, and audio intensity. Contradictory combinations (e.g. calm analytical narration with hyperactive camera and aggressive lead music) trigger `CALM_NARRATION_HYPERACTIVE_PRODUCTION` or `CROSS_MODAL_ENERGY_CONFLICT`.
+- **Style Drift Detection**: Distinguishes intentional progression defined in `CreativeArc` from unjustified drift across adjacent sections (`CAMERA_STYLE_DRIFT`, `AUDIO_STYLE_DRIFT`, `NARRATIVE_STYLE_DRIFT`).
+- **Brand Consistency vs. Repetition**: Ensures motif consistency and core channel identity while allowing bounded creative variation across productions.
+
+### Physical Acceptance Package & Gate Enforcement
+
+1. **Physical Acceptance Package (`CreativeAcceptancePackage`)**: Bounded container encapsulating approved title, physical thumbnail path, description, reconciled chapters, metadata, video identity, and P24-D QA PASS result.
+2. **Final Creative Gate (`FinalCreativeGate`)**:
+   - `PASS`: Eligible for downstream `ProductionQAEngine` and `GuardianEngine`.
+   - `REVISE`: Blocks progression to final acceptance; outputs actionable recommendations.
+   - `FAIL`: Strictly blocks downstream pipeline and prevents publication-ready state.
+3. **Preservation of P20 Authority**: `FinalCreativeGate` feeds into, and does NOT replace, `ProductionQAEngine`, `Guardian`, and `RuntimeTruth`.
+4. **Model Review**: Optional model evaluation abstraction (`CreativeModelReviewer`). When unconfigured, set to `P24D_MODEL_CREATIVE_REVIEW = NOT_USED`. Deterministic findings always govern acceptance.
+
+

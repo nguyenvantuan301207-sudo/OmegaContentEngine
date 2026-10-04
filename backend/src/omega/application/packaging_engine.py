@@ -808,8 +808,10 @@ class PackagingEngine:
                 seen.add(clean)
                 tags.append(tag.strip())
 
-        # Subject entity
+        # Subject entity and components
         add_tag(grounded_context["primary_subject"])
+        for part in grounded_context["primary_subject"].split():
+            add_tag(part)
 
         # Core keywords from narrative
         for kw in grounded_context.get("keywords", []):
