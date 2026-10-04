@@ -666,7 +666,7 @@ class DeterministicNarrativeDirector:
             if claim_id_val:
                 try:
                     c_uuid = UUID(str(claim_id_val))
-                    evidence_list = c.get("evidence", []) or []
+                    evidence_list = c.get("citations") or c.get("evidence", []) or []
                     ev_id_val = evidence_list[0].get("evidence_id") if evidence_list else None
                     ev_uuid = UUID(str(ev_id_val)) if ev_id_val else None
                     src_id_val = evidence_list[0].get("source_id") if evidence_list else None
@@ -678,7 +678,7 @@ class DeterministicNarrativeDirector:
                             evidence_id=ev_uuid,
                             source_id=src_uuid,
                             grounding_type=GroundingType.FACTUAL,
-                            description=c.get("claim_text", "")[:300],
+                            description=(c.get("text") or c.get("claim_text", ""))[:300],
                         )
                     )
                 except (ValueError, TypeError):
@@ -764,7 +764,7 @@ class DeterministicNarrativeDirector:
                     sec_payoff = active_promise_id
 
             # Ground factual sections
-            if role in (NarrativeSectionRole.CONTEXT, NarrativeSectionRole.DEVELOPMENT, NarrativeSectionRole.PAYOFF):
+            if role in (NarrativeSectionRole.CONTEXT, NarrativeSectionRole.DEVELOPMENT, NarrativeSectionRole.ESCALATION, NarrativeSectionRole.PAYOFF):
                 if grounding_pool:
                     sec_grounding.append(grounding_pool[grounding_idx % len(grounding_pool)])
                     grounding_idx += 1

@@ -57,7 +57,6 @@ from omega.infrastructure.models import (
     ContentQAResult,
     MissionExecution,
     NarrativePlan as NarrativePlanModel,
-    NarrativeSection as NarrativeSectionModel,
     ResearchBrief,
     ScriptSection,
     ScriptStatement,
@@ -352,57 +351,15 @@ async def generate_content(
         (h for h in hooks_data if h.get("selected")), hooks_data[0] if hooks_data else None
     )
 
-    # Check if a NarrativePlan is specified or active for this request
-    target_plan_id: UUID | None = getattr(payload, "narrative_plan_id", None)
-    narrative_plan_model = None
-    if target_plan_id:
-        np_stmt = (
-            select(NarrativePlanModel)
-            .where(NarrativePlanModel.id == target_plan_id)
-            .options(
-                selectinload(NarrativePlanModel.sections).selectinload(
-                    NarrativeSectionModel.grounding_citations
-                )
-            )
-        )
-        narrative_plan_model = (await session.execute(np_stmt)).scalar_one_or_none()
-    else:
-        np_stmt = (
-            select(NarrativePlanModel)
-            .where(
-                NarrativePlanModel.content_generation_request_id == request_id,
-                NarrativePlanModel.is_current.is_(True),
-            )
-            .options(
-                selectinload(NarrativePlanModel.sections).selectinload(
-                    NarrativeSectionModel.grounding_citations
-                )
-            )
-        )
-        narrative_plan_model = (await session.execute(np_stmt)).scalar_one_or_none()
+    from omega.application.content_narrative import ensure_script_plan
+    from omega.application.narrative_script_adapter import NarrativePlanScriptAdapter
 
-    if narrative_plan_model:
-        from omega.application.narrative_plan_service import _orm_to_domain
-        from omega.application.narrative_script_adapter import NarrativePlanScriptAdapter
-
-        domain_plan = _orm_to_domain(narrative_plan_model)
-        NarrativePlanScriptAdapter.enforce_script_gate(
-            plan=domain_plan,
-            research_brief=brief_dict,
-            channel_dna=dna_dict,
-        )
-        outline_data = NarrativePlanScriptAdapter.map_plan_to_script_outline(domain_plan)
-        attached_narrative_plan_id = narrative_plan_model.id
-    else:
-        outline_data = provider.generate_outline(
-            topic_title=topic_title,
-            brief_dict=brief_dict,
-            dna_dict=dna_dict,
-            intent_dict=intent_data,
-            selected_hook=selected_hook,
-            target_duration_seconds=req.target_duration_seconds,
-        )
-        attached_narrative_plan_id = None
+    domain_plan = await ensure_script_plan(
+        session, req, brief_dict, intent_data, getattr(payload, "narrative_plan_id", None)
+    )
+    outline_data = NarrativePlanScriptAdapter.map_plan_to_script_outline(domain_plan)
+    attached_narrative_plan_id = domain_plan.id
+    script_target_duration = domain_plan.target_duration_seconds
 
     raw_script_data = provider.generate_script(
         topic_title=topic_title,
@@ -411,7 +368,7 @@ async def generate_content(
         intent_dict=intent_data,
         selected_hook=selected_hook or {},
         outline_dict=outline_data,
-        target_duration_seconds=req.target_duration_seconds,
+        target_duration_seconds=script_target_duration,
     )
 
     # Step C: Untrusted Provider Classification & Citation Validation
@@ -468,7 +425,7 @@ async def generate_content(
     # Step D: Run Local QA Checks
     qa_status, findings = run_content_qa_checks(
         script_data=raw_script_data,
-        target_duration_seconds=req.target_duration_seconds,
+        target_duration_seconds=script_target_duration,
         dna_dict=dna_dict,
         brief_dict=brief_dict,
     )
@@ -556,6 +513,10 @@ async def generate_content(
             closing_description=outline_data["closing_description"],
         )
         session.add(content_outline)
+    else:
+        existing_outline.opening_description = outline_data["opening_description"]
+        existing_outline.sections = outline_data["sections"]
+        existing_outline.closing_description = outline_data["closing_description"]
 
     # 4. Fetch existing scripts to determine version N+1 and mark previous is_current = False
     scripts_res = await session.execute(
@@ -847,6 +808,7 @@ async def list_scripts(
         select(ScriptVersion)
         .where(ScriptVersion.content_request_id == request_id)
         .order_by(desc(ScriptVersion.version))
+        .options(selectinload(ScriptVersion.narrative_plan))
     )
     return [ScriptVersionSummaryResponse.model_validate(s) for s in res.scalars().all()]
 
@@ -874,6 +836,7 @@ async def get_script(
         stmt = stmt.where(ScriptVersion.is_current == True)  # noqa: E712
 
     stmt = stmt.options(
+        selectinload(ScriptVersion.narrative_plan),
         selectinload(ScriptVersion.sections)
         .selectinload(ScriptSection.statements)
         .selectinload(ScriptStatement.citations)
@@ -931,6 +894,8 @@ async def get_script(
     return ScriptVersionResponse(
         id=script.id,
         content_request_id=script.content_request_id,
+        narrative_plan_id=script.narrative_plan_id,
+        narrative_plan_version=script.narrative_plan_version,
         version=script.version,
         is_current=script.is_current,
         supersedes_script_id=script.supersedes_script_id,
@@ -1032,9 +997,19 @@ async def run_qa(
         ],
     }
 
+    qa_target_duration = req.target_duration_seconds
+    if script.narrative_plan_id is not None:
+        qa_target_duration = await session.scalar(
+            select(NarrativePlanModel.target_duration_seconds).where(
+                NarrativePlanModel.id == script.narrative_plan_id
+            )
+        )
+        if qa_target_duration is None:
+            raise ValueError("Pinned NarrativePlan not found for script QA.")
+
     qa_status, findings = run_content_qa_checks(
         script_data=script_data,
-        target_duration_seconds=req.target_duration_seconds,
+        target_duration_seconds=qa_target_duration,
         dna_dict=dna_dict,
         brief_dict=brief_dict,
     )

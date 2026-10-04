@@ -9,6 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from omega.application import content_service
+from omega.application.content_narrative import get_current_plan
+from omega.domain.narrative_plan import NarrativePlan
 from omega.domain.content import (
     ContentGenerationRequestCreate,
     ContentGenerationRequestResponse,
@@ -64,6 +66,19 @@ async def get_content_request(
             status_code=status.HTTP_404_NOT_FOUND, detail="Content request not found."
         )
     return req
+
+
+@router.get("/{request_id}/narrative-plan", response_model=NarrativePlan | None)
+async def get_content_narrative_plan(
+    channel_id: UUID,
+    request_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_async_session)],
+) -> NarrativePlan | None:
+    """Inspect the persisted current narrative authority and its QA findings."""
+    try:
+        return await get_current_plan(db, channel_id, request_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post("/{request_id}/cancel", response_model=ContentGenerationRequestResponse)

@@ -206,7 +206,11 @@ async def test_content_engine_full_smoke(db_session: AsyncSession) -> None:
         outline = (
             await client.get(f"/api/v1/channels/{channel_id}/content/{content_req_id}/outline")
         ).json()
-        assert len(outline["sections"]) == 4
+        plan_res = await client.get(f"/api/v1/channels/{channel_id}/content/{content_req_id}/narrative-plan")
+        assert plan_res.status_code == 200
+        plan = plan_res.json()
+        assert plan["format_profile"] == "LONG"
+        assert len(outline["sections"]) == len(plan["sections"]) == 8
 
         # 9. Update Channel DNA to v2
         await client.patch(

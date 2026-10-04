@@ -9,6 +9,7 @@ import {
   getChannel,
   getContentIntent,
   getContentOutline,
+  getNarrativePlan,
   getScriptQAResult,
   getScriptVersion,
   listContentHooks,
@@ -24,6 +25,7 @@ import {
   type ContentHook,
   type ContentIntent,
   type ContentOutline,
+  type NarrativePlan,
   type ContentQAResult,
   type ContentType,
   type ResearchBriefSummary,
@@ -63,7 +65,9 @@ import {
   isSufficientResearchBrief,
 } from "@/lib/research-authority";
 
-type ContentView = "script" | "intent" | "outline" | "citations" | "qa";
+import { NarrativePlanPanel } from "@/components/workflow/NarrativePlanPanel";
+
+type ContentView = "narrative" | "script" | "intent" | "outline" | "citations" | "qa";
 
 export default function ContentEnginePage({
   params,
@@ -85,7 +89,8 @@ export default function ContentEnginePage({
   const [scripts, setScripts] = useState<ScriptVersionSummary[]>([]);
   const [script, setScript] = useState<ScriptVersion | null>(null);
   const [qa, setQa] = useState<ContentQAResult | null>(null);
-  const [view, setView] = useState<ContentView>("script");
+  const [plan, setPlan] = useState<NarrativePlan | null>(null);
+  const [view, setView] = useState<ContentView>("narrative");
   const [loading, setLoading] = useState(true);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -127,13 +132,15 @@ export default function ContentEnginePage({
     async (request: ContentGenerationRequest) => {
       setDetailsLoading(true);
       setDetailError(null);
-      const [intentResult, hookResult, outlineResult, scriptResult] =
+      const [intentResult, hookResult, outlineResult, scriptResult, planResult] =
         await Promise.allSettled([
           getContentIntent(channelId, request.id),
           listContentHooks(channelId, request.id),
           getContentOutline(channelId, request.id),
           listScriptVersions(channelId, request.id),
+          getNarrativePlan(channelId, request.id),
         ]);
+      setPlan(planResult.status === "fulfilled" ? planResult.value : null);
       setIntent(
         intentResult.status === "fulfilled" ? intentResult.value : null,
       );
@@ -149,6 +156,7 @@ export default function ContentEnginePage({
         hookResult,
         outlineResult,
         scriptResult,
+        planResult,
       ].filter((result) => result.status === "rejected");
       if (request.status === "SUCCEEDED" && failures.length)
         setDetailError(
@@ -505,6 +513,7 @@ export default function ContentEnginePage({
                   active={view}
                   onChange={setView}
                   tabs={[
+                    { id: "narrative", label: "Narrative Plan", count: plan?.sections.length || 0 },
                     { id: "script", label: "Script", count: scripts.length },
                     {
                       id: "intent",
@@ -522,6 +531,8 @@ export default function ContentEnginePage({
                 />
                 {detailsLoading ? (
                   <LoadingState title="Loading generated content" />
+                ) : view === "narrative" ? (
+                  <NarrativePlanPanel plan={plan} script={script} />
                 ) : view === "script" ? (
                   <ScriptPanel
                     script={script}

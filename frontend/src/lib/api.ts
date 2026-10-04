@@ -1557,6 +1557,8 @@ export interface ScriptSection {
 export interface ScriptVersionSummary {
   id: string;
   content_request_id: string;
+  narrative_plan_id?: string | null;
+  narrative_plan_version?: number | null;
   version: number;
   is_current: boolean;
   supersedes_script_id?: string | null;
@@ -1570,6 +1572,8 @@ export interface ScriptVersionSummary {
 export interface ScriptVersion {
   id: string;
   content_request_id: string;
+  narrative_plan_id?: string | null;
+  narrative_plan_version?: number | null;
   version: number;
   is_current: boolean;
   supersedes_script_id?: string | null;
@@ -1726,6 +1730,43 @@ export async function cancelContentRequest(
   return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/cancel`, {
     method: "POST",
   });
+}
+
+export interface NarrativePlan {
+  id: string;
+  version: number;
+  status: string;
+  format_profile: string;
+  target_duration_seconds: number;
+  estimated_duration_seconds: number;
+  research_brief_id: string;
+  channel_dna_revision_id: string;
+  supersedes_plan_id: string | null;
+  sections: {
+    id: string;
+    section_order: number;
+    role: string;
+    objective: string;
+    key_information: string[];
+    target_duration_seconds: number;
+    grounding_references: {
+      research_brief_id: string;
+      claim_id: string | null;
+      evidence_id: string | null;
+      source_id: string | null;
+      description: string | null;
+    }[];
+  }[];
+  metadata: {
+    narrative_qa?: {
+      status: string;
+      findings: { code: string; severity: string; explanation: string }[];
+    };
+  };
+}
+
+export async function getNarrativePlan(channelId: string, requestId: string): Promise<NarrativePlan | null> {
+  return apiFetch(`/api/v1/channels/${channelId}/content/${requestId}/narrative-plan`);
 }
 
 export async function generateContent(

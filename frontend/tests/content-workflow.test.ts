@@ -131,3 +131,21 @@ test("campaign navigation and breadcrumbs remain channel scoped", () => {
   assert.deepEqual(getBreadcrumbs("/channels/channel/campaigns/new", "Demo").map((item) => item.label), ["Channels", "Demo", "Campaigns", "New campaign"]);
   assert.deepEqual(getBreadcrumbs("/channels/channel/campaigns/123", "Demo").map((item) => item.label), ["Channels", "Demo", "Campaigns", "Campaign details"]);
 });
+
+
+test("Content Studio loads persisted Narrative Plan authority before the Script tab", () => {
+  const page = readFileSync(new URL("../src/app/channels/[id]/content/page.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes("getNarrativePlan(channelId, request.id)"));
+  assert.ok(page.includes('useState<ContentView>("narrative")'));
+  assert.ok(page.indexOf('id: "narrative"') < page.indexOf('id: "script"'));
+  assert.ok(page.includes("<NarrativePlanPanel plan={plan} script={script} />"));
+  assert.ok(page.includes('planResult.status === "fulfilled"'));
+});
+
+test("Narrative Plan surface preserves section order, grounding, QA and script lineage", () => {
+  const panel = readFileSync(new URL("../src/components/workflow/NarrativePlanPanel.tsx", import.meta.url), "utf8");
+  for (const field of ["plan.version", "plan.status", "plan.format_profile", "plan.target_duration_seconds", "plan.estimated_duration_seconds", "section.role", "section.objective", "section.key_information", "section.grounding_references", "qa?.status", "qa?.findings", "script.narrative_plan_id", "script.narrative_plan_version"]) assert.ok(panel.includes(field), field);
+  assert.ok(panel.includes("a.section_order - b.section_order"));
+  assert.ok(panel.includes("Research Brief \u2192 Narrative Plan \u2192 Script"));
+  assert.ok(panel.includes("Historical script without a narrative plan."));
+});

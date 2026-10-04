@@ -186,7 +186,12 @@ async def test_content_api_lifecycle(db_session: AsyncSession) -> None:
         assert outline_res.status_code == 200
         outline_sections = outline_res.json()["sections"]
         assert len(outline_sections) == len(script_v1["sections"])
-        assert len(outline_sections) == max(3, 3 + (content_req["target_duration_seconds"] - 480) // 240)
+        plan_res = await client.get(f"/api/v1/channels/{channel_id}/content/{content_req_id}/narrative-plan")
+        assert plan_res.status_code == 200
+        plan = plan_res.json()
+        assert len(outline_sections) == len(plan["sections"])
+        assert script_v1["narrative_plan_id"] == plan["id"]
+        assert [s["objective"] for s in outline_sections] == [s["objective"] for s in plan["sections"]]
 
         # 10. Check Script Version & QA
         qa_res = await client.get(

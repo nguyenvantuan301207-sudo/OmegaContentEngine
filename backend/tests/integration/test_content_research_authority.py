@@ -20,7 +20,7 @@ from omega.infrastructure.models import (
     ScriptVersion,
 )
 from omega.main import app
-from tests.research_fixtures import create_research_case
+from tests.research_fixtures import create_research_case, seed_sufficient_research
 
 
 def _brief(channel, topic, request, outcome, **kwargs):
@@ -131,7 +131,10 @@ async def test_historical_sufficient_brief_remains_authoritative_even_if_newer_b
 ):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         channel, topic, request = await create_research_case(client)
-        pinned = _brief(channel, topic, request, "SUFFICIENT", version=1, is_current=False)
+        await seed_sufficient_research(client, channel, request)
+        response = await client.post(f"/api/v1/channels/{channel}/research/{request}/run")
+        pinned = await db_session.get(ResearchBrief, uuid.UUID(response.json()["id"]))
+        pinned.is_current = False
         newer = _brief(
             channel, topic, request, "INSUFFICIENT", version=2, supersedes_brief_id=pinned.id
         )
