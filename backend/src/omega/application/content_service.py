@@ -428,6 +428,9 @@ async def generate_content(
         target_duration_seconds=script_target_duration,
         dna_dict=dna_dict,
         brief_dict=brief_dict,
+        topic_title=topic_title,
+        topic_summary=topic_summary,
+        narrative_plan_dict=outline_data,
     )
 
     # Step E: Acquire Locks and Persist in Atomic Transaction
@@ -970,11 +973,14 @@ async def run_qa(
     brief = req.research_brief
     brief_dict = {
         "id": str(brief.id),
+        "title": brief.title,
+        "summary": brief.summary,
         "verified_claims": brief.verified_claims,
         "contradictions": brief.contradictions,
     }
 
     script_data = {
+        "title": script.title,
         "hook_text": script.hook_text,
         "closing_text": script.closing_text,
         "cta_text": script.cta_text,
@@ -1012,6 +1018,8 @@ async def run_qa(
         target_duration_seconds=qa_target_duration,
         dna_dict=dna_dict,
         brief_dict=brief_dict,
+        topic_title=req.topic_candidate.title if req.topic_candidate else script.title,
+        topic_summary=req.topic_candidate.summary if req.topic_candidate else brief.summary,
     )
 
     # Update or insert QA result

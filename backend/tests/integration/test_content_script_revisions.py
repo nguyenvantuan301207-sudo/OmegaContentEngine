@@ -73,6 +73,8 @@ async def test_script_revisions_v1_to_v2_and_immutability(db_session: AsyncSessi
         assert script_v2["version"] == 2
         assert script_v2["is_current"] is True
         assert script_v2["supersedes_script_id"] == v1_id
+        assert script_v2["narrative_plan_id"] == script_v1["narrative_plan_id"]
+        assert script_v2["narrative_plan_version"] == 1
         v2_id = script_v2["id"]
 
         # 5. Verify Script v1 is preserved and marked is_current = False

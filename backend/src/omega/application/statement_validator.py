@@ -8,12 +8,28 @@ from uuid import UUID
 
 from omega.domain.content import ClaimUsagePolicy, ContentStatementType
 
-# Regular expressions detecting empirical statistics, percentages, units, and verbatim quotes
+# Regular expressions detecting empirical statistics, percentages, units, verbatim quotes, and empirical research assertions
 NUMERICAL_STAT_REGEX = re.compile(
     r"\b\d+(\.\d+)?%|\b\d+\s*(ms|seconds|minutes|hours|days|years|gb|mb|kb|tb|req/s|ops/s|fps|users|dollars)\b|\$\d+",
     re.IGNORECASE,
 )
 QUOTE_REGEX = re.compile(r'["“][^"“”]{6,}["”]')
+FACTUAL_ASSERTION_REGEX = re.compile(
+    r"\b("
+    r"research (shows|proves|indicates|confirms|reveals|demonstrates|finds|found)|"
+    r"studies (show|prove|indicate|confirm|reveal|demonstrate|find|found)|"
+    r"experiments (show|demonstrate|reveal|prove|confirm)|"
+    r"evidence (shows|proves|indicates|confirms|suggests|demonstrates)|"
+    r"data (shows|proves|indicates|confirms|demonstrates|reveals)|"
+    r"empirically|statistically|scientifically|"
+    r"proven (to|that|finding)|"
+    r"measured (at|by|to be)|"
+    r"laboratory tests?|field tests?|"
+    r"physical mechanism|chemical mechanism|biological mechanism|"
+    r"documented evidence|clinical trials?"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def validate_and_classify_statement(
@@ -34,6 +50,7 @@ def validate_and_classify_statement(
 
     has_numerical = bool(NUMERICAL_STAT_REGEX.search(text_clean))
     has_quote = bool(QUOTE_REGEX.search(text_clean))
+    has_factual = bool(FACTUAL_ASSERTION_REGEX.search(text_clean))
 
     effective_type: ContentStatementType
     try:
@@ -48,6 +65,12 @@ def validate_and_classify_statement(
     ):
         effective_type = ContentStatementType.FACTUAL
         reasons.append("FORCED_RECLASSIFICATION_STATISTICAL_CONTENT")
+    elif has_factual and effective_type in (
+        ContentStatementType.CREATIVE,
+        ContentStatementType.TRANSITION,
+    ):
+        effective_type = ContentStatementType.FACTUAL
+        reasons.append("FORCED_RECLASSIFICATION_FACTUAL_CONTENT")
 
     policy = ClaimUsagePolicy.VERIFIED_FACT
 
