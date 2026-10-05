@@ -67,8 +67,8 @@ from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import (
     VisualAssetKind,
     VisualDirector,
-    VisualRenderMode,
     VisualTemplateId,
+    map_visual_strategy,
 )
 from omega.application.visual_template_renderer import VisualTemplateRenderer
 from omega.domain.attribution_delivery import AttributionDeliveryChannel
@@ -1026,10 +1026,20 @@ class VisualProductionV2Service:
                         == BeatSemanticRole.MECHANISM.value
                     )
                     if not can_resolve_diagram_payload(unit_content, is_g2_mechanism=is_g2):
+                        render_mode, template_id, motion_profile, rationale = map_visual_strategy(
+                            VisualStrategy.KINETIC_TEXT
+                        )
                         unit = unit.model_copy(update={
                             "direction_view": direction_view.model_copy(update={
-                                "template_id": VisualTemplateId.KINETIC_TEXT,
-                                "render_mode": VisualRenderMode.TEMPLATE,
+                                "template_id": template_id,
+                                "render_mode": render_mode,
+                                "motion_profile": motion_profile,
+                                "asset_requirements": [],
+                                "rationale": rationale,
+                                "metadata": {
+                                    **dir_meta,
+                                    "visual_strategy": VisualStrategy.KINETIC_TEXT.value,
+                                },
                             }),
                             "scene_view": scene_view.model_copy(update={
                                 "visual_strategy": VisualStrategy.KINETIC_TEXT,

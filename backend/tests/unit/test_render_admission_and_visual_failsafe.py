@@ -19,8 +19,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
+from omega.application.beat_asset_executor import BeatAssetExecutor
 from omega.application.beat_asset_policy import BeatAssetAction, BeatAssetDecision
 from omega.application.beat_render_adapter import BeatRenderPlan, BeatRenderUnit
+from omega.application.beat_visual_renderer import BeatVisualRenderer
 from omega.application.canonical_beat_preparation import CanonicalBeatPreparationResult
 from omega.application.editorial_beat import BeatMotionIntent, BeatTransitionIntent
 from omega.application.editorial_beat_planner import BeatSemanticRole
@@ -33,6 +35,7 @@ from omega.application.render_service import (
     FFmpegExecutionError,
     _classify_phase2_error,
 )
+from omega.application.scene_template_registry import SceneTemplateRegistry, TemplateInputKey
 from omega.application.storyboard_engine import (
     StoryboardEngine,
     StoryboardScene,
@@ -40,6 +43,7 @@ from omega.application.storyboard_engine import (
 )
 from omega.application.template_payload_resolver import (
     TemplatePayloadError,
+    TemplatePayloadResolver,
     can_resolve_diagram_payload,
 )
 from omega.application.visual_direction import (
@@ -47,6 +51,7 @@ from omega.application.visual_direction import (
     VisualDirector,
     VisualRenderMode,
     VisualTemplateId,
+    map_visual_strategy,
 )
 from omega.application.visual_production_v2_service import (
     VerticalSliceError,
@@ -565,6 +570,10 @@ def _build_multi_beat_plan_with_diagram(
         metadata={
             "semantic_role": BeatSemanticRole.MECHANISM.value,
             "beat_index": 0,
+            "visual_strategy": VisualStrategy.DIAGRAM.value,
+            "is_section_entry": False,
+            "layout_variant": "centered",
+            "asset_reuse_intent": "NONE",
         },
     )
     unit_0 = BeatRenderUnit(
@@ -641,7 +650,7 @@ def _build_multi_beat_plan_with_diagram(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("on_screen_text", [None, "Authored inspection guidance"])
+@pytest.mark.parametrize("on_screen_text", [None, "", "Authored inspection guidance"])
 async def test_runtime_render_parent_visual_multi_beat_unresolvable_flow_diagram_falls_back_to_kinetic_text(tmp_path, on_screen_text):
     """Real frozen models survive fallback without mutating prepared truth."""
     plan = _build_multi_beat_plan_with_diagram(SCENE17_CANARY_PROSE, on_screen_text)
@@ -662,33 +671,19 @@ async def test_runtime_render_parent_visual_multi_beat_unresolvable_flow_diagram
     original_preparation = preparation.model_dump()
     prep.prepare_from_script_dict.return_value = preparation
 
-    executor = MagicMock()
-    executed_assets = [
-        SimpleNamespace(
-            action=BeatAssetAction.LOCAL_TEMPLATE,
-            required_kind=None,
-            reuse_from_beat_index=None,
-            resolved_asset=None,
-        ),
-        SimpleNamespace(
-            action=BeatAssetAction.LOCAL_TEMPLATE,
-            required_kind=None,
-            reuse_from_beat_index=None,
-            resolved_asset=None,
-        ),
-    ]
-    executor.execute_plan = AsyncMock(
-        return_value=SimpleNamespace(parent_scene_index=17, assets=tuple(executed_assets))
-    )
-
-    renderer = MagicMock()
-    rendered_metadata = [
-        SimpleNamespace(template_id=VisualTemplateId.KINETIC_TEXT, video_sha256="1" * 64),
-        SimpleNamespace(template_id=VisualTemplateId.KINETIC_TEXT, video_sha256="2" * 64),
-    ]
-    renderer.render_plan = AsyncMock(
-        return_value=SimpleNamespace(clips=(0, 1), beat_metadata=tuple(rendered_metadata))
-    )
+    executor = BeatAssetExecutor()
+    executor.execute_plan = AsyncMock(wraps=executor.execute_plan)
+    payload_resolver = TemplatePayloadResolver()
+    payload_resolver.resolve = MagicMock(wraps=payload_resolver.resolve)
+    video_renderer = MagicMock()
+    async def fake_render_clip(**kwargs):
+        # External encoding only is mocked; registry, payload resolution and
+        # beat rendering orchestration run their actual production code.
+        kwargs["output_path"].write_bytes(b"mock-video")
+        return SimpleNamespace(video_sha256="f" * 64)
+    video_renderer.render_clip = AsyncMock(side_effect=fake_render_clip)
+    renderer = BeatVisualRenderer(payload_resolver=payload_resolver, video_renderer=video_renderer)
+    renderer.render_plan = AsyncMock(wraps=renderer.render_plan)
 
     assembler = MagicMock()
     async def _assemble(_clips, *, output_path, fps):
@@ -723,16 +718,17 @@ async def test_runtime_render_parent_visual_multi_beat_unresolvable_flow_diagram
     assert preparation.render_plan is plan
     unit_0 = plan.units[0]
     assert unit_0.direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM
+    assert unit_0.direction_view.motion_profile == "sequential_flow"
     assert unit_0.scene_view.visual_strategy == VisualStrategy.DIAGRAM
     assert unit_0.scene_view.on_screen_text == on_screen_text
 
     executor.execute_plan.assert_awaited_once()
     renderer.render_plan.assert_awaited_once()
-    assembler.assemble.assert_awaited_once_with(
-        renderer.render_plan.return_value.clips,
-        output_path=tmp_path / "scene_017_visual.mp4",
-        fps=24,
-    )
+    assembler.assemble.assert_awaited_once()
+    assert len(assembler.assemble.call_args.args[0]) == 2
+    assert assembler.assemble.call_args.kwargs == {
+        "output_path": tmp_path / "scene_017_visual.mp4", "fps": 24,
+    }
     rendered_plan = renderer.render_plan.call_args.kwargs["render_plan"]
     assert isinstance(rendered_plan, BeatRenderPlan)
     assert rendered_plan is not plan
@@ -745,6 +741,22 @@ async def test_runtime_render_parent_visual_multi_beat_unresolvable_flow_diagram
     assert replacement.scene_view is not unit_0.scene_view
     assert replacement.direction_view.template_id == VisualTemplateId.KINETIC_TEXT
     assert replacement.direction_view.render_mode == VisualRenderMode.TEMPLATE
+    assert replacement.direction_view.motion_profile == "kinetic_phrase"
+    assert replacement.direction_view.asset_requirements == []
+    assert replacement.direction_view.rationale == map_visual_strategy(VisualStrategy.KINETIC_TEXT)[3]
+    assert replacement.direction_view.metadata == {
+        **unit_0.direction_view.metadata,
+        "visual_strategy": VisualStrategy.KINETIC_TEXT.value,
+    }
+    SceneTemplateRegistry().validate_direction(replacement.direction_view)
+    assert payload_resolver.resolve.call_count == 2
+    assert payload_resolver.resolve.call_args_list[0].args == (replacement.scene_view, replacement.direction_view)
+    payload = TemplatePayloadResolver().resolve(replacement.scene_view, replacement.direction_view)
+    assert payload.template_id == VisualTemplateId.KINETIC_TEXT
+    assert payload.motion_profile == "kinetic_phrase"
+    assert TemplateInputKey.NODES not in payload.inputs
+    assert TemplateInputKey.EDGES not in payload.inputs
+    assert video_renderer.render_clip.call_args_list[0].kwargs["motion_profile"] == "kinetic_phrase"
     assert replacement.scene_view.visual_strategy == VisualStrategy.KINETIC_TEXT
     assert replacement.scene_view.on_screen_text == (on_screen_text or SCENE17_CANARY_PROSE)
     assert replacement.scene_view.narration_excerpt == unit_0.scene_view.narration_excerpt
@@ -834,6 +846,11 @@ async def test_runtime_render_parent_visual_multi_beat_resolvable_flow_diagram_r
     unit_0 = plan.units[0]
     assert unit_0.direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM
     assert unit_0.direction_view.render_mode == VisualRenderMode.TEMPLATE
+    assert unit_0.direction_view.motion_profile == "sequential_flow"
+    SceneTemplateRegistry().validate_direction(unit_0.direction_view)
+    payload = TemplatePayloadResolver().resolve(unit_0.scene_view, unit_0.direction_view)
+    assert payload.template_id == VisualTemplateId.FLOW_DIAGRAM
+    assert payload.motion_profile == "sequential_flow"
     assert unit_0.scene_view.visual_strategy == VisualStrategy.DIAGRAM
 
     assert parent_scene.model_dump() == original_parent_scene
