@@ -433,8 +433,8 @@ test("proceed to production uses current ScriptVersion and historical script v1 
   assert.equal(resolveCurrentScript([v2Current, v1Historical])?.id, "script-v2-curr");
   assert.equal(resolveCurrentScript([v1Historical, v2Current])?.is_current, true);
 
-  // Single script fallback
-  assert.equal(resolveCurrentScript([v1Historical])?.id, "script-v1-hist");
+  // Historical-only scripts have no current authority
+  assert.equal(resolveCurrentScript([v1Historical]), null);
   assert.equal(resolveCurrentScript([]), null);
 });
 
@@ -555,14 +555,14 @@ test("proceedToProductionHandoff creates a new ProductionRequest pinned to curre
     created_at: "2026-10-01T05:00:00Z",
   };
 
-  let createPayloadReceived: { script_version_id: string } | null = null;
+  const createPayloads: Array<{ script_version_id: string }> = [];
 
   const result = await proceedToProductionHandoff({
     channelId: "chan-1",
     scripts: [v1Historical, v2Current],
     listRequests: async () => [oldProduction],
     createRequest: async (_ch, payload) => {
-      createPayloadReceived = payload;
+      createPayloads.push(payload);
       return {
         id: "prod-new-v2",
         channel_id: "chan-1",
@@ -585,8 +585,8 @@ test("proceedToProductionHandoff creates a new ProductionRequest pinned to curre
   assert.equal(result.reused, false);
   assert.equal(result.requestId, "prod-new-v2");
   assert.equal(result.scriptVersionId, "script-v2-curr");
-  assert.deepEqual(createPayloadReceived, { script_version_id: "script-v2-curr" });
-  assert.notEqual(createPayloadReceived?.script_version_id, "script-v1-hist");
+  assert.deepEqual(createPayloads, [{ script_version_id: "script-v2-curr" }]);
+  assert.notEqual(createPayloads[0].script_version_id, "script-v1-hist");
 });
 
 test("proceedToProductionHandoff creates new attempt when existing production for current script is FAILED", async () => {
@@ -833,4 +833,48 @@ test("Production Studio page provides authoritative empty state guidance back to
     ),
   );
   assert.ok(prodPage.includes("Return to Content Studio"));
+});
+
+
+test("unique current authority never follows version, time or order", () => {
+  const script = (id: string, version: number, is_current: boolean): ScriptVersionSummary => ({
+    id, version, is_current, content_request_id: "content", title: id,
+    estimated_word_count: 20, estimated_duration_seconds: 10,
+    qa_status: "PASSED", created_at: "2026-10-01T00:00:00Z",
+  });
+  const historical = script("historical", 999, false);
+  const current = script("current", 1, true);
+  assert.equal(resolveCurrentScript([historical]), null);
+  assert.equal(resolveCurrentScript([historical, script("v2", 1000, false)]), null);
+  assert.equal(resolveCurrentScript([current]), current);
+  for (const order of [[historical, current], [current, historical]]) {
+    assert.equal(resolveCurrentScript(order), current);
+  }
+  assert.equal(resolveCurrentScript([current, script("ambiguous", 2, true)]), null);
+});
+
+test("missing or ambiguous current authority fails before production reads or writes", async () => {
+  const script = { id: "script", is_current: false, qa_status: "PASSED" } as ScriptVersionSummary;
+  for (const scripts of [[], [script], [script, { ...script, id: "other" }],
+    [{ ...script, is_current: true }, { ...script, id: "other", is_current: true }]]) {
+    let reads = 0, writes = 0;
+    await assert.rejects(proceedToProductionHandoff({
+      channelId: "channel", scripts,
+      listRequests: async () => { reads++; return []; },
+      createRequest: async () => { writes++; throw new Error("must not create"); },
+    }), /Exactly one current/);
+    assert.equal(reads, 0);
+    assert.equal(writes, 0);
+  }
+});
+
+test("Content detail loading resolves unique current and clears ambiguous details", () => {
+  const page = readFileSync(new URL("../src/app/channels/[id]/content/page.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(page, /scriptList\[0\]/);
+  const details = page.slice(page.indexOf("const loadDetails ="), page.indexOf("const loadBriefsForTopic ="));
+  assert.match(details, /const current = resolveCurrentScript\(scriptList\)/);
+  assert.match(details, /if \(current\) await loadVersion\(request, current.version\)/);
+  assert.match(details, /Exactly one current ScriptVersion is required/);
+  assert.match(details, /setScript\(null\)/);
+  assert.match(details, /setQa\(null\)/);
 });

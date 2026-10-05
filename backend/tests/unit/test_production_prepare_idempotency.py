@@ -55,6 +55,8 @@ def setup_prepare():
             request.scenes.append(row)
         elif isinstance(row, RenderPlan):
             request.render_plans.append(row)
+        elif isinstance(row, AssetRequirement):
+            next(scene for scene in request.scenes if scene.id == row.scene_id).asset_requirements.append(row)
 
     session.add.side_effect = add
     service = object.__new__(ProductionService)
@@ -163,3 +165,42 @@ async def test_prepare_http_retry_and_state_conflict():
         request.status = "RUNNING"
         blocked = await client.post(path)
         assert blocked.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["IMAGE", "BROLL", "SCREENSHOT"])
+@pytest.mark.parametrize("damage", ["missing", "duplicate", "wrong_type", "template_extra", "healthy"])
+async def test_ready_required_asset_integrity_without_replanning(kind, damage):
+    service, session, request, rows = setup_prepare()
+    await service.prepare_production(session, request.channel_id, request.id)
+    scene = request.scenes[0]
+    scene.scene_type = kind
+    request.render_plans[0].scene_manifest[0]["type"] = kind
+    requirement = scene.asset_requirements[0]
+    requirement.asset_type = kind
+    requirement.status = "RESOLVED"
+    if damage == "missing":
+        scene.asset_requirements.clear()
+    elif damage == "duplicate":
+        scene.asset_requirements.append(AssetRequirement(id=uuid4(), scene_id=scene.id, required=True, asset_type=kind))
+    elif damage == "wrong_type":
+        requirement.asset_type = "OTHER"
+    elif damage == "template_extra":
+        scene.scene_type = "KINETIC_TEXT"
+        request.render_plans[0].scene_manifest[0]["type"] = "KINETIC_TEXT"
+    original = list(rows)
+    ids = [item.id for item in scene.asset_requirements]
+    session.add.reset_mock()
+    session.commit.reset_mock()
+    service.storyboard_engine.generate_storyboard = MagicMock(side_effect=AssertionError("READY replanned"))
+    if damage == "healthy":
+        assert await service.prepare_production(session, request.channel_id, request.id) is request
+    else:
+        with pytest.raises(ProductionStateError, match="asset requirements"):
+            await service.prepare_production(session, request.channel_id, request.id)
+        session.commit.assert_not_called()
+    assert rows == original
+    assert [item.id for item in scene.asset_requirements] == ids
+    session.add.assert_not_called()
+    session.delete.assert_not_called()
+    service.storyboard_engine.generate_storyboard.assert_not_called()

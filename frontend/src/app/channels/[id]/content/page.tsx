@@ -146,6 +146,9 @@ export default function ContentEnginePage({
     async (request: ContentGenerationRequest) => {
       setDetailsLoading(true);
       setDetailError(null);
+      setScripts([]);
+      setScript(null);
+      setQa(null);
       const [intentResult, hookResult, outlineResult, scriptResult, planResult] =
         await Promise.allSettled([
           getContentIntent(channelId, request.id),
@@ -176,8 +179,10 @@ export default function ContentEnginePage({
         setDetailError(
           `${failures.length} generated content artifact${failures.length === 1 ? "" : "s"} could not be loaded.`,
         );
-      if (scriptList[0]) await loadVersion(request, scriptList[0].version);
+      const current = resolveCurrentScript(scriptList);
+      if (current) await loadVersion(request, current.version);
       else {
+        setDetailError("Exactly one current ScriptVersion is required. Refresh or regenerate content to restore current authority.");
         setScript(null);
         setQa(null);
         setDetailsLoading(false);

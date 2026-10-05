@@ -7,10 +7,8 @@ import type {
 export function resolveCurrentScript(
   scripts: ScriptVersionSummary[],
 ): ScriptVersionSummary | null {
-  if (!scripts.length) return null;
-  const current = scripts.find((s) => s.is_current);
-  if (current) return current;
-  return [...scripts].sort((a, b) => b.version - a.version)[0] ?? null;
+  const current = scripts.filter((script) => script.is_current === true);
+  return current.length === 1 ? current[0] : null;
 }
 
 export function isScriptEligibleForProduction(
@@ -44,7 +42,7 @@ export async function proceedToProductionHandoff({
   const currentScript = resolveCurrentScript(scripts);
   if (!currentScript) {
     throw new Error(
-      "A current script version is required to proceed to production.",
+      "Exactly one current script version is required to proceed to production.",
     );
   }
 

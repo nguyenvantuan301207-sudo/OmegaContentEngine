@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -15,6 +16,7 @@ from omega.application.storyboard_engine import StoryboardEngine
 from omega.application.subtitle_engine import SubtitleRenderStyle
 from omega.application.visual_production_v2_service import ScriptStoryboardAdapter
 from omega.domain.channel_style import extract_channel_style_profile
+from omega.domain.content import ScriptQAStatus
 from omega.domain.production import (
     ProductionMode,
     ProductionRequestCreate,
@@ -26,6 +28,7 @@ from omega.infrastructure.models import (
     AssetRequirement,
     Channel,
     ContentGenerationRequest,
+    ContentQAResult,
     ProductionRenderJob,
     ProductionRequest,
     ProductionScene,
@@ -142,6 +145,20 @@ class ProductionService:
                 f"ScriptVersion {script.id} has no associated ContentGenerationRequest."
             )
 
+        # Regeneration locks the content request before switching current scripts.
+        # Acquire the same authority, then refresh the script after any lock wait.
+        content_lock = select(ContentGenerationRequest).where(
+            ContentGenerationRequest.id == content_req.id
+        ).with_for_update().execution_options(populate_existing=True)
+        content_req = (await session.execute(content_lock)).scalar_one_or_none()
+        if content_req is None:
+            raise ProductionLineageError("ContentGenerationRequest no longer exists.")
+        script = (await session.execute(
+            script_stmt.with_for_update().execution_options(populate_existing=True)
+        )).scalar_one_or_none()
+        if script is None:
+            raise ProductionLineageError("ScriptVersion no longer exists.")
+
         # 2. Validate Channel Match (Cross-Channel Isolation)
         if content_req.channel_id != channel_id:
             raise ProductionLineageError(
@@ -154,6 +171,24 @@ class ProductionService:
             raise ProductionLineageError(
                 "ContentGenerationRequest has no pinned ChannelDNARevision."
             )
+
+        current_ids = (await session.execute(select(ScriptVersion.id).where(
+            ScriptVersion.content_request_id == content_req.id,
+            ScriptVersion.is_current.is_(True),
+        ))).scalars().all()
+        if not script.is_current or current_ids != [script.id]:
+            raise ProductionLineageError("Requested script must be the unique current ScriptVersion.")
+        # QA reruns update the script summary in the same transaction as the QA
+        # result. The script lock prevents their commit beneath this snapshot.
+        qa = (await session.execute(select(ContentQAResult).where(
+            ContentQAResult.script_version_id == script.id
+        ).execution_options(populate_existing=True))).scalar_one_or_none()
+        if qa is None:
+            raise ProductionLineageError("Current ScriptVersion requires a ContentQAResult.")
+        if script.qa_status != qa.status:
+            raise ProductionLineageError("ScriptVersion and ContentQAResult QA statuses disagree.")
+        if qa.status not in (ScriptQAStatus.PASSED.value, ScriptQAStatus.PASSED_WITH_WARNINGS.value):
+            raise ProductionLineageError("Current ScriptVersion QA is not eligible for production.")
 
         # 4. Mode determination
         mode = (
@@ -216,7 +251,7 @@ class ProductionService:
                 .selectinload(ScriptVersion.sections)
                 .selectinload(ScriptSection.statements)
                 .selectinload(ScriptStatement.citations),
-                selectinload(ProductionRequest.scenes),
+                selectinload(ProductionRequest.scenes).selectinload(ProductionScene.asset_requirements),
                 selectinload(ProductionRequest.render_plans),
             )
             .with_for_update()
@@ -256,6 +291,14 @@ class ProductionService:
                 != (req.target_width, req.target_height, req.fps, req.video_codec, req.audio_codec, req.container_format)
             ):
                 raise ProductionStateError("READY request has inconsistent canonical preparation.")
+            for scene in req.scenes:
+                required = [item for item in scene.asset_requirements if item.required]
+                if scene.scene_type in ("IMAGE", "BROLL", "SCREENSHOT"):
+                    valid = len(required) == 1 and required[0].asset_type == scene.scene_type
+                else:
+                    valid = not required
+                if not valid:
+                    raise ProductionStateError("READY request has inconsistent asset requirements.")
             # Release the lock without rewriting any persisted planning or artifact truth.
             await session.commit()
             return req
