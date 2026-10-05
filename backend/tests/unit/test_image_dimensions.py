@@ -3,6 +3,7 @@ import hashlib
 import json
 import struct
 import zlib
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ from omega.application.visual_direction import VisualAssetKind
 from omega.domain.production import LicenseStatus
 from omega.infrastructure.image_dimensions import ImageDimensionError, probe_image_dimensions
 from omega.infrastructure.pexels_asset_provider import PexelsAssetProvider, PexelsAssetProviderError
+from omega.infrastructure.video_probe import PhysicalVideoMetadata
 from omega.infrastructure.visual_asset_cache import VisualAssetCache
 from omega.infrastructure.visual_asset_materializer import VisualAssetMaterializer
 
@@ -100,7 +102,7 @@ def candidate(kind=VisualAssetKind.IMAGE):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mime,content", IMAGES + [("video/mp4", b"\x00\x00\x00\x18ftypmp42synthetic")])
-async def test_fetch_cache_bound_dimensions_and_provenance(tmp_path, mime, content):
+async def test_fetch_cache_bound_dimensions_and_provenance(tmp_path, monkeypatch, mime, content):
     original = candidate(VisualAssetKind.BROLL if mime == "video/mp4" else VisualAssetKind.IMAGE)
     cache = VisualAssetCache(tmp_path)
 
@@ -109,8 +111,11 @@ async def test_fetch_cache_bound_dimensions_and_provenance(tmp_path, mime, conte
         assert "authorization" not in request.headers
         return httpx.Response(200, content=content, headers={"Content-Type": mime})
 
+    probe = AsyncMock(return_value=PhysicalVideoMetadata(6016, 4016, 57))
+    monkeypatch.setattr("omega.infrastructure.pexels_asset_provider.probe_video_metadata", probe)
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as client:
         resolved = await PexelsAssetProvider("synthetic-key", cache, client).fetch(original)
+    probe.assert_awaited_once_with(content) if mime == "video/mp4" else probe.assert_not_awaited()
     expected = (6016, 4016) if mime == "video/mp4" else (1880, 1255)
     assert (resolved.width, resolved.height) == expected
     assert (original.width, original.height) == (6016, 4016)

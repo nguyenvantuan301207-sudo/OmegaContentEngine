@@ -10,6 +10,7 @@ from omega.application.visual_asset_engine import (
 from omega.application.visual_direction import VisualAssetKind
 from omega.domain.production import LicenseStatus
 from omega.infrastructure.image_dimensions import ImageDimensionError, probe_image_dimensions
+from omega.infrastructure.video_probe import VideoProbeError, probe_video_metadata
 from omega.infrastructure.visual_asset_cache import VisualAssetCache
 
 
@@ -324,11 +325,19 @@ class PexelsAssetProvider:
 
         content = bytes(buffer)
         width, height = candidate.width, candidate.height
+        duration_seconds = candidate.duration_seconds
         if candidate.kind == VisualAssetKind.IMAGE:
             try:
                 width, height = probe_image_dimensions(content, actual_mime_type)
             except ImageDimensionError:
                 raise PexelsAssetProviderError("Invalid downloaded image dimension header") from None
+        else:
+            try:
+                physical = await probe_video_metadata(content)
+            except VideoProbeError:
+                raise PexelsAssetProviderError("Invalid downloaded video physical metadata") from None
+            width, height = physical.width, physical.height
+            duration_seconds = physical.duration_seconds
 
         return self._cache.store(
             content=content,
@@ -341,7 +350,7 @@ class PexelsAssetProvider:
             source_page_url=candidate.source_page_url,
             width=width,
             height=height,
-            duration_seconds=candidate.duration_seconds,
+            duration_seconds=duration_seconds,
             license_name=candidate.license_name,
             license_url=candidate.license_url,
             attribution_text=candidate.attribution_text,
