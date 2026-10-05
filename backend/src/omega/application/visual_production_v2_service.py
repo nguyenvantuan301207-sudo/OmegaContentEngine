@@ -986,9 +986,10 @@ class VisualProductionV2Service:
             else scene_out_path
         )
         if scene.visual_strategy == VisualStrategy.DIAGRAM and not can_resolve_diagram_payload(scene.narration_excerpt):
-            scene.visual_strategy = VisualStrategy.KINETIC_TEXT
-            if not scene.on_screen_text:
-                scene.on_screen_text = scene.narration_excerpt
+            scene = scene.model_copy(update={
+                "visual_strategy": VisualStrategy.KINETIC_TEXT,
+                "on_screen_text": scene.on_screen_text or scene.narration_excerpt,
+            })
 
         try:
             prep = self._beat_preparation_service.prepare_from_script_dict(
@@ -1007,36 +1008,37 @@ class VisualProductionV2Service:
             and len(prep.render_plan.units) >= 2
         ):
             plan = prep.render_plan
+            # Frozen units and their prepared views remain authoritative; fallback
+            # replaces only affected units in a new execution plan.
+            units = []
             for unit in plan.units:
-                direction_view = getattr(unit, "direction_view", None)
-                template_id = getattr(direction_view, "template_id", None)
-                if template_id == VisualTemplateId.FLOW_DIAGRAM:
-                    scene_view = getattr(unit, "scene_view", None)
+                direction_view = unit.direction_view
+                if direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM:
+                    scene_view = unit.scene_view
                     unit_content = (
-                        getattr(scene_view, "narration_excerpt", None)
-                        or getattr(scene_view, "on_screen_text", None)
-                        or getattr(scene_view, "visual_brief", None)
+                        scene_view.narration_excerpt
+                        or scene_view.on_screen_text
+                        or scene_view.visual_brief
                     )
-                    dir_meta = getattr(direction_view, "metadata", {}) or {}
+                    dir_meta = direction_view.metadata or {}
                     is_g2 = (
                         dir_meta.get("semantic_role")
                         == BeatSemanticRole.MECHANISM.value
                     )
                     if not can_resolve_diagram_payload(unit_content, is_g2_mechanism=is_g2):
-                        if hasattr(unit.direction_view, "model_copy"):
-                            unit.direction_view = unit.direction_view.model_copy(
-                                update={
-                                    "template_id": VisualTemplateId.KINETIC_TEXT,
-                                    "render_mode": VisualRenderMode.TEMPLATE,
-                                }
-                            )
-                        else:
-                            unit.direction_view.template_id = VisualTemplateId.KINETIC_TEXT
-                            unit.direction_view.render_mode = VisualRenderMode.TEMPLATE
-                        if hasattr(scene_view, "visual_strategy"):
-                            scene_view.visual_strategy = VisualStrategy.KINETIC_TEXT
-                        if hasattr(scene_view, "on_screen_text") and not scene_view.on_screen_text:
-                            scene_view.on_screen_text = getattr(scene_view, "narration_excerpt", None)
+                        unit = unit.model_copy(update={
+                            "direction_view": direction_view.model_copy(update={
+                                "template_id": VisualTemplateId.KINETIC_TEXT,
+                                "render_mode": VisualRenderMode.TEMPLATE,
+                            }),
+                            "scene_view": scene_view.model_copy(update={
+                                "visual_strategy": VisualStrategy.KINETIC_TEXT,
+                                "on_screen_text": scene_view.on_screen_text or scene_view.narration_excerpt,
+                            }),
+                        })
+                units.append(unit)
+            if any(unit is not original for unit, original in zip(units, plan.units, strict=True)):
+                plan = plan.model_copy(update={"units": tuple(units)})
             try:
                 execution = await self._beat_asset_executor.execute_plan(
                     render_plan=plan,

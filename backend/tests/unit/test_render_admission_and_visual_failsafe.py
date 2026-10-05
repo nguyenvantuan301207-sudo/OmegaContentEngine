@@ -9,21 +9,21 @@ C. Duplicate Normal Render Admission Authority & Concurrency
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from pydantic import ValidationError
 
-from omega.application.beat_asset_policy import BeatAssetAction
+from omega.application.beat_asset_policy import BeatAssetAction, BeatAssetDecision
+from omega.application.beat_render_adapter import BeatRenderPlan, BeatRenderUnit
+from omega.application.canonical_beat_preparation import CanonicalBeatPreparationResult
 from omega.application.editorial_beat import BeatMotionIntent, BeatTransitionIntent
-from omega.application.editorial_beat_planner import (
-    BeatSemanticRole,
-    EditorialBeatPlanner,
-)
+from omega.application.editorial_beat_planner import BeatSemanticRole
 from omega.application.mechanism_diagram import resolve_mechanism_diagram_spec
 from omega.application.production_service import (
     ProductionService,
@@ -62,7 +62,6 @@ from omega.infrastructure.models import (
     ProductionRequest,
     RenderPlan,
 )
-
 
 # ============================================================================
 # A. VISUAL TEMPLATE ADMISSION & DETERMINISTIC FALLBACK
@@ -541,8 +540,10 @@ def _make_mock_service(tmp_path: Path, prep, executor, renderer, assembler):
     )
 
 
-def _build_multi_beat_plan_with_diagram(narration_excerpt: str):
-    """Construct a BeatRenderPlan-like structure with a FLOW_DIAGRAM unit."""
+def _build_multi_beat_plan_with_diagram(
+    narration_excerpt: str, on_screen_text: str | None = None,
+) -> BeatRenderPlan:
+    """Construct the actual immutable production plan with a FLOW_DIAGRAM unit."""
     scene_view_0 = StoryboardScene(
         sequence_index=17,
         section_id="Mechanism",
@@ -552,6 +553,7 @@ def _build_multi_beat_plan_with_diagram(narration_excerpt: str):
         estimated_duration_seconds=3.0,
         visual_strategy=VisualStrategy.DIAGRAM,
         visual_brief="Diagram of degradation",
+        on_screen_text=on_screen_text,
     )
     direction_view_0 = VisualDirection(
         scene_index=17,
@@ -565,7 +567,7 @@ def _build_multi_beat_plan_with_diagram(narration_excerpt: str):
             "beat_index": 0,
         },
     )
-    unit_0 = SimpleNamespace(
+    unit_0 = BeatRenderUnit(
         parent_scene_index=17,
         materialized_index=0,
         source_beat_index=0,
@@ -574,7 +576,10 @@ def _build_multi_beat_plan_with_diagram(narration_excerpt: str):
         duration_ms=3000,
         scene_view=scene_view_0,
         direction_view=direction_view_0,
-        asset_decision=SimpleNamespace(
+        asset_decision=BeatAssetDecision(
+            parent_scene_index=17,
+            beat_index=0,
+            rationale="Local template only",
             action=BeatAssetAction.LOCAL_TEMPLATE,
             required_kind=None,
             reuse_from_beat_index=None,
@@ -606,7 +611,7 @@ def _build_multi_beat_plan_with_diagram(narration_excerpt: str):
             "beat_index": 1,
         },
     )
-    unit_1 = SimpleNamespace(
+    unit_1 = BeatRenderUnit(
         parent_scene_index=17,
         materialized_index=1,
         source_beat_index=1,
@@ -615,7 +620,10 @@ def _build_multi_beat_plan_with_diagram(narration_excerpt: str):
         duration_ms=2000,
         scene_view=scene_view_1,
         direction_view=direction_view_1,
-        asset_decision=SimpleNamespace(
+        asset_decision=BeatAssetDecision(
+            parent_scene_index=17,
+            beat_index=1,
+            rationale="Local template only",
             action=BeatAssetAction.LOCAL_TEMPLATE,
             required_kind=None,
             reuse_from_beat_index=None,
@@ -625,27 +633,18 @@ def _build_multi_beat_plan_with_diagram(narration_excerpt: str):
         transition_intent=BeatTransitionIntent.HARD_CUT,
     )
 
-    return SimpleNamespace(
+    return BeatRenderPlan(
         parent_scene_index=17,
-        units=[unit_0, unit_1],
+        units=(unit_0, unit_1),
         total_duration_ms=5000,
     )
 
 
 @pytest.mark.asyncio
-async def test_runtime_render_parent_visual_multi_beat_unresolvable_flow_diagram_falls_back_to_kinetic_text(tmp_path):
-    """Execute the exact _render_parent_visual multi-beat branch that caused runtime failure.
-
-    Proves:
-    - No ImportError (VisualRenderMode imported correctly, no RenderMode)
-    - No AttributeError
-    - unit.direction_view.template_id becomes VisualTemplateId.KINETIC_TEXT
-    - unit.direction_view.render_mode becomes VisualRenderMode.TEMPLATE
-    - unit.scene_view.visual_strategy becomes VisualStrategy.KINETIC_TEXT
-    - No fabricated diagram nodes
-    - The renderer proceeds beyond the fallback mutation boundary and invokes execute_plan, render_plan, assemble
-    """
-    plan = _build_multi_beat_plan_with_diagram(SCENE17_CANARY_PROSE)
+@pytest.mark.parametrize("on_screen_text", [None, "Authored inspection guidance"])
+async def test_runtime_render_parent_visual_multi_beat_unresolvable_flow_diagram_falls_back_to_kinetic_text(tmp_path, on_screen_text):
+    """Real frozen models survive fallback without mutating prepared truth."""
+    plan = _build_multi_beat_plan_with_diagram(SCENE17_CANARY_PROSE, on_screen_text)
     parent_scene = StoryboardScene(
         sequence_index=17,
         section_id="Mechanism",
@@ -657,11 +656,11 @@ async def test_runtime_render_parent_visual_multi_beat_unresolvable_flow_diagram
         visual_brief="Structural mechanism explanation",
     )
 
+    original_parent_scene = parent_scene.model_dump()
     prep = MagicMock()
-    prep.prepare_from_script_dict.return_value = SimpleNamespace(
-        eligible=True,
-        render_plan=plan,
-    )
+    preparation = CanonicalBeatPreparationResult(eligible=True, render_plan=plan)
+    original_preparation = preparation.model_dump()
+    prep.prepare_from_script_dict.return_value = preparation
 
     executor = MagicMock()
     executed_assets = [
@@ -718,21 +717,44 @@ async def test_runtime_render_parent_visual_multi_beat_unresolvable_flow_diagram
     # 1. Execution completed successfully through multi-beat path
     assert result["execution_mode"] == "MULTI_BEAT"
 
-    # 2. Fallback mutation occurred on unit 0
+    # Original preparation, plan, unit and nested views retain prepared truth.
+    assert parent_scene.model_dump() == original_parent_scene
+    assert preparation.model_dump() == original_preparation
+    assert preparation.render_plan is plan
     unit_0 = plan.units[0]
-    assert unit_0.direction_view.template_id == VisualTemplateId.KINETIC_TEXT
-    assert unit_0.direction_view.render_mode == VisualRenderMode.TEMPLATE
-    assert unit_0.scene_view.visual_strategy == VisualStrategy.KINETIC_TEXT
-    assert unit_0.scene_view.on_screen_text == SCENE17_CANARY_PROSE
+    assert unit_0.direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM
+    assert unit_0.scene_view.visual_strategy == VisualStrategy.DIAGRAM
+    assert unit_0.scene_view.on_screen_text == on_screen_text
 
-    # 3. Passed correctly to renderer
+    executor.execute_plan.assert_awaited_once()
     renderer.render_plan.assert_awaited_once()
+    assembler.assemble.assert_awaited_once_with(
+        renderer.render_plan.return_value.clips,
+        output_path=tmp_path / "scene_017_visual.mp4",
+        fps=24,
+    )
     rendered_plan = renderer.render_plan.call_args.kwargs["render_plan"]
-    assert rendered_plan.units[0].direction_view.template_id == VisualTemplateId.KINETIC_TEXT
-    assert rendered_plan.units[0].direction_view.render_mode == VisualRenderMode.TEMPLATE
-
-    # 4. Pipeline proceeded through assemble
-    assembler.assemble.assert_awaited_once()
+    assert isinstance(rendered_plan, BeatRenderPlan)
+    assert rendered_plan is not plan
+    assert executor.execute_plan.call_args.kwargs["render_plan"] is rendered_plan
+    assert executor.execute_plan.call_args.kwargs["provider_acquisition_allowed"] is False
+    replacement = rendered_plan.units[0]
+    assert isinstance(replacement, BeatRenderUnit)
+    assert replacement is not unit_0
+    assert replacement.direction_view is not unit_0.direction_view
+    assert replacement.scene_view is not unit_0.scene_view
+    assert replacement.direction_view.template_id == VisualTemplateId.KINETIC_TEXT
+    assert replacement.direction_view.render_mode == VisualRenderMode.TEMPLATE
+    assert replacement.scene_view.visual_strategy == VisualStrategy.KINETIC_TEXT
+    assert replacement.scene_view.on_screen_text == (on_screen_text or SCENE17_CANARY_PROSE)
+    assert replacement.scene_view.narration_excerpt == unit_0.scene_view.narration_excerpt
+    assert resolve_mechanism_diagram_spec(replacement.scene_view.narration_excerpt) is None
+    assert replacement.asset_decision is unit_0.asset_decision
+    assert replacement.start_ms == unit_0.start_ms
+    assert replacement.end_ms == unit_0.end_ms
+    assert rendered_plan.units[1] is plan.units[1]
+    assert rendered_plan.total_duration_ms == plan.total_duration_ms
+    assert result["runtime_beats"][0].template_id == VisualTemplateId.KINETIC_TEXT.value
 
 
 @pytest.mark.asyncio
@@ -750,11 +772,11 @@ async def test_runtime_render_parent_visual_multi_beat_resolvable_flow_diagram_r
         visual_brief="Structural mechanism explanation",
     )
 
+    original_parent_scene = parent_scene.model_dump()
     prep = MagicMock()
-    prep.prepare_from_script_dict.return_value = SimpleNamespace(
-        eligible=True,
-        render_plan=plan,
-    )
+    preparation = CanonicalBeatPreparationResult(eligible=True, render_plan=plan)
+    original_preparation = preparation.model_dump()
+    prep.prepare_from_script_dict.return_value = preparation
 
     executor = MagicMock()
     executed_assets = [
@@ -813,3 +835,48 @@ async def test_runtime_render_parent_visual_multi_beat_resolvable_flow_diagram_r
     assert unit_0.direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM
     assert unit_0.direction_view.render_mode == VisualRenderMode.TEMPLATE
     assert unit_0.scene_view.visual_strategy == VisualStrategy.DIAGRAM
+
+    assert parent_scene.model_dump() == original_parent_scene
+    assert preparation.model_dump() == original_preparation
+    executor.execute_plan.assert_awaited_once()
+    renderer.render_plan.assert_awaited_once()
+    assembler.assemble.assert_awaited_once()
+    assert executor.execute_plan.call_args.kwargs["render_plan"] is plan
+    assert renderer.render_plan.call_args.kwargs["render_plan"] is plan
+    assert executor.execute_plan.call_args.kwargs["provider_acquisition_allowed"] is False
+
+
+def test_real_beat_models_forbid_field_assignment():
+    plan = _build_multi_beat_plan_with_diagram(SCENE17_CANARY_PROSE)
+    with pytest.raises(ValidationError) as unit_error:
+        plan.units[0].direction_view = plan.units[0].direction_view.model_copy()
+    assert unit_error.value.errors()[0]["type"] == "frozen_instance"
+    with pytest.raises(ValidationError) as plan_error:
+        plan.units = ()
+    assert plan_error.value.errors()[0]["type"] == "frozen_instance"
+
+
+@pytest.mark.asyncio
+async def test_parent_scene_diagram_fallback_copies_scene_before_preparation(tmp_path):
+    scene = _build_multi_beat_plan_with_diagram(SCENE17_CANARY_PROSE).units[0].scene_view
+    original = scene.model_dump()
+    prep = MagicMock()
+    prep.prepare_from_script_dict.return_value = CanonicalBeatPreparationResult(eligible=False)
+    executor, renderer, assembler = MagicMock(), MagicMock(), MagicMock()
+    service = _make_mock_service(tmp_path, prep, executor, renderer, assembler)
+    service._video_renderer.render_clip.return_value = SimpleNamespace(
+        video_sha256="f" * 64, width=1920, height=1080,
+    )
+    result = await service._render_parent_visual(
+        script_dict={"sections": []}, scene=scene, duration_seconds=3.0,
+        canonical_visual_mode="LOCAL_TEMPLATE_ONLY", work_dir=tmp_path,
+        browser=MagicMock(), fps=24, style_profile=None, narration_enabled=True,
+    )
+    assert scene.model_dump() == original
+    prepared_scene = prep.prepare_from_script_dict.call_args.kwargs["scene"]
+    assert prepared_scene is not scene
+    assert prepared_scene.visual_strategy == VisualStrategy.KINETIC_TEXT
+    assert prepared_scene.on_screen_text == SCENE17_CANARY_PROSE
+    assert result["template_id"] == VisualTemplateId.KINETIC_TEXT.value
+    service._video_renderer.render_clip.assert_awaited_once()
+    service._orchestrator.resolve.assert_not_called()
