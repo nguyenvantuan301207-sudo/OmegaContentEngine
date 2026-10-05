@@ -9,6 +9,7 @@ from omega.application.visual_asset_engine import (
 )
 from omega.application.visual_direction import VisualAssetKind
 from omega.domain.production import LicenseStatus
+from omega.infrastructure.image_dimensions import ImageDimensionError, probe_image_dimensions
 from omega.infrastructure.visual_asset_cache import VisualAssetCache
 
 
@@ -322,6 +323,12 @@ class PexelsAssetProvider:
             raise PexelsAssetProviderError("Empty response body")
 
         content = bytes(buffer)
+        width, height = candidate.width, candidate.height
+        if candidate.kind == VisualAssetKind.IMAGE:
+            try:
+                width, height = probe_image_dimensions(content, actual_mime_type)
+            except ImageDimensionError:
+                raise PexelsAssetProviderError("Invalid downloaded image dimension header") from None
 
         return self._cache.store(
             content=content,
@@ -332,8 +339,8 @@ class PexelsAssetProvider:
             license_status=candidate.license_status,
             source_url=candidate.source_url,
             source_page_url=candidate.source_page_url,
-            width=candidate.width,
-            height=candidate.height,
+            width=width,
+            height=height,
             duration_seconds=candidate.duration_seconds,
             license_name=candidate.license_name,
             license_url=candidate.license_url,

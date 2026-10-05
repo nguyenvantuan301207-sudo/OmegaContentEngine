@@ -229,7 +229,7 @@ async def test_response_shape_validation(dummy_cache: VisualAssetCache):
 async def test_fetch_success(dummy_cache: VisualAssetCache):
     def mock_handler(request: httpx.Request) -> httpx.Response:
         assert request.url == "https://download.test/"
-        return httpx.Response(200, content=b"fake_image_bytes", headers={"Content-Type": "image/jpeg", "Content-Length": "16"})
+        return httpx.Response(200, content=b"\xff\xd8\xff\xc0\x00\x0b\x08\x00\x64\x00\x64\x01\x01\x11\x00\xff\xd9", headers={"Content-Type": "image/jpeg"})
 
     transport = httpx.MockTransport(mock_handler)
     async with httpx.AsyncClient(transport=transport) as client:
@@ -353,7 +353,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
         requested_urls_safe.append(str(request.url))
         if str(request.url) == "https://one.test/file":
             return httpx.Response(302, headers={"Location": "https://two.test/file"})
-        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/jpeg", "Content-Length": "4"})
+        return httpx.Response(200, content=b"\xff\xd8\xff\xc0\x00\x0b\x08\x00\x64\x00\x64\x01\x01\x11\x00\xff\xd9", headers={"Content-Type": "image/jpeg"})
 
     transport_safe = httpx.MockTransport(mock_safe_redirect)
     async with httpx.AsyncClient(transport=transport_safe) as client:
@@ -406,7 +406,7 @@ async def test_https_validation(dummy_cache: VisualAssetCache):
         if url == "https://hop4.test/file":
             return httpx.Response(302, headers={"Location": "https://final.test/file"})
 
-        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/jpeg", "Content-Length": "4"})
+        return httpx.Response(200, content=b"\xff\xd8\xff\xc0\x00\x0b\x08\x00\x64\x00\x64\x01\x01\x11\x00\xff\xd9", headers={"Content-Type": "image/jpeg"})
 
     transport_exact = httpx.MockTransport(mock_exact_five_redirects)
     async with httpx.AsyncClient(transport=transport_exact) as client:
@@ -474,7 +474,7 @@ async def test_mime_validation(dummy_cache: VisualAssetCache):
 
     # Response mismatch - PNG success
     def mock_handler_png(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/png", "Content-Length": "4"})
+        return httpx.Response(200, content=b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x64\x00\x00\x00\x64\x08\x02\x00\x00\x00\xff\x80\x02\x03", headers={"Content-Type": "image/png"})
 
     transport_png = httpx.MockTransport(mock_handler_png)
     async with httpx.AsyncClient(transport=transport_png) as client:
@@ -490,7 +490,7 @@ async def test_mime_validation(dummy_cache: VisualAssetCache):
 
     # Response mismatch - WEBP success
     def mock_handler_webp(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"data", headers={"Content-Type": "image/webp", "Content-Length": "4"})
+        return httpx.Response(200, content=b"RIFF\x16\x00\x00\x00WEBPVP8X\x0a\x00\x00\x00\x00\x00\x00\x00\x63\x00\x00\x63\x00\x00", headers={"Content-Type": "image/webp"})
 
     transport_webp = httpx.MockTransport(mock_handler_webp)
     async with httpx.AsyncClient(transport=transport_webp) as client:
