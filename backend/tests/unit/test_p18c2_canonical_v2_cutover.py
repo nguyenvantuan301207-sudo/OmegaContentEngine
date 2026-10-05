@@ -65,6 +65,7 @@ async def test_prepare_is_canonical_planning_only(mode):
         mode=mode,
         script_version=script,
         scenes=[],
+        render_plans=[],
         target_width=1920,
         target_height=1080,
         fps=30,

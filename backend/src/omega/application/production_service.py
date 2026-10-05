@@ -206,7 +206,8 @@ class ProductionService:
         request_id: uuid.UUID,
     ) -> ProductionRequest:
         """Persist canonical planned scenes and a RenderPlan without physical media work."""
-        # 1. Load request and script
+        # Serialize preparation with render allocation on the persisted request.
+        # Refresh identity-map state after waiting for a competing transaction.
         req_stmt = (
             select(ProductionRequest)
             .where(ProductionRequest.id == request_id, ProductionRequest.channel_id == channel_id)
@@ -216,7 +217,10 @@ class ProductionService:
                 .selectinload(ScriptSection.statements)
                 .selectinload(ScriptStatement.citations),
                 selectinload(ProductionRequest.scenes),
+                selectinload(ProductionRequest.render_plans),
             )
+            .with_for_update()
+            .execution_options(populate_existing=True)
         )
         res = await session.execute(req_stmt)
         req = res.scalar_one_or_none()
@@ -224,6 +228,40 @@ class ProductionService:
             raise ProductionLineageError(
                 f"ProductionRequest {request_id} not found on channel {channel_id}."
             )
+
+        if req.status not in (
+            ProductionRequestStatus.DRAFT.value,
+            ProductionRequestStatus.READY.value,
+        ):
+            raise ProductionStateError(
+                f"Cannot prepare ProductionRequest in {req.status} state."
+            )
+
+        if req.status == ProductionRequestStatus.READY.value:
+            canonical_plans = [plan for plan in req.render_plans if plan.version == 1]
+            if len(canonical_plans) != 1 or not req.scenes:
+                raise ProductionStateError("READY request has no complete canonical preparation.")
+            plan = canonical_plans[0]
+            persisted_manifest = [
+                {
+                    "scene_order": scene.scene_order,
+                    "type": scene.scene_type,
+                    "duration_ms": scene.estimated_duration_ms,
+                }
+                for scene in sorted(req.scenes, key=lambda scene: scene.scene_order)
+            ]
+            if (
+                plan.scene_manifest != persisted_manifest
+                or (plan.width, plan.height, plan.fps, plan.video_codec, plan.audio_codec, plan.container)
+                != (req.target_width, req.target_height, req.fps, req.video_codec, req.audio_codec, req.container_format)
+            ):
+                raise ProductionStateError("READY request has inconsistent canonical preparation.")
+            # Release the lock without rewriting any persisted planning or artifact truth.
+            await session.commit()
+            return req
+
+        if req.render_plans or req.scenes:
+            raise ProductionStateError("DRAFT request already contains persisted preparation.")
 
         script = req.script_version
         script_dict = ScriptStoryboardAdapter.to_script_dict(script)
@@ -236,12 +274,6 @@ class ProductionService:
             script_dict,
             pacing=pacing,
         )
-
-        # Clear existing planned scenes before replacing the plan. Physical assets
-        # are intentionally outside preparation authority and are not touched.
-        for sc in list(req.scenes):
-            await session.delete(sc)
-        await session.flush()
 
         sections_by_heading = {
             section.heading: section for section in script.sections

@@ -208,6 +208,8 @@ async def prepare_production(
 ) -> ProductionRequest:
     try:
         return await service.prepare_production(session, channel_id, request_id)
+    except ProductionStateError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ProductionLineageError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 

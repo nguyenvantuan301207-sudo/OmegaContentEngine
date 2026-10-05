@@ -151,3 +151,15 @@ test("subtitle preset resolution and matching identify presets correctly", () =>
   const customDivergent = { ...defaults, font_size: 77, primary_color: "#123456" };
   assert.equal(findMatchingPresetId(capabilities, customDivergent), null);
 });
+
+test("prepare is enabled only for DRAFT and adopts READY before refreshing planning", () => {
+  const page = readFileSync(new URL("../src/app/production/page.tsx", import.meta.url), "utf8");
+  assert.match(page, /disabled=\{busy \|\| request.status !== "DRAFT"\} onClick=\{onPrepare\}/);
+  assert.match(page, /onPrepare=\{handlePrepare\}/);
+  const handler = page.slice(page.indexOf("const handlePrepare ="), page.indexOf("const applySubtitleStyle ="));
+  assert.match(handler, /selectedRequest.status !== "DRAFT" \|\| busy/);
+  assert.equal((handler.match(/await prepareProduction\(/g) ?? []).length, 1);
+  const adopt = handler.indexOf("setRequests((current) => current.map((request) => request.id === prepared.id ? prepared : request))");
+  assert.ok(adopt > handler.indexOf("const prepared = await prepareProduction"));
+  assert.ok(handler.indexOf("await loadDetails(channelId, prepared)") > adopt);
+});
