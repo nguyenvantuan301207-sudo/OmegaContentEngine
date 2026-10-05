@@ -77,15 +77,25 @@ async def test_factory_local_contract_ignores_pexels_environment(tmp_path, monke
 
 
 @pytest.mark.asyncio
-async def test_factory_pexels_contract_without_capability_fails_closed(tmp_path, monkeypatch):
+async def test_factory_pexels_contract_without_capability_keeps_requested_policy(tmp_path, monkeypatch):
     contract = _contract(VisualAssetMode.PEXELS)
+    before = contract.model_dump()
     monkeypatch.delenv("PEXELS_API_KEY", raising=False)
     adapter = ProductionVisualV2Adapter(LocalMediaStorageProvider(base_root=tmp_path))
-
-    with pytest.raises(ValueError, match="PEXELS_API_KEY missing"):
-        await adapter.render_canonical_production(
-            AsyncMock(), contract.lineage.production_request_id, contract=contract
+    with (
+        patch("omega.application.production_render_factory.PexelsAssetProvider") as provider,
+        patch("omega.application.production_render_factory.get_narration_provider", return_value=MagicMock()),
+        patch("omega.application.production_render_factory.VisualProductionV2Service") as factory,
+    ):
+        factory.return_value.render_canonical_production = AsyncMock(return_value="rendered")
+        result = await adapter.render_canonical_production(
+            AsyncMock(), contract.lineage.production_request_id, contract=contract,
         )
+    assert result == "rendered"
+    provider.assert_not_called()
+    assert factory.call_args.kwargs["visual_asset_mode"] == "PEXELS"
+    assert factory.call_args.kwargs["asset_orchestrator"] is None
+    assert contract.model_dump() == before
 
 
 def test_explicit_local_provider_maps_deterministically(tmp_path):

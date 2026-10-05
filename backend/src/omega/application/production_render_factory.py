@@ -1,3 +1,4 @@
+import logging
 import os
 from typing import Any
 
@@ -78,20 +79,21 @@ class ProductionVisualV2Adapter:
         if visual_asset_mode == "PEXELS":
             api_key = os.environ.get("PEXELS_API_KEY", "").strip()
             if not api_key:
-                raise ValueError("PEXELS_API_KEY missing for Visual V2 production")
-
-            cache_root = self.storage.base_root / "visual_asset_cache"
-            cache = VisualAssetCache(root=cache_root)
-            pexels_provider = PexelsAssetProvider(
-                api_key=api_key,
-                cache=cache,
-            )
-            engine = VisualAssetEngine()
-            orchestrator = VisualAssetOrchestrator(
-                engine=engine,
-                providers=[pexels_provider],
-            )
-
+                logging.getLogger(__name__).warning(
+                    "PEXELS visual capability unavailable; local visual fallback will be used"
+                )
+            else:
+                cache_root = self.storage.base_root / "visual_asset_cache"
+                cache = VisualAssetCache(root=cache_root)
+                pexels_provider = PexelsAssetProvider(
+                    api_key=api_key,
+                    cache=cache,
+                )
+                engine = VisualAssetEngine()
+                orchestrator = VisualAssetOrchestrator(
+                    engine=engine,
+                    providers=[pexels_provider],
+                )
         resolved_narration_provider = get_narration_provider(
             self.storage, narration_provider
         )

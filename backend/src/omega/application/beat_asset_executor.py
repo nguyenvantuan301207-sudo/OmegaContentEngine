@@ -14,7 +14,7 @@ Does NOT render physical beat clips. Pure asset orchestration and materializatio
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -28,6 +28,12 @@ from omega.application.visual_asset_engine import (
 )
 from omega.application.visual_direction import VisualAssetKind
 from omega.infrastructure.visual_asset_materializer import VisualAssetMaterializer
+
+ProviderFallbackReason = Literal[
+    "PROVIDER_UNAVAILABLE",
+    "PROVIDER_RESOLUTION_FAILED",
+    "PROVIDER_MATERIALIZATION_FAILED",
+]
 
 
 @runtime_checkable
@@ -63,6 +69,7 @@ class ExecutedBeatAsset(BaseModel):
     resolved_asset: ResolvedVisualAsset | None = Field(
         default=None, description="External resolved asset descriptor carrying full provenance"
     )
+    fallback_reason_code: ProviderFallbackReason | None = None
     bound_visual_asset: BoundVisualAsset | None = Field(
         default=None, description="Materialized image binding with data URI"
     )
@@ -201,54 +208,11 @@ class BeatAssetExecutor:
                         f"Request query '{req_obj.query}' does not match planned query '{decision.query_hint}'."
                     )
 
-                if not self._resolver:
-                    raise BeatAssetExecutionError(
-                        f"No visual asset resolver configured for acquisition on beat {b_idx}."
-                    )
-
-                try:
-                    resolved = await self._resolver.resolve(req_obj)
-                except Exception as e:
-                    raise BeatAssetExecutionError(
-                        f"Provider resolution failed for beat {b_idx}: {e}"
-                    ) from e
-
-                if resolved is None:
-                    raise BeatAssetExecutionError(
-                        f"Resolver returned None for beat {b_idx}."
-                    )
-
-                if resolved.kind != decision.required_kind:
-                    raise BeatAssetExecutionError(
-                        f"Resolved asset kind {resolved.kind} does not match requested {decision.required_kind}."
-                    )
-
-                # Materialize external asset
-                try:
-                    if resolved.kind == VisualAssetKind.IMAGE:
-                        bound_vis = self._materializer.materialize(resolved)
-                        bound_br = None
-                    elif resolved.kind == VisualAssetKind.BROLL:
-                        bound_vis = None
-                        bound_br = self._materializer.materialize_broll(resolved)
-                    else:
-                        raise BeatAssetExecutionError(
-                            f"Unsupported resolved asset kind: {resolved.kind}"
-                        )
-                except Exception as e:
-                    raise BeatAssetExecutionError(
-                        f"Asset materialization failed for beat {b_idx}: {e}"
-                    ) from e
-
-                executed = ExecutedBeatAsset(
-                    parent_scene_index=scene_idx,
+                executed = await resolve_provider_asset(
+                    resolver=self._resolver,
+                    request=req_obj,
                     beat_index=b_idx,
-                    action=action,
-                    required_kind=decision.required_kind,
-                    reuse_from_beat_index=None,
-                    resolved_asset=resolved,
-                    bound_visual_asset=bound_vis,
-                    bound_broll_asset=bound_br,
+                    materializer=self._materializer,
                 )
                 executed_by_beat[b_idx] = executed
                 executed_list.append(executed)
@@ -273,6 +237,18 @@ class BeatAssetExecutor:
                         f"Missing reuse source beat {reuse_from} for beat {b_idx}."
                     )
 
+                if source_executed.parent_scene_index != scene_idx:
+                    raise BeatAssetExecutionError("Cross-scene reuse rejected")
+                if source_executed.required_kind != decision.required_kind:
+                    raise BeatAssetExecutionError("Cross-kind reuse rejected")
+                if source_executed.fallback_reason_code:
+                    executed = source_executed.model_copy(update={
+                        "beat_index": b_idx,
+                        "reuse_from_beat_index": reuse_from,
+                    })
+                    executed_by_beat[b_idx] = executed
+                    executed_list.append(executed)
+                    continue
                 if source_executed.action not in (
                     BeatAssetAction.ACQUIRE_IF_NEEDED,
                     BeatAssetAction.REUSE_COMPATIBLE,
@@ -280,21 +256,8 @@ class BeatAssetExecutor:
                     raise BeatAssetExecutionError(
                         f"Cannot reuse from beat {reuse_from} with action {source_executed.action}."
                     )
-
-                if source_executed.parent_scene_index != scene_idx:
-                    raise BeatAssetExecutionError(
-                        f"Cross-scene reuse rejected: source scene {source_executed.parent_scene_index} != current {scene_idx}."
-                    )
-
                 if source_executed.resolved_asset is None:
-                    raise BeatAssetExecutionError(
-                        f"Cannot reuse from beat {reuse_from} because it has no resolved external asset (action was {source_executed.action})."
-                    )
-
-                if source_executed.required_kind != decision.required_kind:
-                    raise BeatAssetExecutionError(
-                        f"Cross-kind reuse rejected: source kind {source_executed.required_kind} != requested {decision.required_kind}."
-                    )
+                    raise BeatAssetExecutionError("Reuse source has no resolved external asset")
 
                 if source_executed.resolved_asset.kind != decision.required_kind:
                     raise BeatAssetExecutionError(
@@ -321,3 +284,49 @@ class BeatAssetExecutor:
             parent_scene_index=scene_idx,
             assets=tuple(executed_list),
         )
+
+
+async def resolve_provider_asset(
+    *,
+    resolver: BeatAssetResolver | None,
+    request: VisualAssetRequest,
+    beat_index: int = 0,
+    materializer: type[VisualAssetMaterializer] = VisualAssetMaterializer,
+) -> ExecutedBeatAsset:
+    """Degrade only external resolution/materialization; validate kind outside those boundaries."""
+    if request.kind not in (VisualAssetKind.IMAGE, VisualAssetKind.BROLL):
+        raise BeatAssetExecutionError("Unsupported external asset kind")
+    reason: ProviderFallbackReason | None = None
+    resolved = None
+    bound_vis = None
+    bound_br = None
+    if resolver is None:
+        reason = "PROVIDER_UNAVAILABLE"
+    else:
+        try:
+            resolved = await resolver.resolve(request)
+        except Exception:
+            reason = "PROVIDER_RESOLUTION_FAILED"
+        if resolved is None:
+            reason = reason or "PROVIDER_RESOLUTION_FAILED"
+    if resolved is not None:
+        if resolved.kind != request.kind:
+            raise BeatAssetExecutionError("Resolved asset kind does not match requested kind")
+        try:
+            if request.kind == VisualAssetKind.IMAGE:
+                bound_vis = materializer.materialize(resolved)
+            else:
+                bound_br = materializer.materialize_broll(resolved)
+        except Exception:
+            reason = "PROVIDER_MATERIALIZATION_FAILED"
+            resolved = None
+    return ExecutedBeatAsset(
+        parent_scene_index=request.scene_index,
+        beat_index=beat_index,
+        action=BeatAssetAction.LOCAL_TEMPLATE if reason else BeatAssetAction.ACQUIRE_IF_NEEDED,
+        required_kind=request.kind,
+        resolved_asset=resolved,
+        bound_visual_asset=bound_vis,
+        bound_broll_asset=bound_br,
+        fallback_reason_code=reason,
+    )

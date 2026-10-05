@@ -19,7 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
-from omega.application.beat_asset_executor import BeatAssetExecutor
+from omega.application.beat_asset_executor import BeatAssetExecutor, ExecutedBeatAsset
 from omega.application.beat_asset_policy import BeatAssetAction, BeatAssetDecision
 from omega.application.beat_render_adapter import BeatRenderPlan, BeatRenderUnit
 from omega.application.beat_visual_renderer import BeatVisualRenderer
@@ -792,18 +792,9 @@ async def test_runtime_render_parent_visual_multi_beat_resolvable_flow_diagram_r
 
     executor = MagicMock()
     executed_assets = [
-        SimpleNamespace(
-            action=BeatAssetAction.LOCAL_TEMPLATE,
-            required_kind=None,
-            reuse_from_beat_index=None,
-            resolved_asset=None,
-        ),
-        SimpleNamespace(
-            action=BeatAssetAction.LOCAL_TEMPLATE,
-            required_kind=None,
-            reuse_from_beat_index=None,
-            resolved_asset=None,
-        ),
+        ExecutedBeatAsset(
+            parent_scene_index=17, beat_index=i, action=BeatAssetAction.LOCAL_TEMPLATE,
+        ) for i in range(2)
     ]
     executor.execute_plan = AsyncMock(
         return_value=SimpleNamespace(parent_scene_index=17, assets=tuple(executed_assets))

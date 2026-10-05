@@ -59,15 +59,22 @@ def test_factory_unknown_visual_asset_mode_fails_closed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_lazy_adapter_missing_api_key(monkeypatch):
+async def test_lazy_adapter_missing_api_key(monkeypatch, tmp_path, caplog):
     monkeypatch.delenv("OMEGA_VISUAL_ASSET_MODE", raising=False)
     monkeypatch.delenv("PEXELS_API_KEY", raising=False)
-    storage = LocalMediaStorageProvider()
-    adapter = ProductionVisualV2Adapter(storage=storage)
-
-    # 4. Lazy adapter with missing PEXELS_API_KEY raises
-    with pytest.raises(ValueError, match="PEXELS_API_KEY missing for Visual V2 production"):
-        await adapter.render_mission_execution()
+    provider = MagicMock()
+    service = MagicMock()
+    service.render_mission_execution = AsyncMock(return_value="fallback-capable")
+    factory = MagicMock(return_value=service)
+    monkeypatch.setattr("omega.application.production_render_factory.PexelsAssetProvider", provider)
+    monkeypatch.setattr("omega.application.production_render_factory.VisualProductionV2Service", factory)
+    monkeypatch.setattr("omega.application.production_render_factory.get_narration_provider", MagicMock())
+    storage = LocalMediaStorageProvider(base_root=str(tmp_path))
+    assert await ProductionVisualV2Adapter(storage).render_mission_execution() == "fallback-capable"
+    provider.assert_not_called()
+    assert factory.call_args.kwargs["asset_orchestrator"] is None
+    assert factory.call_args.kwargs["visual_asset_mode"] == "PEXELS"
+    assert "local visual fallback will be used" in caplog.text
 
 
 @pytest.mark.asyncio

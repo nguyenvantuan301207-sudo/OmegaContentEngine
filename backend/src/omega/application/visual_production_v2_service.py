@@ -21,8 +21,14 @@ from omega.application.audio_mix_policy import (
     build_sfx_event_plan,
 )
 from omega.application.audio_mix_v2_service import AudioMixPlanner
-from omega.application.beat_asset_executor import BeatAssetExecutor
+from omega.application.beat_asset_executor import (
+    BeatAssetExecutionResult,
+    BeatAssetExecutor,
+    resolve_provider_asset,
+)
+from omega.application.beat_asset_policy import BeatAssetAction
 from omega.application.beat_clip_assembler import BeatClipAssembler
+from omega.application.beat_render_adapter import BeatRenderPlan
 from omega.application.beat_visual_renderer import (
     BeatVisualRenderer,
     quantize_parent_frame_counts,
@@ -34,6 +40,7 @@ from omega.application.brand_asset_resolver import (
     ResolvedBrandAsset,
 )
 from omega.application.canonical_beat_preparation import CanonicalBeatPreparationService
+from omega.application.editorial_beat import BeatMotionIntent, BeatSemanticRole
 from omega.application.ffmpeg_renderer import (
     FINAL_MASTER_SAMPLE_RATE_HZ,
     FFmpegRenderer,
@@ -56,7 +63,6 @@ from omega.application.subtitle_engine import (
     generate_karaoke_ass_document,
     generate_karaoke_cues,
 )
-from omega.application.editorial_beat import BeatSemanticRole
 from omega.application.template_payload_resolver import (
     TemplatePayloadResolver,
     can_resolve_diagram_payload,
@@ -65,7 +71,6 @@ from omega.application.visual_asset_binding import BoundBrollAsset
 from omega.application.visual_asset_engine import VisualAssetEngine
 from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
 from omega.application.visual_direction import (
-    VisualAssetKind,
     VisualDirector,
     VisualTemplateId,
     map_visual_strategy,
@@ -90,7 +95,6 @@ from omega.infrastructure.models import (
     ScriptStatement,
     ScriptVersion,
 )
-from omega.infrastructure.visual_asset_materializer import VisualAssetMaterializer
 from omega.infrastructure.visual_v2_video_renderer import VisualV2VideoRenderer
 
 _NON_ALPHANUM_REGEX = re.compile(r"[^\w\s-]")
@@ -751,8 +755,6 @@ class VisualProductionV2Service:
     ):
         if visual_asset_mode not in ("PEXELS", "LOCAL_TEMPLATE_ONLY"):
             raise ValueError(f"Unsupported visual_asset_mode: {visual_asset_mode}")
-        if visual_asset_mode == "PEXELS" and asset_orchestrator is None:
-            raise ValueError("asset_orchestrator is required in PEXELS mode")
         self._orchestrator = asset_orchestrator
         self._visual_asset_mode = visual_asset_mode
         self._output_root = output_root
@@ -783,6 +785,62 @@ class VisualProductionV2Service:
         )
         if self._narration_provider and not self._narration_storage:
             raise ValueError("narration_storage is required when narration_provider is supplied")
+
+    @staticmethod
+    def _local_provider_fallback_scene(scene: StoryboardScene) -> StoryboardScene:
+        return scene.model_copy(update={
+            "visual_strategy": VisualStrategy.KINETIC_TEXT,
+            "on_screen_text": scene.on_screen_text or scene.narration_excerpt,
+        })
+
+    @classmethod
+    def _provider_fallback_plan(
+        cls, plan: BeatRenderPlan, execution: BeatAssetExecutionResult,
+    ) -> BeatRenderPlan:
+        units = []
+        for unit, asset in zip(plan.units, execution.assets, strict=True):
+            if (asset.parent_scene_index, asset.beat_index) != (
+                unit.parent_scene_index, unit.source_beat_index,
+            ):
+                raise VerticalSliceError("Beat asset execution identity mismatch")
+            if asset.fallback_reason_code:
+                if asset.required_kind is None:
+                    raise VerticalSliceError("Provider fallback requires an external kind")
+                expected_strategy = VisualStrategy(asset.required_kind.value)
+                expected_mode, expected_template, _, _ = map_visual_strategy(expected_strategy)
+                if (
+                    unit.scene_view.visual_strategy != expected_strategy
+                    or unit.direction_view.template_id != expected_template
+                    or unit.direction_view.render_mode != expected_mode
+                ):
+                    raise VerticalSliceError("Invalid external beat direction for provider fallback")
+                render_mode, template_id, motion_profile, rationale = map_visual_strategy(
+                    VisualStrategy.KINETIC_TEXT
+                )
+                unit = unit.model_copy(update={
+                    "scene_view": cls._local_provider_fallback_scene(unit.scene_view),
+                    "camera_motion_intent": BeatMotionIntent.STATIC,
+                    "camera_focus_region": None,
+                    "camera_fallback_reason": "UNSUPPORTED_TEMPLATE_STATIC_FALLBACK",
+                    "direction_view": unit.direction_view.model_copy(update={
+                        "template_id": template_id,
+                        "render_mode": render_mode,
+                        "motion_profile": motion_profile,
+                        "rationale": rationale,
+                        "asset_requirements": [],
+                        "metadata": {
+                            **unit.direction_view.metadata,
+                            "visual_strategy": VisualStrategy.KINETIC_TEXT.value,
+                        },
+                    }),
+                    "asset_decision": unit.asset_decision.model_copy(update={
+                        "action": BeatAssetAction.LOCAL_TEMPLATE,
+                    }),
+                })
+            units.append(unit)
+        if any(u is not original for u, original in zip(units, plan.units, strict=True)):
+            return plan.model_copy(update={"units": tuple(units)})
+        return plan
 
     async def render_mission_execution(
         self,
@@ -1054,6 +1112,7 @@ class VisualProductionV2Service:
                     render_plan=plan,
                     provider_acquisition_allowed=(canonical_visual_mode == "PEXELS"),
                 )
+                plan = self._provider_fallback_plan(plan, execution)
                 rendered = await self._beat_visual_renderer.render_plan(
                     render_plan=plan,
                     asset_execution=execution,
@@ -1143,7 +1202,10 @@ class VisualProductionV2Service:
                         ),
                         provider_metadata=(
                             _safe_provider_metadata(provider_asset.metadata)
-                            if provider_asset else {}
+                            if provider_asset else (
+                                {"fallback_reason_code": asset.fallback_reason_code}
+                                if asset.fallback_reason_code else {}
+                            )
                         ),
                         provider_asset_content_sha256=(
                             provider_asset.content_sha256 if provider_asset else None
@@ -1187,9 +1249,8 @@ class VisualProductionV2Service:
         asset_kind: str | None = None
         asset_query: str | None = None
         resolved_asset = None
+        fallback_reason_code = None
         if direction.asset_requirements:
-            if self._orchestrator is None:
-                raise VerticalSliceError("Asset resolution requires an asset orchestrator")
             requirement = direction.asset_requirements[0]
             asset_kind = requirement.kind.value
             request = self._visual_asset_engine.build_request(
@@ -1198,22 +1259,15 @@ class VisualProductionV2Service:
             if request is None:
                 raise VerticalSliceError("Could not build required visual asset request")
             asset_query = request.query
-            try:
-                resolved_asset = await self._orchestrator.resolve(request)
-                if requirement.kind == VisualAssetKind.IMAGE:
-                    assets = (VisualAssetMaterializer.materialize(resolved_asset),)
-                elif requirement.kind == VisualAssetKind.BROLL:
-                    broll_asset = VisualAssetMaterializer.materialize_broll(resolved_asset)
-                    assets = (broll_asset,)
-                else:
-                    raise VerticalSliceError(
-                        f"Unsupported asset requirement kind: {requirement.kind}"
-                    )
-            except Exception as exc:
-                raise VerticalSliceError(
-                    f"Asset orchestrator failed for scene {scene.sequence_index}: "
-                    f"{self._sanitize_error(exc)}"
-                ) from exc
+            acquired = await resolve_provider_asset(resolver=self._orchestrator, request=request)
+            resolved_asset = acquired.resolved_asset
+            fallback_reason_code = acquired.fallback_reason_code
+            broll_asset = acquired.bound_broll_asset
+            assets = tuple(a for a in (acquired.bound_visual_asset, broll_asset) if a is not None)
+            if fallback_reason_code:
+                scene = self._local_provider_fallback_scene(scene)
+                direction = self._visual_director.resolve(scene)
+                payload = self._template_resolver.resolve(scene, direction)
         try:
             document = self._template_renderer.render(
                 payload,
@@ -1277,7 +1331,9 @@ class VisualProductionV2Service:
                 if resolved_asset else ()
             ),
             provider_metadata=(
-                _safe_provider_metadata(resolved_asset.metadata) if resolved_asset else {}
+                _safe_provider_metadata(resolved_asset.metadata) if resolved_asset else (
+                    {"fallback_reason_code": fallback_reason_code} if fallback_reason_code else {}
+                )
             ),
             provider_asset_content_sha256=(
                 resolved_asset.content_sha256 if resolved_asset else None
@@ -1290,6 +1346,8 @@ class VisualProductionV2Service:
             "scene_visual_out_path": scene_visual_out_path,
             "visual_sha256": render_result.video_sha256,
             "runtime_beats": (beat,),
+            "fallback_reason_code": fallback_reason_code,
+            "effective_strategy": scene.visual_strategy,
             "template_id": document.template_id.value,
             "resolved_asset": resolved_asset,
             "asset_kind": asset_kind,
@@ -1802,11 +1860,13 @@ class VisualProductionV2Service:
 
         # Sanitize any scene where DIAGRAM cannot truthfully resolve >= 2 nodes before TTS / rendering
         for s in storyboard.scenes:
-            if s.visual_strategy == VisualStrategy.DIAGRAM:
-                if not can_resolve_diagram_payload(s.narration_excerpt):
-                    s.visual_strategy = VisualStrategy.KINETIC_TEXT
-                    if not s.on_screen_text:
-                        s.on_screen_text = s.narration_excerpt
+            if (
+                s.visual_strategy == VisualStrategy.DIAGRAM
+                and not can_resolve_diagram_payload(s.narration_excerpt)
+            ):
+                s.visual_strategy = VisualStrategy.KINETIC_TEXT
+                if not s.on_screen_text:
+                    s.on_screen_text = s.narration_excerpt
 
         # 5. Work Directory Setup
         work_dir = run_dir / "work"
@@ -2109,6 +2169,7 @@ class VisualProductionV2Service:
                     final_scene_sha = visual["visual_sha256"]
                     runtime_visual_beats.extend(visual["runtime_beats"])
                     resolved_asset = visual["resolved_asset"]
+                    effective_strategy = visual.get("effective_strategy", effective_strategy)
                     asset_kind_str = visual["asset_kind"]
                     asset_provider_str = visual["asset_provider"]
                     asset_id_str = visual["asset_id"]
@@ -2228,7 +2289,10 @@ class VisualProductionV2Service:
                             asset_provider_metadata=(
                                 _safe_provider_metadata(resolved_asset.metadata)
                                 if resolved_asset is not None
-                                else {}
+                                else (
+                                    {"fallback_reason_code": visual["fallback_reason_code"]}
+                                    if visual.get("fallback_reason_code") else {}
+                                )
                             ),
                         )
                     )
@@ -3079,39 +3143,32 @@ class VisualProductionV2Service:
             payload = self._template_resolver.resolve(target_scene, direction)
 
             assets = ()
+            fallback_reason_code = None
             if direction.asset_requirements:
-                if self._orchestrator is None:
-                    raise VerticalSliceError(
-                        "Asset resolution requires an asset orchestrator"
-                    )
                 req_spec = direction.asset_requirements[0]
                 asset_kind_str = req_spec.kind.value
                 asset_request = self._visual_asset_engine.build_request(
-                    scene_index=target_scene.sequence_index,
-                    requirement=req_spec,
+                    scene_index=target_scene.sequence_index, requirement=req_spec,
                 )
                 if asset_request is None:
                     raise VerticalSliceError("Could not build required visual asset request")
-
                 asset_query_str = asset_request.query
-
-                try:
-                    resolved_asset = await self._orchestrator.resolve(asset_request)
-                except Exception as e:
-                    raise VerticalSliceError(f"Asset orchestrator failed: {self._sanitize_error(e)}") from e
-
-                asset_provider_str = resolved_asset.provider
-                asset_id_str = resolved_asset.asset_id
-
-                if req_spec.kind == VisualAssetKind.IMAGE:
-                    bound_img = VisualAssetMaterializer.materialize(resolved_asset)
-                    assets = (bound_img,)
-                elif req_spec.kind == VisualAssetKind.BROLL:
-                    bound_broll = VisualAssetMaterializer.materialize_broll(resolved_asset)
-                    assets = (bound_broll,)
-                    broll_asset = bound_broll
-                else:
-                    raise VerticalSliceError(f"Unsupported asset requirement kind: {req_spec.kind}")
+                acquired = await resolve_provider_asset(
+                    resolver=self._orchestrator, request=asset_request,
+                )
+                resolved_asset = acquired.resolved_asset
+                fallback_reason_code = acquired.fallback_reason_code
+                broll_asset = acquired.bound_broll_asset
+                assets = tuple(a for a in (acquired.bound_visual_asset, broll_asset) if a is not None)
+                if resolved_asset is not None:
+                    asset_provider_str = resolved_asset.provider
+                    asset_id_str = resolved_asset.asset_id
+                if fallback_reason_code:
+                    asset_kind_str = None
+                    target_scene = self._local_provider_fallback_scene(target_scene)
+                    effective_strategy = target_scene.visual_strategy
+                    direction = self._visual_director.resolve(target_scene)
+                    payload = self._template_resolver.resolve(target_scene, direction)
 
             base_style_profile = manifest.get("style_profile_applied")
             accent_color = base_style_profile.get("accent_color") if base_style_profile else None
@@ -3163,6 +3220,23 @@ class VisualProductionV2Service:
                     new_scene_info["asset_provider"] = asset_provider_str
                     new_scene_info["asset_id"] = asset_id_str
                     new_scene_info["asset_query"] = asset_query_str
+                    if fallback_reason_code:
+                        new_scene_info["visual_origin"] = "TEMPLATE"
+                        new_scene_info["asset_license_status"] = LicenseStatus.GENERATED.value
+                        for field in (
+                            "asset_source_url", "asset_source_page_url", "asset_license_name",
+                            "asset_license_url", "asset_attribution", "asset_storage_reference",
+                        ):
+                            new_scene_info[field] = None
+                        new_scene_info["asset_allowed_attribution_channels"] = []
+                        new_scene_info["visual_content_sha256"] = new_sha
+                        new_scene_info["visual_mime_type"] = "video/mp4"
+                        new_scene_info["visual_width"] = render_res.width
+                        new_scene_info["visual_height"] = render_res.height
+                        new_scene_info["visual_duration_ms"] = int(round(actual_duration * 1000))
+                        new_scene_info["asset_provider_metadata"] = {
+                            "fallback_reason_code": fallback_reason_code
+                        }
                     new_scene_info["duration_seconds"] = render_res.duration_seconds
                     new_scene_info["content_sha256"] = new_sha
 

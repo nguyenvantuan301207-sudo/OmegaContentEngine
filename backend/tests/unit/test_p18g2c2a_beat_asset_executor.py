@@ -18,8 +18,8 @@ Verifies:
 15. provider_acquisition_allowed=False blocks acquisition;
 16. Unsupported SCREENSHOT execution rejected;
 17. Meaningless/mismatched query fails closed;
-18. Provider error fails closed;
-19. Physical SHA mismatch is rejected by materializer;
+18. Provider error degrades locally;
+19. Physical SHA mismatch degrades locally;
 20. Deterministic decision order preserved.
 """
 
@@ -181,14 +181,15 @@ async def test_01_and_02_local_template_and_none_require_zero_resolver_calls():
 
 
 @pytest.mark.asyncio
-async def test_acquire_if_needed_with_none_resolver_fails_deterministically():
-    """ACQUIRE_IF_NEEDED with resolver=None raises deterministic BeatAssetExecutionError."""
+async def test_acquire_if_needed_with_none_resolver_degrades_deterministically():
+    """ACQUIRE_IF_NEEDED with resolver=None returns a bounded local fallback."""
     executor = BeatAssetExecutor(resolver=None)
     unit = _make_unit(beat_index=0, action=BeatAssetAction.ACQUIRE_IF_NEEDED, required_kind=VisualAssetKind.BROLL, query_hint="ocean waves")
     plan = BeatRenderPlan(parent_scene_index=1, units=(unit,), total_duration_ms=2000)
 
-    with pytest.raises(BeatAssetExecutionError, match="No visual asset resolver configured"):
-        await executor.execute_plan(render_plan=plan)
+    result = await executor.execute_plan(render_plan=plan)
+    assert result.assets[0].fallback_reason_code == "PROVIDER_UNAVAILABLE"
+    assert result.assets[0].action == BeatAssetAction.LOCAL_TEMPLATE
 
 
 @pytest.mark.asyncio
@@ -441,8 +442,8 @@ async def test_17_meaningless_query_fails_closed():
 
 
 @pytest.mark.asyncio
-async def test_18_provider_error_fails_closed():
-    """When orchestrator.resolve raises an error, executor raises typed BeatAssetExecutionError."""
+async def test_18_provider_error_degrades_locally():
+    """When provider resolution fails, execution records a safe local fallback."""
     orchestrator = MockOrchestrator()
     orchestrator.should_fail = True
     executor = BeatAssetExecutor(resolver=orchestrator)
@@ -450,13 +451,14 @@ async def test_18_provider_error_fails_closed():
     unit = _make_unit(beat_index=0, action=BeatAssetAction.ACQUIRE_IF_NEEDED, required_kind=VisualAssetKind.BROLL, query_hint="ocean storm")
     plan = BeatRenderPlan(parent_scene_index=1, units=(unit,), total_duration_ms=2000)
 
-    with pytest.raises(BeatAssetExecutionError, match="Provider resolution failed"):
-        await executor.execute_plan(render_plan=plan)
+    result = await executor.execute_plan(render_plan=plan)
+    assert result.assets[0].fallback_reason_code == "PROVIDER_RESOLUTION_FAILED"
+    assert result.assets[0].resolved_asset is None
 
 
 @pytest.mark.asyncio
-async def test_19_physical_sha_mismatch_fails_closed(tmp_dir):
-    """When local file content does not match declared content_sha256, materializer raises and fails closed."""
+async def test_19_physical_sha_mismatch_degrades_locally(tmp_dir):
+    """When external bytes fail materialization, execution degrades without claiming provider identity."""
     img_path = tmp_dir / "corrupted.jpg"
     _create_dummy_image(img_path)
 
@@ -474,8 +476,9 @@ async def test_19_physical_sha_mismatch_fails_closed(tmp_dir):
     unit = _make_unit(beat_index=0, action=BeatAssetAction.ACQUIRE_IF_NEEDED, required_kind=VisualAssetKind.IMAGE, query_hint="valid query")
     plan = BeatRenderPlan(parent_scene_index=1, units=(unit,), total_duration_ms=2000)
 
-    with pytest.raises(BeatAssetExecutionError, match="Asset materialization failed"):
-        await executor.execute_plan(render_plan=plan)
+    result = await executor.execute_plan(render_plan=plan)
+    assert result.assets[0].fallback_reason_code == "PROVIDER_MATERIALIZATION_FAILED"
+    assert result.assets[0].resolved_asset is None
 
 
 @pytest.mark.asyncio

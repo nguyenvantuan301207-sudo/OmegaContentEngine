@@ -476,8 +476,9 @@ async def test_content_request_dna_does_not_replace_production_request_pin(
 
 
 def test_visual_asset_mode_construction_and_strategy_policy(tmp_path: Path):
-    with pytest.raises(ValueError, match="asset_orchestrator is required"):
-        VisualProductionV2Service(asset_orchestrator=None, output_root=tmp_path)
+    unavailable = VisualProductionV2Service(asset_orchestrator=None, output_root=tmp_path)
+    assert unavailable._visual_asset_mode == "PEXELS"
+    assert unavailable._orchestrator is None
     with pytest.raises(ValueError, match="Unsupported visual_asset_mode"):
         VisualProductionV2Service(
             asset_orchestrator=None,
@@ -821,42 +822,35 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
 
 
 @pytest.mark.asyncio
-async def test_provider_secret_error_redaction(tmp_path: Path, lineage_data, monkeypatch):
-    orch = make_mock_orchestrator(tmp_path)
-    orch.resolve = AsyncMock(side_effect=ValueError("Failed with https://api.pexels.com/v1/?apikey=SECRET"))
+async def test_provider_secret_error_redaction(tmp_path: Path):
+    from types import SimpleNamespace
 
-    m_exec = lineage_data["mission_execution"]
-    req = lineage_data["content_request"]
-    session = make_mock_session(m_exec=m_exec, req=req)
-
+    orch = AsyncMock()
+    orch.resolve.side_effect = ValueError("https://api.pexels.com/v1/?apikey=SECRET")
+    video = MagicMock()
+    video.render_clip = AsyncMock(return_value=SimpleNamespace(
+        video_sha256="f" * 64, width=1920, height=1080,
+    ))
+    prep = MagicMock()
+    prep.prepare_from_script_dict.return_value = None
     svc = VisualProductionV2Service(
-        asset_orchestrator=orch,
-        output_root=tmp_path / "renders",
-        browser_runtime_factory=MagicMock(),
+        asset_orchestrator=orch, output_root=tmp_path, video_renderer=video,
+        beat_preparation_service=prep,
     )
-
-    def fake_storyboard(_sdict):
-        return StoryboardPlan(
-            title="Custom Test Storyboard",
-            estimated_duration_seconds=5.0,
-            scenes=[
-                StoryboardScene(
-                    sequence_index=1,
-                    section_id="Sec1",
-                    purpose="Hook",
-                    source_statement_references=[1],
-                    narration_excerpt="Title scene hook",
-                    estimated_duration_seconds=5.0,
-                    visual_strategy=VisualStrategy.IMAGE,
-                    visual_brief="Title",
-                )
-            ],
-        )
-
-    svc._storyboard_engine.generate_storyboard = MagicMock(side_effect=fake_storyboard)
-
-    with pytest.raises(VerticalSliceError, match="Asset orchestrator failed.*\\[REDACTED\\]"):
-        await svc.render_mission_execution(session, m_exec.id, req.id)
+    scene = StoryboardScene(
+        sequence_index=1, section_id="Sec1", purpose="Hook", source_statement_references=[1],
+        narration_excerpt="Title scene hook", estimated_duration_seconds=5,
+        visual_strategy=VisualStrategy.IMAGE, visual_brief="Title", asset_query_hint="ocean clouds",
+    )
+    result = await svc._render_parent_visual(
+        script_dict={}, scene=scene, duration_seconds=5, canonical_visual_mode="PEXELS",
+        work_dir=tmp_path, browser=MagicMock(), fps=24, style_profile=None, narration_enabled=False,
+    )
+    truth = result["runtime_beats"][0]
+    assert truth.provider_metadata == {"fallback_reason_code": "PROVIDER_RESOLUTION_FAILED"}
+    assert "SECRET" not in truth.model_dump_json()
+    assert truth.visual_origin == "TEMPLATE"
+    assert truth.provider is None
 
 
 @pytest.mark.asyncio
@@ -1749,7 +1743,8 @@ async def test_idempotency_v1_edge_cases(tmp_path: Path, lineage_data):
 
 
 @pytest.mark.asyncio
-async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
+@pytest.mark.parametrize("provider_failure", [None, "absent", "resolution", "materialization"])
+async def test_regenerate_scene_v1(tmp_path: Path, lineage_data, provider_failure):
     orch = make_mock_orchestrator(tmp_path)
     orch.resolve = AsyncMock(wraps=orch.resolve)
     m_exec = lineage_data["mission_execution"]
@@ -1858,6 +1853,14 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
     with open(base_manifest_path, "w", encoding="utf-8") as f:
         json.dump(base_manifest, f, indent=2)
 
+    if provider_failure == "absent":
+        svc._orchestrator = None
+    elif provider_failure == "resolution":
+        orch.resolve.side_effect = RuntimeError("https://example.com/?key=secret")
+    elif provider_failure == "materialization":
+        (tmp_path / "test_image.jpg").write_bytes(b"corrupt")
+        (tmp_path / "test_broll.mp4").write_bytes(b"corrupt")
+
     # 2. Regenerate Scene 2 with IMAGE and new query
     render_calls.clear()
     concat_calls.clear()
@@ -1888,9 +1891,21 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
     assert "visual_strategy" not in regen_scene
     assert "asset_query_hint" not in regen_scene
 
-    assert rev1_manifest["image_scene_count"] == 1
+    assert rev1_manifest["image_scene_count"] == (0 if provider_failure else 1)
     assert rev1_manifest["broll_scene_count"] == 0
-    assert rev1_manifest["template_scene_count"] == 1
+    assert rev1_manifest["template_scene_count"] == (2 if provider_failure else 1)
+    if provider_failure:
+        assert regen_scene["effective_strategy"] == "KINETIC_TEXT"
+        assert regen_scene["visual_origin"] == "TEMPLATE"
+        assert regen_scene["asset_provider"] is None
+        assert regen_scene["asset_id"] is None
+        assert regen_scene["asset_source_url"] is None
+        assert regen_scene["asset_license_status"] == "GENERATED"
+        expected_reason = {
+            "absent": "PROVIDER_UNAVAILABLE", "resolution": "PROVIDER_RESOLUTION_FAILED",
+            "materialization": "PROVIDER_MATERIALIZATION_FAILED",
+        }[provider_failure]
+        assert regen_scene["asset_provider_metadata"] == {"fallback_reason_code": expected_reason}
 
     # Verify scene count/order unchanged
     assert len(rev1_manifest["scenes"]) == 2
@@ -1975,7 +1990,9 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data):
 @pytest.mark.asyncio
 async def test_canonical_production_passes_computed_timeout_to_final_concat(tmp_path: Path, lineage_data):
     """Verify that canonical production passes operation-specific bounded timeout to concatenate_clips."""
-    from omega.application.ffmpeg_renderer import compute_final_concat_timeout, FINAL_CONCAT_MIN_TIMEOUT_SECONDS
+    from omega.application.ffmpeg_renderer import (
+        FINAL_CONCAT_MIN_TIMEOUT_SECONDS,
+    )
     from omega.application.visual_direction import VisualTemplateId
 
     orch = make_mock_orchestrator(tmp_path)
