@@ -9,12 +9,17 @@ C. Duplicate Normal Render Admission Authority & Concurrency
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
+from omega.application.beat_asset_policy import BeatAssetAction
+from omega.application.editorial_beat import BeatMotionIntent, BeatTransitionIntent
 from omega.application.editorial_beat_planner import (
     BeatSemanticRole,
     EditorialBeatPlanner,
@@ -40,9 +45,13 @@ from omega.application.template_payload_resolver import (
 from omega.application.visual_direction import (
     VisualDirection,
     VisualDirector,
+    VisualRenderMode,
     VisualTemplateId,
 )
-from omega.application.visual_production_v2_service import VerticalSliceError
+from omega.application.visual_production_v2_service import (
+    VerticalSliceError,
+    VisualProductionV2Service,
+)
 from omega.domain.production import (
     ProductionRequestStatus,
     RenderErrorCode,
@@ -512,3 +521,295 @@ async def test_rerender_requires_all_prior_jobs_terminal():
     )
     assert is_new2 is True
     assert job2.id != job1.id
+
+
+# ============================================================================
+# D. RUNTIME MULTI-BEAT FALLBACK EXECUTION IN VISUAL PRODUCTION V2
+# ============================================================================
+
+def _make_mock_service(tmp_path: Path, prep, executor, renderer, assembler):
+    legacy_renderer = MagicMock()
+    legacy_renderer.render_clip = AsyncMock()
+    return VisualProductionV2Service(
+        asset_orchestrator=MagicMock(),
+        output_root=tmp_path,
+        video_renderer=legacy_renderer,
+        beat_preparation_service=prep,
+        beat_asset_executor=executor,
+        beat_visual_renderer=renderer,
+        beat_clip_assembler=assembler,
+    )
+
+
+def _build_multi_beat_plan_with_diagram(narration_excerpt: str):
+    """Construct a BeatRenderPlan-like structure with a FLOW_DIAGRAM unit."""
+    scene_view_0 = StoryboardScene(
+        sequence_index=17,
+        section_id="Mechanism",
+        purpose="Explain degradation",
+        source_statement_references=[1],
+        narration_excerpt=narration_excerpt,
+        estimated_duration_seconds=3.0,
+        visual_strategy=VisualStrategy.DIAGRAM,
+        visual_brief="Diagram of degradation",
+    )
+    direction_view_0 = VisualDirection(
+        scene_index=17,
+        render_mode=VisualRenderMode.TEMPLATE,
+        template_id=VisualTemplateId.FLOW_DIAGRAM,
+        asset_requirements=[],
+        motion_profile="sequential_flow",
+        rationale="Mechanism explanation",
+        metadata={
+            "semantic_role": BeatSemanticRole.MECHANISM.value,
+            "beat_index": 0,
+        },
+    )
+    unit_0 = SimpleNamespace(
+        parent_scene_index=17,
+        materialized_index=0,
+        source_beat_index=0,
+        start_ms=0,
+        end_ms=3000,
+        duration_ms=3000,
+        scene_view=scene_view_0,
+        direction_view=direction_view_0,
+        asset_decision=SimpleNamespace(
+            action=BeatAssetAction.LOCAL_TEMPLATE,
+            required_kind=None,
+            reuse_from_beat_index=None,
+            query_hint=None,
+        ),
+        camera_motion_intent=BeatMotionIntent.STATIC,
+        transition_intent=BeatTransitionIntent.HARD_CUT,
+    )
+
+    scene_view_1 = StoryboardScene(
+        sequence_index=17,
+        section_id="Mechanism",
+        purpose="Context continuation",
+        source_statement_references=[2],
+        narration_excerpt="Engineers inspect structural elements regularly.",
+        estimated_duration_seconds=2.0,
+        visual_strategy=VisualStrategy.KINETIC_TEXT,
+        visual_brief="Inspection note",
+    )
+    direction_view_1 = VisualDirection(
+        scene_index=17,
+        render_mode=VisualRenderMode.TEMPLATE,
+        template_id=VisualTemplateId.KINETIC_TEXT,
+        asset_requirements=[],
+        motion_profile="kinetic_phrase",
+        rationale="Context",
+        metadata={
+            "semantic_role": BeatSemanticRole.CONTEXT.value,
+            "beat_index": 1,
+        },
+    )
+    unit_1 = SimpleNamespace(
+        parent_scene_index=17,
+        materialized_index=1,
+        source_beat_index=1,
+        start_ms=3000,
+        end_ms=5000,
+        duration_ms=2000,
+        scene_view=scene_view_1,
+        direction_view=direction_view_1,
+        asset_decision=SimpleNamespace(
+            action=BeatAssetAction.LOCAL_TEMPLATE,
+            required_kind=None,
+            reuse_from_beat_index=None,
+            query_hint=None,
+        ),
+        camera_motion_intent=BeatMotionIntent.STATIC,
+        transition_intent=BeatTransitionIntent.HARD_CUT,
+    )
+
+    return SimpleNamespace(
+        parent_scene_index=17,
+        units=[unit_0, unit_1],
+        total_duration_ms=5000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_render_parent_visual_multi_beat_unresolvable_flow_diagram_falls_back_to_kinetic_text(tmp_path):
+    """Execute the exact _render_parent_visual multi-beat branch that caused runtime failure.
+
+    Proves:
+    - No ImportError (VisualRenderMode imported correctly, no RenderMode)
+    - No AttributeError
+    - unit.direction_view.template_id becomes VisualTemplateId.KINETIC_TEXT
+    - unit.direction_view.render_mode becomes VisualRenderMode.TEMPLATE
+    - unit.scene_view.visual_strategy becomes VisualStrategy.KINETIC_TEXT
+    - No fabricated diagram nodes
+    - The renderer proceeds beyond the fallback mutation boundary and invokes execute_plan, render_plan, assemble
+    """
+    plan = _build_multi_beat_plan_with_diagram(SCENE17_CANARY_PROSE)
+    parent_scene = StoryboardScene(
+        sequence_index=17,
+        section_id="Mechanism",
+        purpose="Explain degradation",
+        source_statement_references=[1, 2],
+        narration_excerpt=SCENE17_CANARY_PROSE,
+        estimated_duration_seconds=5.0,
+        visual_strategy=VisualStrategy.DIAGRAM,
+        visual_brief="Structural mechanism explanation",
+    )
+
+    prep = MagicMock()
+    prep.prepare_from_script_dict.return_value = SimpleNamespace(
+        eligible=True,
+        render_plan=plan,
+    )
+
+    executor = MagicMock()
+    executed_assets = [
+        SimpleNamespace(
+            action=BeatAssetAction.LOCAL_TEMPLATE,
+            required_kind=None,
+            reuse_from_beat_index=None,
+            resolved_asset=None,
+        ),
+        SimpleNamespace(
+            action=BeatAssetAction.LOCAL_TEMPLATE,
+            required_kind=None,
+            reuse_from_beat_index=None,
+            resolved_asset=None,
+        ),
+    ]
+    executor.execute_plan = AsyncMock(
+        return_value=SimpleNamespace(parent_scene_index=17, assets=tuple(executed_assets))
+    )
+
+    renderer = MagicMock()
+    rendered_metadata = [
+        SimpleNamespace(template_id=VisualTemplateId.KINETIC_TEXT, video_sha256="1" * 64),
+        SimpleNamespace(template_id=VisualTemplateId.KINETIC_TEXT, video_sha256="2" * 64),
+    ]
+    renderer.render_plan = AsyncMock(
+        return_value=SimpleNamespace(clips=(0, 1), beat_metadata=tuple(rendered_metadata))
+    )
+
+    assembler = MagicMock()
+    async def _assemble(_clips, *, output_path, fps):
+        Path(output_path).write_bytes(b"assembled-video")
+        return SimpleNamespace(
+            parent_scene_index=17,
+            expected_duration_ms=5000,
+            content_sha256="f" * 64,
+        )
+    assembler.assemble = AsyncMock(side_effect=_assemble)
+
+    service = _make_mock_service(tmp_path, prep, executor, renderer, assembler)
+
+    result = await service._render_parent_visual(
+        script_dict={"sections": []},
+        scene=parent_scene,
+        duration_seconds=5.0,
+        canonical_visual_mode="LOCAL_TEMPLATE_ONLY",
+        work_dir=tmp_path,
+        browser=MagicMock(),
+        fps=24,
+        style_profile=None,
+        narration_enabled=True,
+    )
+
+    # 1. Execution completed successfully through multi-beat path
+    assert result["execution_mode"] == "MULTI_BEAT"
+
+    # 2. Fallback mutation occurred on unit 0
+    unit_0 = plan.units[0]
+    assert unit_0.direction_view.template_id == VisualTemplateId.KINETIC_TEXT
+    assert unit_0.direction_view.render_mode == VisualRenderMode.TEMPLATE
+    assert unit_0.scene_view.visual_strategy == VisualStrategy.KINETIC_TEXT
+    assert unit_0.scene_view.on_screen_text == SCENE17_CANARY_PROSE
+
+    # 3. Passed correctly to renderer
+    renderer.render_plan.assert_awaited_once()
+    rendered_plan = renderer.render_plan.call_args.kwargs["render_plan"]
+    assert rendered_plan.units[0].direction_view.template_id == VisualTemplateId.KINETIC_TEXT
+    assert rendered_plan.units[0].direction_view.render_mode == VisualRenderMode.TEMPLATE
+
+    # 4. Pipeline proceeded through assemble
+    assembler.assemble.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_runtime_render_parent_visual_multi_beat_resolvable_flow_diagram_remains_flow_diagram(tmp_path):
+    """When a multi-beat unit has genuine resolvable diagram prose, it remains FLOW_DIAGRAM."""
+    plan = _build_multi_beat_plan_with_diagram(REAL_MECHANISM_PROSE)
+    parent_scene = StoryboardScene(
+        sequence_index=17,
+        section_id="Mechanism",
+        purpose="Explain degradation",
+        source_statement_references=[1, 2],
+        narration_excerpt=REAL_MECHANISM_PROSE,
+        estimated_duration_seconds=5.0,
+        visual_strategy=VisualStrategy.DIAGRAM,
+        visual_brief="Structural mechanism explanation",
+    )
+
+    prep = MagicMock()
+    prep.prepare_from_script_dict.return_value = SimpleNamespace(
+        eligible=True,
+        render_plan=plan,
+    )
+
+    executor = MagicMock()
+    executed_assets = [
+        SimpleNamespace(
+            action=BeatAssetAction.LOCAL_TEMPLATE,
+            required_kind=None,
+            reuse_from_beat_index=None,
+            resolved_asset=None,
+        ),
+        SimpleNamespace(
+            action=BeatAssetAction.LOCAL_TEMPLATE,
+            required_kind=None,
+            reuse_from_beat_index=None,
+            resolved_asset=None,
+        ),
+    ]
+    executor.execute_plan = AsyncMock(
+        return_value=SimpleNamespace(parent_scene_index=17, assets=tuple(executed_assets))
+    )
+
+    renderer = MagicMock()
+    rendered_metadata = [
+        SimpleNamespace(template_id=VisualTemplateId.FLOW_DIAGRAM, video_sha256="1" * 64),
+        SimpleNamespace(template_id=VisualTemplateId.KINETIC_TEXT, video_sha256="2" * 64),
+    ]
+    renderer.render_plan = AsyncMock(
+        return_value=SimpleNamespace(clips=(0, 1), beat_metadata=tuple(rendered_metadata))
+    )
+
+    assembler = MagicMock()
+    async def _assemble(_clips, *, output_path, fps):
+        Path(output_path).write_bytes(b"assembled-video")
+        return SimpleNamespace(
+            parent_scene_index=17,
+            expected_duration_ms=5000,
+            content_sha256="f" * 64,
+        )
+    assembler.assemble = AsyncMock(side_effect=_assemble)
+
+    service = _make_mock_service(tmp_path, prep, executor, renderer, assembler)
+
+    result = await service._render_parent_visual(
+        script_dict={"sections": []},
+        scene=parent_scene,
+        duration_seconds=5.0,
+        canonical_visual_mode="LOCAL_TEMPLATE_ONLY",
+        work_dir=tmp_path,
+        browser=MagicMock(),
+        fps=24,
+        style_profile=None,
+        narration_enabled=True,
+    )
+
+    assert result["execution_mode"] == "MULTI_BEAT"
+    unit_0 = plan.units[0]
+    assert unit_0.direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM
+    assert unit_0.direction_view.render_mode == VisualRenderMode.TEMPLATE
+    assert unit_0.scene_view.visual_strategy == VisualStrategy.DIAGRAM

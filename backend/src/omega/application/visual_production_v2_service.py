@@ -56,11 +56,20 @@ from omega.application.subtitle_engine import (
     generate_karaoke_ass_document,
     generate_karaoke_cues,
 )
-from omega.application.template_payload_resolver import TemplatePayloadResolver
+from omega.application.editorial_beat import BeatSemanticRole
+from omega.application.template_payload_resolver import (
+    TemplatePayloadResolver,
+    can_resolve_diagram_payload,
+)
 from omega.application.visual_asset_binding import BoundBrollAsset
 from omega.application.visual_asset_engine import VisualAssetEngine
 from omega.application.visual_asset_orchestrator import VisualAssetOrchestrator
-from omega.application.visual_direction import VisualAssetKind, VisualDirector
+from omega.application.visual_direction import (
+    VisualAssetKind,
+    VisualDirector,
+    VisualRenderMode,
+    VisualTemplateId,
+)
 from omega.application.visual_template_renderer import VisualTemplateRenderer
 from omega.domain.attribution_delivery import AttributionDeliveryChannel
 from omega.domain.audio_mix import AudioStem, AudioStemRole
@@ -976,10 +985,6 @@ class VisualProductionV2Service:
             if narration_enabled
             else scene_out_path
         )
-        from omega.application.template_payload_resolver import can_resolve_diagram_payload
-        from omega.application.visual_direction import RenderMode, VisualTemplateId
-        from omega.application.editorial_beat_planner import BeatSemanticRole
-
         if scene.visual_strategy == VisualStrategy.DIAGRAM and not can_resolve_diagram_payload(scene.narration_excerpt):
             scene.visual_strategy = VisualStrategy.KINETIC_TEXT
             if not scene.on_screen_text:
@@ -1003,26 +1008,35 @@ class VisualProductionV2Service:
         ):
             plan = prep.render_plan
             for unit in plan.units:
-                if unit.direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM:
+                direction_view = getattr(unit, "direction_view", None)
+                template_id = getattr(direction_view, "template_id", None)
+                if template_id == VisualTemplateId.FLOW_DIAGRAM:
+                    scene_view = getattr(unit, "scene_view", None)
                     unit_content = (
-                        unit.scene_view.narration_excerpt
-                        or unit.scene_view.on_screen_text
-                        or unit.scene_view.visual_brief
+                        getattr(scene_view, "narration_excerpt", None)
+                        or getattr(scene_view, "on_screen_text", None)
+                        or getattr(scene_view, "visual_brief", None)
                     )
+                    dir_meta = getattr(direction_view, "metadata", {}) or {}
                     is_g2 = (
-                        unit.direction_view.metadata.get("semantic_role")
+                        dir_meta.get("semantic_role")
                         == BeatSemanticRole.MECHANISM.value
                     )
                     if not can_resolve_diagram_payload(unit_content, is_g2_mechanism=is_g2):
-                        unit.direction_view = unit.direction_view.model_copy(
-                            update={
-                                "template_id": VisualTemplateId.KINETIC_TEXT,
-                                "render_mode": RenderMode.LOCAL_TEMPLATE,
-                            }
-                        )
-                        unit.scene_view.visual_strategy = VisualStrategy.KINETIC_TEXT
-                        if not unit.scene_view.on_screen_text:
-                            unit.scene_view.on_screen_text = unit.scene_view.narration_excerpt
+                        if hasattr(unit.direction_view, "model_copy"):
+                            unit.direction_view = unit.direction_view.model_copy(
+                                update={
+                                    "template_id": VisualTemplateId.KINETIC_TEXT,
+                                    "render_mode": VisualRenderMode.TEMPLATE,
+                                }
+                            )
+                        else:
+                            unit.direction_view.template_id = VisualTemplateId.KINETIC_TEXT
+                            unit.direction_view.render_mode = VisualRenderMode.TEMPLATE
+                        if hasattr(scene_view, "visual_strategy"):
+                            scene_view.visual_strategy = VisualStrategy.KINETIC_TEXT
+                        if hasattr(scene_view, "on_screen_text") and not scene_view.on_screen_text:
+                            scene_view.on_screen_text = getattr(scene_view, "narration_excerpt", None)
             try:
                 execution = await self._beat_asset_executor.execute_plan(
                     render_plan=plan,
@@ -1775,7 +1789,6 @@ class VisualProductionV2Service:
             raise VerticalSliceError("StoryboardEngine produced 0 scenes")
 
         # Sanitize any scene where DIAGRAM cannot truthfully resolve >= 2 nodes before TTS / rendering
-        from omega.application.template_payload_resolver import can_resolve_diagram_payload
         for s in storyboard.scenes:
             if s.visual_strategy == VisualStrategy.DIAGRAM:
                 if not can_resolve_diagram_payload(s.narration_excerpt):
