@@ -869,18 +869,27 @@ def _execute_canonical_research(
                 target_acq_mode = ResearchAcquisitionMode.AUTOMATIC_SEARCH
 
             if request is None:
+                create_payload = ResearchRequestCreate(
+                    topic_candidate_id=topic_id,
+                    mission_execution_id=execution_id,
+                    acquisition_mode=target_acq_mode,
+                    **(
+                        {"max_sources": settings.research_max_total_sources}
+                        if (
+                            target_acq_mode == ResearchAcquisitionMode.AUTOMATIC_SEARCH
+                            and settings.research_discovery_provider == "TAVILY"
+                        )
+                        else {}
+                    ),
+                    metadata={
+                        "canonical_task_identity": identity,
+                        "acquisition_mode": target_acq_mode.value,
+                    },
+                )
                 created = await research_service.create_research_request(
                     async_session,
                     mission.channel_id,
-                    ResearchRequestCreate(
-                        topic_candidate_id=topic_id,
-                        mission_execution_id=execution_id,
-                        acquisition_mode=target_acq_mode,
-                        metadata={
-                            "canonical_task_identity": identity,
-                            "acquisition_mode": target_acq_mode.value,
-                        },
-                    ),
+                    create_payload,
                 )
                 request = await async_session.get(ResearchRequest, created.id)
 

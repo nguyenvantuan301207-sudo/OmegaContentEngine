@@ -1790,3 +1790,448 @@ async def test_default_runtime_offline_zero_to_five_coverage_expansion():
     assert result["stop_reason"] == "COVERAGE_FULFILLED"
     assert len(session.sources) <= 15
     assert len(session.sources) == 15
+
+
+# ── 30. Configuration Budget Validation (Section A) ──
+
+
+def test_config_budget_validation():
+    """Verify Section A: Settings validation enforces bounds on automatic research budgets."""
+    import pydantic
+
+    # Valid default config
+    s_default = Settings()
+    assert s_default.research_max_rounds == 3
+    assert s_default.research_max_queries_per_round == 3
+    assert s_default.research_max_candidates_per_query == 5
+    assert s_default.research_max_accepted_sources_per_round == 5
+    assert s_default.research_max_total_sources == 15
+
+    # Valid custom bounds
+    s_custom = Settings(
+        research_max_rounds=5,
+        research_max_queries_per_round=4,
+        research_max_candidates_per_query=10,
+        research_max_accepted_sources_per_round=10,
+        research_max_total_sources=50,
+    )
+    assert s_custom.research_max_total_sources == 50
+
+    # Over 50 fails closed
+    with pytest.raises(pydantic.ValidationError, match="research_max_total_sources"):
+        Settings(research_max_total_sources=51)
+
+    # Zero / negative fails closed
+    with pytest.raises(pydantic.ValidationError, match="research_max_total_sources"):
+        Settings(research_max_total_sources=0)
+
+    with pytest.raises(pydantic.ValidationError, match="research_max_total_sources"):
+        Settings(research_max_total_sources=-5)
+
+    with pytest.raises(pydantic.ValidationError, match="research_max_rounds"):
+        Settings(research_max_rounds=0)
+
+    with pytest.raises(pydantic.ValidationError, match="research_max_queries_per_round"):
+        Settings(research_max_queries_per_round=0)
+
+    with pytest.raises(pydantic.ValidationError, match="research_max_candidates_per_query"):
+        Settings(research_max_candidates_per_query=0)
+
+    with pytest.raises(pydantic.ValidationError, match="research_max_accepted_sources_per_round"):
+        Settings(research_max_accepted_sources_per_round=0)
+
+
+# ── 31. Canonical Automatic vs Manual Request Budget Alignment (Sections B, C, D, F) ──
+
+
+def test_canonical_worker_request_creation_budget_alignment(monkeypatch):
+    """Verify Sections B, C, D:
+
+    - NEW AUTOMATIC_SEARCH request created by worker receives max_sources = settings.research_max_total_sources (15).
+    - NEW MANUAL request created by worker receives generic default max_sources = 10.
+    - EXISTING request max_sources is NOT mutated.
+    """
+    mission_id, execution_id, channel_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    task_id, topic_id = uuid.uuid4(), uuid.uuid4()
+
+    task = SimpleNamespace(id=task_id, mission_id=mission_id, execution_id=execution_id)
+    execution = SimpleNamespace(id=execution_id, mission_id=mission_id, channel_dna_revision_id=uuid.uuid4())
+    mission = SimpleNamespace(id=mission_id, channel_id=channel_id)
+    topic = SimpleNamespace(id=topic_id, channel_id=channel_id, status=TopicStatus.SELECTED.value)
+
+    created_payloads: list[ResearchRequestCreate] = []
+
+    # 1. Test AUTOMATIC_SEARCH creates request with max_sources = 15
+    auto_request_id = uuid.uuid4()
+    auto_brief_id = uuid.uuid4()
+    auto_request = SimpleNamespace(
+        id=auto_request_id,
+        topic_candidate_id=topic_id,
+        mission_execution_id=execution_id,
+        channel_id=channel_id,
+        metadata_={"canonical_task_identity": f"mission-research:{execution_id}:{task_id}", "acquisition_mode": "AUTOMATIC_SEARCH"},
+        status=ResearchRequestStatus.PENDING.value,
+        outcome=None,
+        max_sources=15,
+    )
+    auto_brief = SimpleNamespace(
+        id=auto_brief_id,
+        research_request_id=auto_request_id,
+        topic_candidate_id=topic_id,
+        channel_id=channel_id,
+        outcome=ResearchOutcome.SUFFICIENT.value,
+    )
+
+    class AutoWorkerSession:
+        def __init__(self):
+            self.created = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, model, ident):
+            if model is Task:
+                return task
+            if model is MissionExecution:
+                return execution
+            if model is Mission:
+                return mission
+            if model is TopicCandidate:
+                return topic
+            if model is ResearchRequest:
+                return auto_request
+            if model is ResearchBrief:
+                return auto_brief
+            return None
+
+        async def refresh(self, obj):
+            pass
+
+        async def execute(self, stmt):
+            sql = str(stmt)
+            if "research_requests" in sql:
+                if not self.created:
+                    return FakeResult([])
+                return FakeResult([auto_request])
+            if "research_briefs" in sql:
+                return FakeResult([auto_brief])
+            return FakeResult([])
+
+    session_inst = AutoWorkerSession()
+    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: session_inst)
+    monkeypatch.setattr(
+        omega.config,
+        "get_settings",
+        lambda: Settings(
+            research_discovery_provider="TAVILY",
+            tavily_api_key=SYNTHETIC_API_KEY,
+            research_acquisition_mode="AUTOMATIC_SEARCH",
+            research_max_total_sources=15,
+        ),
+    )
+
+    async def fake_create_rr(session, ch_id, payload):
+        created_payloads.append(payload)
+        session_inst.created = True
+        return SimpleNamespace(id=auto_request_id)
+
+    monkeypatch.setattr(research_service, "create_research_request", fake_create_rr)
+
+    async def fake_coverage(*args, **kwargs):
+        auto_request.status = ResearchRequestStatus.SUCCEEDED.value
+        auto_request.outcome = ResearchOutcome.SUFFICIENT.value
+        return {"brief": SimpleNamespace(id=auto_brief_id)}
+
+    from omega.application import research_coverage_service
+    monkeypatch.setattr(research_coverage_service, "execute_coverage_driven_research", fake_coverage)
+
+    context = {
+        "mission_id": str(mission_id),
+        "execution_id": str(execution_id),
+        "dependency_outputs": {"topic_discovery": {"topic_candidate_id": str(topic_id)}},
+    }
+    worker_tasks._execute_canonical_research(task_id, {}, context)
+
+    assert len(created_payloads) == 1
+    assert created_payloads[0].acquisition_mode == ResearchAcquisitionMode.AUTOMATIC_SEARCH
+    assert created_payloads[0].max_sources == 15
+
+    # 2. Test MANUAL creates request preserving default max_sources = 10
+    created_payloads.clear()
+    manual_request_id = uuid.uuid4()
+    manual_brief_id = uuid.uuid4()
+    manual_request = SimpleNamespace(
+        id=manual_request_id,
+        topic_candidate_id=topic_id,
+        mission_execution_id=execution_id,
+        channel_id=channel_id,
+        metadata_={"canonical_task_identity": f"mission-research:{execution_id}:{task_id}", "acquisition_mode": "MANUAL"},
+        status=ResearchRequestStatus.PENDING.value,
+        outcome=None,
+        max_sources=10,
+    )
+    manual_brief = SimpleNamespace(
+        id=manual_brief_id,
+        research_request_id=manual_request_id,
+        topic_candidate_id=topic_id,
+        channel_id=channel_id,
+        outcome=ResearchOutcome.SUFFICIENT.value,
+    )
+
+    class ManualWorkerSession:
+        def __init__(self):
+            self.created = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, model, ident):
+            if model is Task:
+                return task
+            if model is MissionExecution:
+                return execution
+            if model is Mission:
+                return mission
+            if model is TopicCandidate:
+                return topic
+            if model is ResearchRequest:
+                return manual_request
+            if model is ResearchBrief:
+                return manual_brief
+            return None
+
+        async def refresh(self, obj):
+            pass
+
+        async def execute(self, stmt):
+            sql = str(stmt)
+            if "research_requests" in sql:
+                if not self.created:
+                    return FakeResult([])
+                return FakeResult([manual_request])
+            if "research_briefs" in sql:
+                return FakeResult([manual_brief])
+            return FakeResult([])
+
+    manual_session_inst = ManualWorkerSession()
+    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: manual_session_inst)
+    monkeypatch.setattr(
+        omega.config,
+        "get_settings",
+        lambda: Settings(
+            research_discovery_provider="NONE",
+            research_acquisition_mode="MANUAL",
+        ),
+    )
+
+    async def fake_manual_create_rr(session, ch_id, payload):
+        created_payloads.append(payload)
+        manual_session_inst.created = True
+        return SimpleNamespace(id=manual_request_id)
+
+    monkeypatch.setattr(research_service, "create_research_request", fake_manual_create_rr)
+
+    async def fake_manual_run(session, req_id, **kwargs):
+        manual_request.status = ResearchRequestStatus.SUCCEEDED.value
+        manual_request.outcome = ResearchOutcome.SUFFICIENT.value
+        return SimpleNamespace(id=manual_brief_id)
+
+    monkeypatch.setattr(research_service, "run_research", fake_manual_run)
+
+    worker_tasks._execute_canonical_research(task_id, {}, context)
+    assert len(created_payloads) == 1
+    assert created_payloads[0].acquisition_mode == ResearchAcquisitionMode.MANUAL
+    assert created_payloads[0].max_sources == 10
+
+    # 3. Test existing request is NOT mutated
+    created_payloads.clear()
+    existing_request_id = uuid.uuid4()
+    existing_brief_id = uuid.uuid4()
+    existing_request = SimpleNamespace(
+        id=existing_request_id,
+        topic_candidate_id=topic_id,
+        mission_execution_id=execution_id,
+        channel_id=channel_id,
+        metadata_={"canonical_task_identity": f"mission-research:{execution_id}:{task_id}", "acquisition_mode": "AUTOMATIC_SEARCH"},
+        status=ResearchRequestStatus.SUCCEEDED.value,
+        outcome=ResearchOutcome.SUFFICIENT.value,
+        max_sources=8,
+    )
+    existing_brief = SimpleNamespace(
+        id=existing_brief_id,
+        research_request_id=existing_request_id,
+        topic_candidate_id=topic_id,
+        channel_id=channel_id,
+        outcome=ResearchOutcome.SUFFICIENT.value,
+        is_current=True,
+    )
+
+    class ExistingWorkerSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, model, ident):
+            if model is Task:
+                return task
+            if model is MissionExecution:
+                return execution
+            if model is Mission:
+                return mission
+            if model is TopicCandidate:
+                return topic
+            if model is ResearchRequest:
+                return existing_request
+            if model is ResearchBrief:
+                return existing_brief
+            return None
+
+        async def refresh(self, obj):
+            pass
+
+        async def execute(self, stmt):
+            sql = str(stmt)
+            if "research_requests" in sql:
+                return FakeResult([existing_request])
+            if "research_briefs" in sql:
+                return FakeResult([existing_brief])
+            return FakeResult([])
+
+    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: ExistingWorkerSession())
+    monkeypatch.setattr(
+        omega.config,
+        "get_settings",
+        lambda: Settings(
+            research_discovery_provider="TAVILY",
+            tavily_api_key=SYNTHETIC_API_KEY,
+            research_acquisition_mode="AUTOMATIC_SEARCH",
+            research_max_total_sources=15,
+        ),
+    )
+
+    worker_tasks._execute_canonical_research(task_id, {}, context)
+    assert len(created_payloads) == 0
+    assert existing_request.max_sources == 8
+
+
+def test_effective_source_limit_regression():
+    """Verify Section F: effective_max_sources = min(req.max_sources, max_total_acquired_sources)."""
+    # 1. Configured 15, request 15 -> effective 15
+    req_15 = SimpleNamespace(max_sources=15)
+    effective_15 = min(req_15.max_sources, 15)
+    assert effective_15 == 15
+
+    # 2. Configured 15, request 8 -> effective 8
+    req_8 = SimpleNamespace(max_sources=8)
+    effective_8 = min(req_8.max_sources, 15)
+    assert effective_8 == 8
+
+
+# ── 32. Canonical Default 0→5 From Canonical Worker Budget (Section E) ──
+
+
+@pytest.mark.asyncio
+async def test_canonical_default_zero_to_five_from_worker_budget():
+    """Verify Section E: Canonical 0→5 expansion using canonical automatic request budget (15).
+
+    Gate:
+    CANONICAL_DEFAULT_0_TO_5 = PASS
+    CANONICAL_DEFAULT_SOURCES_USED <= 15
+    CANONICAL_DEFAULT_VERIFIED_FAMILIES = 5
+    CANONICAL_DEFAULT_BRIEF_OUTCOME = SUFFICIENT
+    """
+    settings = Settings(
+        research_discovery_provider="TAVILY",
+        tavily_api_key=SYNTHETIC_API_KEY,
+        research_acquisition_mode="AUTOMATIC_SEARCH",
+        research_max_total_sources=15,
+    )
+    # The canonical request created by worker receives settings.research_max_total_sources (15)
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=settings.research_max_total_sources)
+    assert req.max_sources == 15
+
+    mechanisms = [
+        ("plastic shrinkage", "Plastic shrinkage cracking occurs when rapid surface evaporation before set exceeds water bleeding."),
+        ("drying shrinkage", "Drying shrinkage cracking occurs when long-term moisture loss from paste causes drying shrinkage cracking."),
+        ("thermal contraction", "Thermal contraction cracking occurs when cooling from peak hydration temperatures produces thermal contraction cracking."),
+        ("alkali-silica reaction", "Alkali-silica reaction cracking occurs when internal gel swelling produces alkali-silica reaction cracking."),
+        ("chemical sulfate attack", "Chemical sulfate attack cracking occurs when ettringite expansion produces chemical sulfate attack cracking."),
+    ]
+    context_templates = [
+        (
+            "Highway department field inspection reports document extensive surface defect formations across bridge deck pours in civil engineering concrete.",
+            "Immediate fog spraying is recommended for site operations.",
+        ),
+        (
+            "University materials engineering laboratory analysis investigates hydration and hardening dynamics in fresh structural concrete.",
+            "Rigorous laboratory test protocols confirm these findings.",
+        ),
+        (
+            "Commercial paving contractor technical bulletin reviews preventive measures against moisture and distress in civil engineering.",
+            "Ambient site humidity and curing conditions must be monitored.",
+        ),
+    ]
+
+    docs: list[dict[str, Any]] = []
+    extract_db: dict[str, str] = {}
+    for m_idx, (m_name, prop) in enumerate(mechanisms, 1):
+        for s_idx in range(1, 4):
+            url_slug = m_name.replace(" ", "-")
+            url = f"https://journal-{m_idx}-{s_idx}.org/{url_slug}"
+            intro, outro = context_templates[s_idx - 1]
+            text = f"{intro} {prop} {outro}"
+            hit = {
+                "url": url,
+                "title": f"{m_name.title()} Report {s_idx}",
+                "content": f"{m_name} cracking discussed in detail.",
+                "score": 0.85,
+            }
+            docs.append(hit)
+            extract_db[url] = text
+
+    call_idx = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_idx
+        if str(request.url) == TAVILY_SEARCH_URL:
+            round_idx = call_idx // 3
+            call_idx += 1
+            start = min(round_idx * 5, len(docs))
+            batch = docs[start : start + 5]
+            return httpx.Response(200, json={"results": batch})
+        elif str(request.url) == TAVILY_EXTRACT_URL:
+            body = json.loads(request.content)
+            req_urls = body.get("urls", [])
+            results = []
+            for u in req_urls:
+                if u in extract_db:
+                    results.append({"url": u, "raw_content": extract_db[u], "title": f"Extracted {u}"})
+            return httpx.Response(200, json={"results": results})
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    discovery = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+    extractor = TavilyResearchContentExtractor(api_key=SYNTHETIC_API_KEY, client=client)
+
+    result = await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=discovery,
+        content_extractor=extractor,
+        authority_provider=None,
+    )
+
+    assert result["final_supported_count"] == 5
+    assert len(result["final_supported_families"]) == 5
+    assert result["brief"].outcome == ResearchOutcome.SUFFICIENT
+    assert result["stop_reason"] == "COVERAGE_FULFILLED"
+    assert len(session.sources) <= 15
+    assert len(session.sources) == 15

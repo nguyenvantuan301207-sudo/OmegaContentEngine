@@ -149,6 +149,49 @@ class Settings(BaseSettings):
     research_tavily_timeout_seconds: float = 30.0
     research_tavily_max_response_bytes: int = 5_000_000
 
+    @field_validator("research_max_rounds")
+    @classmethod
+    def validate_research_max_rounds(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(f"research_max_rounds ({v}) must be greater than or equal to 1")
+        return v
+
+    @field_validator("research_max_queries_per_round")
+    @classmethod
+    def validate_research_max_queries_per_round(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"research_max_queries_per_round ({v}) must be greater than or equal to 1"
+            )
+        return v
+
+    @field_validator("research_max_candidates_per_query")
+    @classmethod
+    def validate_research_max_candidates_per_query(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"research_max_candidates_per_query ({v}) must be greater than or equal to 1"
+            )
+        return v
+
+    @field_validator("research_max_accepted_sources_per_round")
+    @classmethod
+    def validate_research_max_accepted_sources_per_round(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError(
+                f"research_max_accepted_sources_per_round ({v}) must be greater than or equal to 1"
+            )
+        return v
+
+    @field_validator("research_max_total_sources")
+    @classmethod
+    def validate_research_max_total_sources(cls, v: int) -> int:
+        if v < 1 or v > 50:
+            raise ValueError(
+                f"research_max_total_sources ({v}) must be between 1 and 50 (ResearchRequest maximum bound)"
+            )
+        return v
+
     @field_validator("research_discovery_provider")
     @classmethod
     def validate_research_discovery_provider(cls, v: str) -> str:
