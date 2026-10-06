@@ -20,6 +20,7 @@ from omega.application.claim_extractor import (
     extract_deterministic_claims_from_source,
     normalize_claim_text,
 )
+from omega.application.claim_reconciliation import reconcile_source_extractions_into_claims
 from omega.application.research_scorer import (
     calculate_source_quality,
     detect_claim_conflicts,
@@ -651,40 +652,23 @@ async def run_research(
         e.source_id for c in claims for e in (c.evidence or [])
     }
 
-    new_claims_added = False
     for s in eligible_sources:
         if s.id not in existing_source_ids_with_claims:
             extracted = extract_deterministic_claims_from_source(
                 source_title=s.title,
                 source_excerpt=s.content_excerpt,
                 metadata=dict(s.metadata_ or {}),
+                source_type=s.source_type,
             )
-            for item in extracted:
-                c_id = uuid.uuid4()
-                claim_obj = ResearchClaim(
-                    id=c_id,
-                    research_request_id=request_id,
-                    channel_id=req.channel_id,
-                    claim_text=item["claim_text"],
-                    normalized_claim=normalize_claim_text(item["claim_text"]),
-                    claim_type=item["claim_type"].value,
-                )
-                claim_obj.evidence.append(
-                    ClaimEvidence(
-                        id=uuid.uuid4(),
-                        claim_id=c_id,
-                        source_id=s.id,
-                        support_direction=EvidenceDirection.SUPPORTS.value,
-                        excerpt=item["excerpt"],
-                        source_location=item["source_location"],
-                        strength_score=item["strength_score"],
-                    )
-                )
-                session.add(claim_obj)
-                claims.append(claim_obj)
-                new_claims_added = True
-    if new_claims_added:
-        await session.flush()
+            reconcile_source_extractions_into_claims(
+                session=session,
+                existing_claims=claims,
+                extracted_items=extracted,
+                source=s,
+                channel_id=req.channel_id,
+                request_id=request_id,
+            )
+    await session.flush()
 
     # 5. Evaluate claims and detect conflicts canonically
     verified_claims, open_conflicts, clusters = evaluate_canonical_claims(

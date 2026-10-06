@@ -62,11 +62,13 @@ def extract_deterministic_claims_from_source(
     source_excerpt: str,
     metadata: dict[str, Any],
     max_claims_per_source: int = 5,
+    source_type: Any = None,
 ) -> list[dict[str, Any]]:
     """Extract claims deterministically from structured metadata or real technical prose.
 
     V2 Pipeline:
-    1. If structured claims in metadata, validate and return them.
+    1. If structured claims in metadata for trusted sources (MANUAL/IMPORT/SEED), validate and return them.
+       Untrusted discovery/WEB_SEARCH metadata cannot inject claims.
     2. Explicit bullet/numbered lines extraction.
     3. Paragraph and sentence segmentation for unstructured prose:
        - Rejection of navigation/legal boilerplate
@@ -80,8 +82,16 @@ def extract_deterministic_claims_from_source(
     results: list[dict[str, Any]] = []
     seen_normalized: set[str] = set()
 
-    # 1. Check if structured claims were directly provided in metadata
-    structured_claims = metadata.get("claims", [])
+    # Authority Firewall: Discovery / WEB_SEARCH metadata cannot inject structured claims.
+    is_web_or_discovery = (
+        (isinstance(source_type, str) and source_type.upper() == "WEB_SEARCH")
+        or (hasattr(source_type, "value") and str(source_type.value).upper() == "WEB_SEARCH")
+        or "discovery" in metadata
+        or "discovery_snippet" in metadata
+    )
+
+    # 1. Check if structured claims were directly provided in metadata for trusted non-discovery sources
+    structured_claims = [] if is_web_or_discovery else metadata.get("claims", [])
     if isinstance(structured_claims, list) and structured_claims:
         for item in structured_claims:
             if isinstance(item, dict) and "text" in item:

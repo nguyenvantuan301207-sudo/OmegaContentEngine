@@ -11,12 +11,17 @@ deterministic claim extractor V2, and runtime truth observability.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 
 from omega.application import research_service
 from omega.application.claim_extractor import extract_deterministic_claims_from_source
+from omega.application.claim_reconciliation import (
+    are_propositions_corroborating,
+    reconcile_source_extractions_into_claims,
+)
 from omega.application.research_coverage_service import execute_coverage_driven_research
 from omega.application.research_discovery import (
     DiscoveryProviderUnavailableError,
@@ -31,6 +36,7 @@ from omega.domain.numeric_promise import (
     extract_numeric_promise,
 )
 from omega.domain.research import (
+    ClaimType,
     DiscoveryCandidate,
     ExtractedResearchDocument,
     PrimarySourceStatus,
@@ -1176,3 +1182,635 @@ async def test_strict_source_budget_respects_both_limits_and_partial_round():
         ResearchCoverageStopReason.SEARCH_BUDGET_EXHAUSTED.value,
         ResearchCoverageStopReason.NUMERIC_COVERAGE_NOT_FULFILLED.value,
     )
+
+
+# ── 19. Phase B & E: Two Independent Unknown-Primary Web Sources Corroborate ──
+
+
+@pytest.mark.asyncio
+async def test_two_independent_unknown_primary_web_sources_corroborate_same_factual_proposition():
+    """Verify that two independent web sources with PrimarySourceStatus.UNKNOWN
+    corroborating the same factual proposition can achieve verification naturally
+    under the EXISTING canonical scorer without artificial 90/100 authority scores.
+    """
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=10)
+
+    # Realistic moderate publisher authority (60.0, not artificial 90/100)
+    authority = ManualAuthorityProvider({
+        "engineering-standards.org": 60.0,
+        "materials-research.org": 60.0,
+    })
+
+    cand_a = DiscoveryCandidate(
+        canonical_url="https://engineering-standards.org/concrete-plastic-shrinkage",
+        title="Concrete Cracking Mechanisms",
+        publisher="engineering-standards.org",
+        snippet="Evaporation before set causes plastic shrinkage.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+    doc_a = ExtractedResearchDocument(
+        canonical_url="https://engineering-standards.org/concrete-plastic-shrinkage",
+        title="Concrete Cracking Mechanisms",
+        publisher="engineering-standards.org",
+        extracted_content="In civil engineering concrete cracks occur when rapid surface evaporation before set produces plastic shrinkage cracking.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+
+    cand_b = DiscoveryCandidate(
+        canonical_url="https://materials-research.org/concrete-cracking-mechanisms",
+        title="Concrete Cracking Mechanisms",
+        publisher="materials-research.org",
+        snippet="Shrinkage cracks occur when water evaporates.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+    doc_b = ExtractedResearchDocument(
+        canonical_url="https://materials-research.org/concrete-cracking-mechanisms",
+        title="Concrete Cracking Mechanisms",
+        publisher="materials-research.org",
+        extracted_content="Civil engineering studies show that concrete cracks develop from plastic shrinkage when evaporation exceeds bleeding before set.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+
+    provider = InMemoryDiscoveryProvider(seeded_candidates=[cand_a, cand_b])
+    extractor = InMemoryResearchContentExtractor(seeded_documents=[doc_a, doc_b])
+
+    await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        content_extractor=extractor,
+        authority_provider=authority,
+        max_accepted_sources_per_round=5,
+        max_total_acquired_sources=10,
+        max_rounds=1,
+    )
+
+    # 1 canonical claim reconciled with 2 independent evidence links
+    claims = session.claims
+    assert len(claims) == 1
+    canonical_claim = claims[0]
+    assert len(canonical_claim.evidence) == 2
+
+    # Verification status and confidence metrics under existing scorer
+    assert canonical_claim.is_verified is True
+    assert canonical_claim.independent_sources_count == 2
+    assert canonical_claim.supporting_sources_count == 2
+    assert canonical_claim.confidence_score >= 70.0
+    # Expected exact confidence calculation:
+    # indep_comp = 2 * 35 = 70 (0.40 * 70 = 28.0)
+    # quality = 0.35 * 60 + 40 = 61.0 (0.30 * 61.0 = 18.3)
+    # strength = 80.0 (0.30 * 80.0 = 24.0)
+    # total = 28.0 + 18.3 + 24.0 = 70.30
+    assert canonical_claim.confidence_score == 70.3
+    assert canonical_claim.confidence_band == "HIGH"
+    assert "MULTI_SOURCE_INDEPENDENT_CONSENSUS" in canonical_claim.reasons
+    assert "DIRECT_EXCERPT_EVIDENCE" in canonical_claim.reasons
+
+
+# ── 20. Phase F: Single Unknown Web Source Remains Unverified ──
+
+
+@pytest.mark.asyncio
+async def test_single_unknown_primary_source_remains_unverified():
+    """Verify that a single arbitrary web source with PrimarySourceStatus.UNKNOWN
+    CANNOT verify under the existing scorer even with high publisher authority.
+    """
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=10)
+
+    # Even with authority score 70.0
+    authority = ManualAuthorityProvider({"single-source.org": 70.0})
+
+    cand = DiscoveryCandidate(
+        canonical_url="https://single-source.org/concrete-plastic-shrinkage",
+        title="Single Web Page",
+        publisher="single-source.org",
+        snippet="Plastic shrinkage cracking in concrete.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+    doc = ExtractedResearchDocument(
+        canonical_url="https://single-source.org/concrete-plastic-shrinkage",
+        title="Single Web Page",
+        publisher="single-source.org",
+        extracted_content="In civil engineering concrete cracks occur when rapid surface evaporation before set produces plastic shrinkage cracking.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+
+    provider = InMemoryDiscoveryProvider(seeded_candidates=[cand])
+    extractor = InMemoryResearchContentExtractor(seeded_documents=[doc])
+
+    await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        content_extractor=extractor,
+        authority_provider=authority,
+        max_accepted_sources_per_round=5,
+        max_total_acquired_sources=10,
+        max_rounds=1,
+    )
+
+    claims = session.claims
+    assert len(claims) == 1
+    single_claim = claims[0]
+    # Single source has n_independent = 1, confidence < 70, must be unverified
+    assert single_claim.independent_sources_count == 1
+    assert single_claim.confidence_score < 70.0
+    assert single_claim.is_verified is False
+
+
+# ── 21. Phase D: Syndicated / Same-Cluster Sources Do Not Count Independently ──
+
+
+@pytest.mark.asyncio
+async def test_syndicated_same_cluster_sources_do_not_count_independently():
+    """Verify that two syndicated sources in the same independence cluster
+    do not receive multi-source independent consensus and cannot verify.
+    """
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=10)
+
+    authority = ManualAuthorityProvider({"syndicated-wire.org": 60.0})
+
+    # Both sources from the same domain / syndicated provider
+    cand_a = DiscoveryCandidate(
+        canonical_url="https://syndicated-wire.org/wire/article-1",
+        title="Wire Article 1",
+        publisher="syndicated-wire.org",
+        snippet="Plastic shrinkage cracking.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+    doc_a = ExtractedResearchDocument(
+        canonical_url="https://syndicated-wire.org/wire/article-1",
+        title="Wire Article 1",
+        publisher="syndicated-wire.org",
+        extracted_content="In civil engineering concrete cracks occur when rapid surface evaporation before set produces plastic shrinkage cracking.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+
+    cand_b = DiscoveryCandidate(
+        canonical_url="https://syndicated-wire.org/wire/article-2",
+        title="Wire Article 2",
+        publisher="syndicated-wire.org",
+        snippet="Plastic shrinkage cracking.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+    doc_b = ExtractedResearchDocument(
+        canonical_url="https://syndicated-wire.org/wire/article-2",
+        title="Wire Article 2",
+        publisher="syndicated-wire.org",
+        extracted_content="Civil engineering studies show that concrete cracks develop from plastic shrinkage when evaporation exceeds bleeding before set.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+    )
+
+    provider = InMemoryDiscoveryProvider(seeded_candidates=[cand_a, cand_b])
+    extractor = InMemoryResearchContentExtractor(seeded_documents=[doc_a, doc_b])
+
+    await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        content_extractor=extractor,
+        authority_provider=authority,
+        max_accepted_sources_per_round=5,
+        max_total_acquired_sources=10,
+        max_rounds=1,
+    )
+
+    claims = session.claims
+    assert len(claims) == 1
+    claim = claims[0]
+    # Reconciled to 2 supporting evidence items, but only 1 independent cluster!
+    assert len(claim.evidence) == 2
+    assert claim.supporting_sources_count == 2
+    assert claim.independent_sources_count == 1
+    assert "MULTI_SOURCE_INDEPENDENT_CONSENSUS" not in claim.reasons
+    assert claim.is_verified is False
+
+
+# ── 22. Phase B: Conservative Claim Merge & Provenance ──
+
+
+def test_conservative_claim_merge_matches_equivalent_propositions():
+    """Verify that conservative proposition matching recognizes equivalent explanatory
+    statements across independent sources while preserving exact excerpts.
+    """
+    text_a = "Rapid surface evaporation before set produces plastic shrinkage cracking."
+    text_b = "Plastic shrinkage cracks develop when evaporation exceeds bleeding before concrete sets."
+
+    assert are_propositions_corroborating(text_a, ClaimType.FACT, text_b, ClaimType.FACT) is True
+
+
+def test_near_topic_different_proposition_does_not_merge():
+    """Verify that statements on the same broad topic with different propositions
+    do NOT merge.
+    """
+    text_a = "Plastic shrinkage occurs before concrete sets."
+    text_b = "Plastic shrinkage cracks are commonly shallow."
+
+    assert are_propositions_corroborating(text_a, ClaimType.FACT, text_b, ClaimType.FACT) is False
+
+
+def test_contradiction_does_not_merge():
+    """Verify that contradictory propositions with opposite polarity do NOT merge."""
+    text_a = "Settlement cracking occurs when concrete consolidates around rebar."
+    text_b = "Settlement cracking does not occur around rebar."
+
+    assert are_propositions_corroborating(text_a, ClaimType.FACT, text_b, ClaimType.FACT) is False
+
+
+# ── 23. Phase K: Claim Reconciliation Idempotency ──
+
+
+@pytest.mark.asyncio
+async def test_duplicate_retry_does_not_add_evidence_twice():
+    """Verify that executing reconciliation repeatedly for the same source
+    is idempotent and does not duplicate evidence links or inflate counts.
+    """
+    session, req, channel_id, topic_id = make_test_fixture()
+    source = ResearchSource(
+        id=uuid.uuid4(),
+        research_request_id=req.id,
+        channel_id=channel_id,
+        source_type=ResearchSourceType.WEB_SEARCH.value,
+        title="Source A",
+        publisher="Pub A",
+        content_excerpt="Rapid surface evaporation before set produces plastic shrinkage cracking.",
+        quality_score=60.0,
+        primary_source_status=PrimarySourceStatus.UNKNOWN.value,
+    )
+    session.sources.append(source)
+
+    extracted = [
+        {
+            "claim_text": "Rapid surface evaporation before set produces plastic shrinkage cracking.",
+            "claim_type": ClaimType.FACT,
+            "excerpt": "Rapid surface evaporation before set produces plastic shrinkage cracking.",
+            "strength_score": 80.0,
+            "source_location": None,
+        }
+    ]
+
+    claims: list[ResearchClaim] = []
+    # First reconciliation
+    reconcile_source_extractions_into_claims(
+        session=session,
+        existing_claims=claims,
+        extracted_items=extracted,
+        source=source,
+        channel_id=channel_id,
+        request_id=req.id,
+    )
+    assert len(claims) == 1
+    assert len(claims[0].evidence) == 1
+
+    # Second reconciliation (retry)
+    reconcile_source_extractions_into_claims(
+        session=session,
+        existing_claims=claims,
+        extracted_items=extracted,
+        source=source,
+        channel_id=channel_id,
+        request_id=req.id,
+    )
+    # Zero duplicate claims or evidence created!
+    assert len(claims) == 1
+    assert len(claims[0].evidence) == 1
+
+
+# ── 24. Phase G: Five URLs / One Mechanism => Distinct Supported Entities = 1 ──
+
+
+@pytest.mark.asyncio
+async def test_five_urls_one_mechanism_results_in_one_distinct_family():
+    """Verify that 5 URLs describing 1 mechanism result in exactly 1 distinct entity
+    family, preventing duplicate-URL coverage inflation.
+    """
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=10)
+    authority = ManualAuthorityProvider({f"publisher-{i}.org": 60.0 for i in range(1, 6)})
+
+    contexts = [
+        (
+            "Highway department field inspection reports document extensive surface defect formations across bridge deck pours in civil engineering.",
+            "Immediate fog spraying is recommended.",
+        ),
+        (
+            "University materials engineering laboratory analysis investigates early hydration shrinkage dynamics in fresh concrete.",
+            "Windbreaks should be erected.",
+        ),
+        (
+            "Commercial paving contractor technical bulletin reviews preventive measures against moisture evaporation in civil engineering.",
+            "Ambient humidity must be tracked.",
+        ),
+        (
+            "Structural engineering institute advisory note explains tensile strain accumulation in fresh concrete placements.",
+            "Curing blankets must be deployed.",
+        ),
+        (
+            "Federal transportation administration research summary outlines protective curing protocols for civil engineering infrastructure.",
+            "Surface moisture sensors should be used.",
+        ),
+    ]
+    prop = "Plastic shrinkage cracking occurs when rapid surface evaporation before set exceeds water bleeding."
+
+    candidates = [
+        DiscoveryCandidate(
+            canonical_url=f"https://publisher-{i}.org/plastic-shrinkage",
+            title=f"Plastic Shrinkage Article {i}",
+            publisher=f"publisher-{i}.org",
+            snippet="Plastic shrinkage cracking.",
+            primary_source_status=PrimarySourceStatus.UNKNOWN,
+            published_at=datetime.now(UTC),
+        )
+        for i in range(1, 6)
+    ]
+    documents = [
+        ExtractedResearchDocument(
+            canonical_url=f"https://publisher-{i}.org/plastic-shrinkage",
+            title=f"Plastic Shrinkage Article {i}",
+            publisher=f"publisher-{i}.org",
+            extracted_content=f"{intro} {prop} {outro}",
+            primary_source_status=PrimarySourceStatus.UNKNOWN,
+            published_at=datetime.now(UTC),
+        )
+        for i, (intro, outro) in enumerate(contexts, 1)
+    ]
+
+    provider = InMemoryDiscoveryProvider(seeded_candidates=candidates)
+    extractor = InMemoryResearchContentExtractor(seeded_documents=documents)
+
+    result = await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        content_extractor=extractor,
+        authority_provider=authority,
+        max_accepted_sources_per_round=5,
+        max_total_acquired_sources=10,
+        max_rounds=1,
+    )
+
+    # All 5 URLs corroborate the single plastic shrinkage mechanism
+    assert result["final_supported_count"] == 1
+    assert result["final_supported_families"] == ["plastic_shrinkage"]
+    # Coverage is not fulfilled because promised_count = 5
+    assert result["stop_reason"] in (
+        ResearchCoverageStopReason.NUMERIC_COVERAGE_NOT_FULFILLED.value,
+        ResearchCoverageStopReason.SEARCH_BUDGET_EXHAUSTED.value,
+    )
+
+
+# ── 25. Phase G: Five Genuinely Corroborated Distinct Mechanism Families => 5/5 ──
+
+
+@pytest.mark.asyncio
+async def test_five_genuinely_verified_mechanism_families_fulfills_coverage():
+    """Verify that 5 distinct mechanisms, each corroborated by 2 independent sources,
+    achieve 5/5 verified coverage and stop with COVERAGE_FULFILLED.
+    """
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=15)
+
+    mechanisms = [
+        (
+            "plastic shrinkage",
+            "Plastic shrinkage cracking occurs when rapid surface evaporation before set exceeds water bleeding.",
+            "Plastic shrinkage cracks develop when evaporation exceeding bleeding before set produces severe cracking.",
+        ),
+        (
+            "drying shrinkage",
+            "Drying shrinkage cracking occurs when long-term moisture loss from paste causes drying shrinkage cracking.",
+            "Drying shrinkage cracks develop when continuous moisture loss from paste causes drying shrinkage cracking.",
+        ),
+        (
+            "thermal contraction",
+            "Thermal contraction cracking occurs when cooling from peak hydration temperatures produces thermal contraction cracking.",
+            "Thermal contraction cracks develop when cooling from peak hydration temperatures produces thermal contraction cracking.",
+        ),
+        (
+            "alkali-silica reaction",
+            "Alkali-silica reaction cracking occurs when internal gel swelling produces alkali-silica reaction cracking.",
+            "Alkali-silica reaction cracks develop when internal gel swelling produces alkali-silica reaction cracking.",
+        ),
+        (
+            "chemical sulfate attack",
+            "Chemical sulfate attack cracking occurs when ettringite expansion produces chemical sulfate attack cracking.",
+            "Chemical sulfate attack cracks develop when ettringite expansion produces chemical sulfate attack cracking.",
+        ),
+    ]
+
+    authority_scores = {}
+    candidates = []
+    documents = []
+
+    for idx, (mech_name, prop_a, prop_b) in enumerate(mechanisms, 1):
+        pub_a = f"journal-a-{idx}.org"
+        pub_b = f"journal-b-{idx}.org"
+        authority_scores[pub_a] = 60.0
+        authority_scores[pub_b] = 60.0
+
+        url_a = f"https://{pub_a}/{mech_name.replace(' ', '-')}"
+        url_b = f"https://{pub_b}/{mech_name.replace(' ', '-')}"
+
+        text_a = (
+            f"Field inspection handbook covers early concrete deterioration mechanisms under drying winds in civil engineering. "
+            f"{prop_a} Preventive jobsite practices help minimize this defect."
+        )
+        text_b = (
+            f"Academic laboratory research studies concrete curing behavior and stress development in slabs for civil engineering projects. "
+            f"{prop_b} Rigorous test protocols confirm these findings."
+        )
+
+        candidates.extend([
+            DiscoveryCandidate(
+                canonical_url=url_a,
+                title=f"{mech_name} Article A",
+                publisher=pub_a,
+                snippet=f"{mech_name} causes concrete cracks.",
+                primary_source_status=PrimarySourceStatus.UNKNOWN,
+                published_at=datetime.now(UTC),
+            ),
+            DiscoveryCandidate(
+                canonical_url=url_b,
+                title=f"{mech_name} Article B",
+                publisher=pub_b,
+                snippet=f"{mech_name} causes concrete cracks.",
+                primary_source_status=PrimarySourceStatus.UNKNOWN,
+                published_at=datetime.now(UTC),
+            ),
+        ])
+
+        documents.extend([
+            ExtractedResearchDocument(
+                canonical_url=url_a,
+                title=f"{mech_name} Article A",
+                publisher=pub_a,
+                extracted_content=text_a,
+                primary_source_status=PrimarySourceStatus.UNKNOWN,
+                published_at=datetime.now(UTC),
+            ),
+            ExtractedResearchDocument(
+                canonical_url=url_b,
+                title=f"{mech_name} Article B",
+                publisher=pub_b,
+                extracted_content=text_b,
+                primary_source_status=PrimarySourceStatus.UNKNOWN,
+                published_at=datetime.now(UTC),
+            ),
+        ])
+
+    authority = ManualAuthorityProvider(authority_scores)
+    provider = InMemoryDiscoveryProvider(seeded_candidates=candidates)
+    extractor = InMemoryResearchContentExtractor(seeded_documents=documents)
+
+    result = await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        content_extractor=extractor,
+        authority_provider=authority,
+        max_candidates_per_query=10,
+        max_accepted_sources_per_round=10,
+        max_total_acquired_sources=15,
+        max_rounds=2,
+    )
+    assert result["final_supported_count"] == 5
+    assert len(result["final_supported_families"]) == 5
+    assert result["stop_reason"] == ResearchCoverageStopReason.COVERAGE_FULFILLED.value
+    assert result["brief"].outcome == ResearchOutcome.SUFFICIENT
+
+
+# ── 26. Phase H: Discovery Metadata Authority Firewall ──
+
+
+@pytest.mark.asyncio
+async def test_discovery_metadata_cannot_inject_claims():
+    """Verify that malicious or accidental 'claims' keys in DiscoveryCandidate.metadata
+    are never interpreted as canonical claims or evidence.
+    """
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=5)
+    authority = ManualAuthorityProvider({"untrusted-discovery.org": 60.0})
+
+    cand = DiscoveryCandidate(
+        canonical_url="https://untrusted-discovery.org/page",
+        title="Untrusted Discovery Page",
+        publisher="untrusted-discovery.org",
+        snippet="Snippet text.",
+        metadata={
+            "claims": [
+                {"text": "Fabricated mechanism proposition injected through discovery metadata"}
+            ],
+            "evidence": [{"fake": "data"}],
+            "is_verified": True,
+        },
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+    )
+    doc = ExtractedResearchDocument(
+        canonical_url="https://untrusted-discovery.org/page",
+        title="Untrusted Discovery Page",
+        publisher="untrusted-discovery.org",
+        extracted_content="Rapid surface evaporation before set produces plastic shrinkage cracking in concrete.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+    )
+
+    provider = InMemoryDiscoveryProvider(seeded_candidates=[cand])
+    extractor = InMemoryResearchContentExtractor(seeded_documents=[doc])
+
+    await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        content_extractor=extractor,
+        authority_provider=authority,
+        max_accepted_sources_per_round=5,
+        max_total_acquired_sources=5,
+        max_rounds=1,
+    )
+
+    for claim in session.claims:
+        assert "Fabricated mechanism" not in claim.claim_text
+        for ev in claim.evidence:
+            assert "Fabricated mechanism" not in ev.excerpt
+
+
+# ── 27. Phase I: Trusted Manual Structured Claims Preserved ──
+
+
+def test_trusted_manual_structured_claims_still_work():
+    """Verify that trusted MANUAL / IMPORT sources with structured claims in metadata
+    continue to be extracted correctly.
+    """
+    metadata = {
+        "claims": [
+            {
+                "text": "Trusted manual engineering standard statement on concrete cracking.",
+                "type": "FACT",
+                "strength_score": 85.0,
+            }
+        ]
+    }
+    extracted = extract_deterministic_claims_from_source(
+        source_title="Manual Standard",
+        source_excerpt="Valid manual technical prose.",
+        metadata=metadata,
+        source_type=ResearchSourceType.MANUAL,
+    )
+    assert len(extracted) == 1
+    assert extracted[0]["claim_text"] == "Trusted manual engineering standard statement on concrete cracking."
+    assert extracted[0]["strength_score"] == 85.0
+
+
+# ── 28. Phase J: 10,000-char Extracted Document Canonical Bounding ──
+
+
+@pytest.mark.asyncio
+async def test_ten_k_document_ingestion_canonical_bounding():
+    """Verify that an ExtractedResearchDocument with 10,000 characters is deterministically
+    bounded to <= 5,000 characters before ResearchSourceCreate validation.
+    """
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=5)
+    authority = ManualAuthorityProvider({"long-doc.org": 60.0})
+
+    ten_k_content = "Concrete cracking mechanism explanation sentence. " * 200
+    assert len(ten_k_content) > 9000
+
+    cand = DiscoveryCandidate(
+        canonical_url="https://long-doc.org/ten-k-page",
+        title="Ten K Document Page",
+        publisher="long-doc.org",
+        snippet="A very long document snippet.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+    )
+    doc = ExtractedResearchDocument(
+        canonical_url="https://long-doc.org/ten-k-page",
+        title="Ten K Document Page",
+        publisher="long-doc.org",
+        extracted_content=ten_k_content,
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+    )
+
+    provider = InMemoryDiscoveryProvider(seeded_candidates=[cand])
+    extractor = InMemoryResearchContentExtractor(seeded_documents=[doc])
+
+    # Must complete without Pydantic validation error
+    await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        content_extractor=extractor,
+        authority_provider=authority,
+        max_accepted_sources_per_round=5,
+        max_total_acquired_sources=5,
+        max_rounds=1,
+    )
+
+    assert len(session.sources) == 1
+    stored_source = session.sources[0]
+    assert len(stored_source.content_excerpt) <= 5000

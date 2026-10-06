@@ -14,7 +14,6 @@ CRITICAL INVARIANTS:
 
 from __future__ import annotations
 
-import uuid
 from typing import Any
 from uuid import UUID
 
@@ -23,10 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from omega.application import research_service
-from omega.application.claim_extractor import (
-    extract_deterministic_claims_from_source,
-    normalize_claim_text,
-)
+from omega.application.claim_extractor import extract_deterministic_claims_from_source
+from omega.application.claim_reconciliation import reconcile_source_extractions_into_claims
 from omega.application.research_discovery import (
     ContentExtractionError,
     DiscoveryProviderError,
@@ -37,7 +34,7 @@ from omega.application.research_discovery import (
 )
 from omega.application.research_query_planner import plan_research_queries
 from omega.application.research_service import evaluate_canonical_claims
-from omega.application.source_normalizer import normalize_url
+from omega.application.source_normalizer import bound_excerpt, normalize_url
 from omega.application.source_provider import SourceAuthorityProvider
 from omega.domain.numeric_promise import (
     NumericPromiseContract,
@@ -46,7 +43,6 @@ from omega.domain.numeric_promise import (
 )
 from omega.domain.research import (
     DiscoveryCandidate,
-    EvidenceDirection,
     ResearchAcquisitionMode,
     ResearchCoverageRoundTruth,
     ResearchCoverageStopReason,
@@ -55,7 +51,6 @@ from omega.domain.research import (
     ResearchSourceType,
 )
 from omega.infrastructure.models import (
-    ClaimEvidence,
     ResearchClaim,
     ResearchRequest,
     ResearchSource,
@@ -168,30 +163,16 @@ async def execute_coverage_driven_research(
                 source_title=s.title,
                 source_excerpt=s.content_excerpt,
                 metadata=dict(s.metadata_ or {}),
+                source_type=s.source_type,
             )
-            for item in extracted:
-                c_id = uuid.uuid4()
-                claim_obj = ResearchClaim(
-                    id=c_id,
-                    research_request_id=request_id,
-                    channel_id=req.channel_id,
-                    claim_text=item["claim_text"],
-                    normalized_claim=normalize_claim_text(item["claim_text"]),
-                    claim_type=item["claim_type"].value,
-                )
-                claim_obj.evidence.append(
-                    ClaimEvidence(
-                        id=uuid.uuid4(),
-                        claim_id=c_id,
-                        source_id=s.id,
-                        support_direction=EvidenceDirection.SUPPORTS.value,
-                        excerpt=item["excerpt"],
-                        source_location=item["source_location"],
-                        strength_score=item["strength_score"],
-                    )
-                )
-                session.add(claim_obj)
-                existing_claims.append(claim_obj)
+            reconcile_source_extractions_into_claims(
+                session=session,
+                existing_claims=existing_claims,
+                extracted_items=extracted,
+                source=s,
+                channel_id=req.channel_id,
+                request_id=request_id,
+            )
     if eligible_init_sources:
         await session.flush()
 
@@ -351,19 +332,46 @@ async def execute_coverage_driven_research(
             # CRITICAL AUTHORITY BOUNDARY:
             # content_excerpt is strictly derived from extracted_doc.extracted_content.
             # cand.snippet is ONLY preserved as discovery metadata / observability.
+            # Bound content_excerpt to MAX_EXCERPT_LENGTH (<= 5000 chars) BEFORE validation
+            bounded_content = bound_excerpt(extracted_doc.extracted_content)
+
+            # Metadata firewall: clean discovery metadata, isolate snippet, forbid authority injection
+            clean_discovery_meta: dict[str, Any] = {
+                "snippet": cand.snippet,
+                "rank": cand.metadata.get("rank"),
+                "score": cand.metadata.get("score"),
+                "provider": cand.metadata.get("provider"),
+            }
+            forbidden_authority_keys = {
+                "claims",
+                "evidence",
+                "verified_claims",
+                "structured_claims",
+                "is_verified",
+                "confidence_score",
+                "authority",
+            }
+            extra_meta = {
+                k: v
+                for k, v in cand.metadata.items()
+                if k not in forbidden_authority_keys and k not in clean_discovery_meta
+            }
+            if extra_meta:
+                clean_discovery_meta["extra"] = extra_meta
+
             src_in = ResearchSourceCreate(
                 source_type=ResearchSourceType.WEB_SEARCH,
                 title=extracted_doc.title or cand.title,
                 publisher=extracted_doc.publisher or cand.publisher,
                 author=extracted_doc.author or cand.author,
                 url=extracted_doc.canonical_url,
-                content_excerpt=extracted_doc.extracted_content,
+                content_excerpt=bounded_content,
                 primary_source_status=extracted_doc.primary_source_status,
                 published_at=extracted_doc.published_at or cand.published_at,
                 language=extracted_doc.language,
                 region=extracted_doc.region,
                 metadata={
-                    **cand.metadata,
+                    "discovery": clean_discovery_meta,
                     "discovery_snippet": cand.snippet,
                     "content_provenance": extracted_doc.content_provenance,
                 },
@@ -402,30 +410,16 @@ async def execute_coverage_driven_research(
                     source_title=s.title,
                     source_excerpt=s.content_excerpt,
                     metadata=dict(s.metadata_ or {}),
+                    source_type=s.source_type,
                 )
-                for item in extracted:
-                    c_id = uuid.uuid4()
-                    claim_obj = ResearchClaim(
-                        id=c_id,
-                        research_request_id=request_id,
-                        channel_id=req.channel_id,
-                        claim_text=item["claim_text"],
-                        normalized_claim=normalize_claim_text(item["claim_text"]),
-                        claim_type=item["claim_type"].value,
-                    )
-                    claim_obj.evidence.append(
-                        ClaimEvidence(
-                            id=uuid.uuid4(),
-                            claim_id=c_id,
-                            source_id=s.id,
-                            support_direction=EvidenceDirection.SUPPORTS.value,
-                            excerpt=item["excerpt"],
-                            source_location=item["source_location"],
-                            strength_score=item["strength_score"],
-                        )
-                    )
-                    session.add(claim_obj)
-                    curr_claims.append(claim_obj)
+                reconcile_source_extractions_into_claims(
+                    session=session,
+                    existing_claims=curr_claims,
+                    extracted_items=extracted,
+                    source=s,
+                    channel_id=req.channel_id,
+                    request_id=request_id,
+                )
         await session.flush()
 
         # Canonically evaluate claims for verified coverage derivation
