@@ -295,13 +295,12 @@ class DiscoveryCandidate(BaseModel):
     """Candidate source retrieved by a discovery provider.
 
     IMPORTANT: Discovery != evidence. Snippets are not verified claims.
-    Candidates must be normalized and ingested through the canonical source pipeline.
+    Candidates represent prospective references only, not canonical evidence authority.
     """
 
     canonical_url: str = Field(..., min_length=5, max_length=1000)
     title: str = Field(..., min_length=2, max_length=300)
     publisher: str = Field(..., min_length=1, max_length=200)
-    content_excerpt: str = Field(..., min_length=5, max_length=5000)
     snippet: str | None = Field(default=None, max_length=1000)
     author: str | None = Field(default=None, max_length=200)
     published_at: datetime | None = None
@@ -309,6 +308,24 @@ class DiscoveryCandidate(BaseModel):
     language: str = Field(default="en", max_length=20)
     region: str = Field(default="US", max_length=10)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtractedResearchDocument(BaseModel):
+    """Normalized content extracted from a discovered research document.
+
+    Serves as canonical evidence authority for ResearchSource creation.
+    """
+
+    canonical_url: str = Field(..., min_length=5, max_length=1000)
+    title: str | None = Field(default=None, max_length=300)
+    publisher: str | None = Field(default=None, max_length=200)
+    extracted_content: str = Field(..., min_length=5, max_length=10000)
+    content_provenance: dict[str, Any] = Field(default_factory=dict)
+    language: str = Field(default="en", min_length=2, max_length=20)
+    region: str = Field(default="US", min_length=2, max_length=10)
+    published_at: datetime | None = None
+    author: str | None = Field(default=None, max_length=200)
+    primary_source_status: PrimarySourceStatus = PrimarySourceStatus.UNKNOWN
 
 
 class ResearchQuery(BaseModel):

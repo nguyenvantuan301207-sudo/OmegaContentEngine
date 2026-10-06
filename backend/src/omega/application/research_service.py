@@ -495,6 +495,93 @@ async def list_conflicts(
     return [ResearchConflictResponse.model_validate(c) for c in res.scalars().all()]
 
 
+def evaluate_canonical_claims(
+    eligible_sources: list[ResearchSource],
+    claims: list[ResearchClaim],
+    confidence_profile: ClaimConfidenceProfile | None = None,
+) -> tuple[list[ResearchClaim], list[dict[str, Any]], dict[UUID, str]]:
+    """Canonically evaluate claim verification, confidence scores, and conflicts.
+
+    Mutates claim objects in-place with evaluated metrics (is_verified, confidence_score, etc.).
+    Returns (verified_claims, detected_conflicts, clusters).
+    """
+    profile = confidence_profile or DEFAULT_CLAIM_CONFIDENCE_PROFILE
+    eligible_source_ids = {s.id for s in eligible_sources}
+
+    sources_data = [
+        {
+            "id": s.id,
+            "title": s.title,
+            "publisher": s.publisher,
+            "url": s.url,
+            "content_excerpt": s.content_excerpt,
+            "content_hash": s.content_hash,
+            "quality_score": s.quality_score,
+            "primary_source_status": PrimarySourceStatus(s.primary_source_status)
+            if isinstance(s.primary_source_status, str)
+            else s.primary_source_status,
+        }
+        for s in eligible_sources
+    ]
+    clusters = cluster_source_independence(sources_data)
+    for source_data in sources_data:
+        source_data["independence_cluster_id"] = clusters[source_data["id"]]
+
+    sources_map = {s["id"]: s for s in sources_data}
+    detected_conflicts: list[dict[str, Any]] = []
+
+    for c in claims:
+        ev_data = [
+            {
+                "id": e.id,
+                "source_id": e.source_id,
+                "support_direction": EvidenceDirection(e.support_direction)
+                if isinstance(e.support_direction, str)
+                else e.support_direction,
+                "excerpt": e.excerpt,
+                "strength_score": e.strength_score,
+            }
+            for e in c.evidence
+            if e.source_id in eligible_source_ids
+        ]
+        conflicts = detect_claim_conflicts(c.id, c.claim_text, ev_data)
+        detected_conflicts.extend(conflicts)
+
+    for c in claims:
+        ev_data = [
+            {
+                "id": e.id,
+                "source_id": e.source_id,
+                "support_direction": EvidenceDirection(e.support_direction)
+                if isinstance(e.support_direction, str)
+                else e.support_direction,
+                "excerpt": e.excerpt,
+                "strength_score": e.strength_score,
+            }
+            for e in c.evidence
+            if e.source_id in eligible_source_ids
+        ]
+        claim_conflicts = [conf for conf in detected_conflicts if conf.get("claim_id") == c.id]
+        metrics = evaluate_claim_confidence(
+            claim={"claim_type": c.claim_type},
+            evidence_items=ev_data,
+            sources_map=sources_map,
+            conflicts=claim_conflicts,
+            profile=profile,
+        )
+
+        c.confidence_score = metrics["confidence_score"]
+        c.confidence_band = metrics["confidence_band"].value
+        c.supporting_sources_count = metrics["supporting_sources_count"]
+        c.contradicting_sources_count = metrics["contradicting_sources_count"]
+        c.independent_sources_count = metrics["independent_sources_count"]
+        c.is_verified = metrics["is_verified"]
+        c.reasons = metrics["reasons"]
+
+    verified_claims = [c for c in claims if c.is_verified]
+    return verified_claims, detected_conflicts, clusters
+
+
 async def run_research(
     session: AsyncSession,
     request_id: UUID,
@@ -599,70 +686,28 @@ async def run_research(
     if new_claims_added:
         await session.flush()
 
-    # 5. Detect and record conflicts
-    sources_map = {s["id"]: s for s in sources_data}
-    open_conflicts: list[dict[str, Any]] = []
+    # 5. Evaluate claims and detect conflicts canonically
+    verified_claims, open_conflicts, clusters = evaluate_canonical_claims(
+        eligible_sources=eligible_sources,
+        claims=claims,
+        confidence_profile=confidence_profile,
+    )
 
-    for c in claims:
-        ev_data = [
-            {
-                "id": e.id,
-                "source_id": e.source_id,
-                "support_direction": EvidenceDirection(e.support_direction),
-                "excerpt": e.excerpt,
-                "strength_score": e.strength_score,
-            }
-            for e in c.evidence
-            if e.source_id in eligible_source_ids
-        ]
-        detected = detect_claim_conflicts(c.id, c.claim_text, ev_data)
-        for conf_dict in detected:
-            open_conflicts.append(conf_dict)
-            conflict_obj = ResearchConflict(
-                id=uuid.uuid4(),
-                research_request_id=request_id,
-                claim_id=c.id,
-                conflict_type=conf_dict["conflict_type"],
-                severity=conf_dict["severity"].value,
-                status=ConflictStatus.OPEN.value,
-                description=conf_dict["description"],
-                involved_evidence_ids=conf_dict["involved_evidence_ids"],
-                involved_source_ids=conf_dict["involved_source_ids"],
-            )
-            session.add(conflict_obj)
-
-    # 6. Evaluate claim confidence and verification status
-    for c in claims:
-        ev_data = [
-            {
-                "id": e.id,
-                "source_id": e.source_id,
-                "support_direction": EvidenceDirection(e.support_direction),
-                "excerpt": e.excerpt,
-                "strength_score": e.strength_score,
-            }
-            for e in c.evidence
-            if e.source_id in eligible_source_ids
-        ]
-        claim_conflicts = [conf for conf in open_conflicts if conf.get("claim_id") == c.id]
-        metrics = evaluate_claim_confidence(
-            claim={"claim_type": c.claim_type},
-            evidence_items=ev_data,
-            sources_map=sources_map,
-            conflicts=claim_conflicts,
-            profile=confidence_profile,
+    for conf_dict in open_conflicts:
+        conflict_obj = ResearchConflict(
+            id=uuid.uuid4(),
+            research_request_id=request_id,
+            claim_id=conf_dict.get("claim_id"),
+            conflict_type=conf_dict["conflict_type"],
+            severity=conf_dict["severity"].value if hasattr(conf_dict["severity"], "value") else str(conf_dict["severity"]),
+            status=ConflictStatus.OPEN.value,
+            description=conf_dict["description"],
+            involved_evidence_ids=conf_dict["involved_evidence_ids"],
+            involved_source_ids=conf_dict["involved_source_ids"],
         )
+        session.add(conflict_obj)
 
-        c.confidence_score = metrics["confidence_score"]
-        c.confidence_band = metrics["confidence_band"].value
-        c.supporting_sources_count = metrics["supporting_sources_count"]
-        c.contradicting_sources_count = metrics["contradicting_sources_count"]
-        c.independent_sources_count = metrics["independent_sources_count"]
-        c.is_verified = metrics["is_verified"]
-        c.reasons = metrics["reasons"]
-
-    # 7. Calculate overall metrics and outcome
-    verified_claims = [c for c in claims if c.is_verified]
+    # 6. Calculate overall metrics and outcome
     uncertain_claims = [c for c in claims if not c.is_verified]
     independent_clusters_count = len(set(clusters.values()))
 

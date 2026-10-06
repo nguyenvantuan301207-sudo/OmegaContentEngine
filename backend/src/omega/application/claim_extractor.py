@@ -1,7 +1,8 @@
-"""Deterministic Claim Extractor for OMEGA-005.
+"""Deterministic Claim Extractor for OMEGA-005 & P0.3a.1.
 
-Processes structured source claims and rule-based extractions.
-Guarantees zero speculative hallucinations and direct source traceability.
+Processes structured source claims and rule-based prose extractions.
+Guarantees zero speculative hallucinations, strict boilerplate rejection,
+and exact source excerpt traceability.
 """
 
 from __future__ import annotations
@@ -12,30 +13,92 @@ from typing import Any
 from omega.application.source_normalizer import normalize_source_text
 from omega.domain.research import ClaimType
 
+BOILERPLATE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(
+        r"\b(?:cookies?|cookie policy|privacy policy|terms of (?:service|use)|terms and conditions)\b",
+        re.I,
+    ),
+    re.compile(r"\b(?:all rights reserved|copyright|\(c\)|&copy;)\b", re.I),
+    re.compile(
+        r"\b(?:subscribe|newsletter|sign up|sign in|log in|register now|join now)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:click here|read more|learn more|skip to content|back to top|table of contents)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:menu|navigation|search for:|follow us|contact us|about us|share on)\b",
+        re.I,
+    ),
+    re.compile(
+        r"\b(?:advertisement|sponsored|leave a comment|comments are closed)\b",
+        re.I,
+    ),
+)
+
+CAUSAL_INDICATORS = re.compile(
+    r"\b(?:causes?|caused by|causing|leads? to|results? (?:in|from)|due to|mechanism|because of|triggers?)\b",
+    re.I,
+)
+
+
+def _is_boilerplate(text: str) -> bool:
+    """Check if candidate text contains web navigation or legal boilerplate."""
+    return any(p.search(text) for p in BOILERPLATE_PATTERNS)
+
+
+def _classify_claim_type(statement: str) -> ClaimType:
+    """Classify statement into a discrete ClaimType."""
+    if re.search(r"\b\d+(\.\d+)?%\b|\b\$\d+", statement):
+        return ClaimType.STATISTIC
+    if statement.startswith('"') and statement.endswith('"'):
+        return ClaimType.QUOTE
+    return ClaimType.FACT
+
 
 def extract_deterministic_claims_from_source(
     source_title: str,
     source_excerpt: str,
     metadata: dict[str, Any],
+    max_claims_per_source: int = 5,
 ) -> list[dict[str, Any]]:
-    """Extract claims deterministically from structured source metadata or explicit markers.
+    """Extract claims deterministically from structured metadata or real technical prose.
 
-    Returns a list of dicts with: claim_text, claim_type, excerpt, strength_score.
+    V2 Pipeline:
+    1. If structured claims in metadata, validate and return them.
+    2. Explicit bullet/numbered lines extraction.
+    3. Paragraph and sentence segmentation for unstructured prose:
+       - Rejection of navigation/legal boilerplate
+       - Length and word-count threshold gating
+       - Duplicate suppression
+       - Exact excerpt provenance (excerpt in source_excerpt is guaranteed)
+       - Strict bound on maximum claims per source
+
+    Returns a list of dicts with: claim_text, claim_type, excerpt, strength_score, source_location.
     """
     results: list[dict[str, Any]] = []
+    seen_normalized: set[str] = set()
 
     # 1. Check if structured claims were directly provided in metadata
     structured_claims = metadata.get("claims", [])
-    if isinstance(structured_claims, list):
+    if isinstance(structured_claims, list) and structured_claims:
         for item in structured_claims:
             if isinstance(item, dict) and "text" in item:
                 text = item["text"].strip()
+                if not text or _is_boilerplate(text):
+                    continue
+                norm = normalize_claim_text(text)
+                if norm in seen_normalized:
+                    continue
+                seen_normalized.add(norm)
+
                 raw_type = item.get("type", "FACT").upper()
                 claim_type = ClaimType.FACT
                 try:
                     claim_type = ClaimType(raw_type)
                 except ValueError:
-                    claim_type = ClaimType.FACT
+                    claim_type = _classify_claim_type(text)
 
                 excerpt = item.get("excerpt", text)
                 strength = float(item.get("strength_score", 85.0))
@@ -48,47 +111,84 @@ def extract_deterministic_claims_from_source(
                         "source_location": item.get("source_location"),
                     }
                 )
+                if len(results) >= max_claims_per_source:
+                    return results
 
-    # 2. If no structured claims in metadata, look for explicit bullet points or numbered facts
-    if not results and source_excerpt:
-        lines = source_excerpt.splitlines()
-        for line in lines:
-            line_clean = line.strip()
-            # Match lines starting with bullet, asterisk, or number
-            match = re.match(r"^(?:[\*\-\•]|\d+[\.\)])\s+(.*)$", line_clean)
-            if match:
-                statement = match.group(1).strip()
-                if len(statement) >= 15:
-                    # Detect if line contains numbers/percentages (STATISTIC) or quotes (QUOTE)
-                    claim_type = ClaimType.FACT
-                    if re.search(r"\b\d+(\.\d+)?%\b|\b\$\d+", statement):
-                        claim_type = ClaimType.STATISTIC
-                    elif statement.startswith('"') and statement.endswith('"'):
-                        claim_type = ClaimType.QUOTE
+    if results:
+        return results
 
+    if not source_excerpt or len(source_excerpt.strip()) < 15:
+        return []
+
+    # 2. Check for explicit bullet points or numbered facts
+    lines = source_excerpt.splitlines()
+    for line in lines:
+        line_clean = line.strip()
+        match = re.match(r"^(?:[\*\-\•]|\d+[\.\)])\s+(.*)$", line_clean)
+        if match:
+            statement = match.group(1).strip()
+            if len(statement) >= 20 and not _is_boilerplate(statement):
+                norm = normalize_claim_text(statement)
+                if norm not in seen_normalized:
+                    seen_normalized.add(norm)
+                    # Provenance: ensure statement exists in source_excerpt
+                    exact_excerpt = statement if statement in source_excerpt else line_clean
                     results.append(
                         {
                             "claim_text": statement,
-                            "claim_type": claim_type,
-                            "excerpt": statement,
+                            "claim_type": _classify_claim_type(statement),
+                            "excerpt": exact_excerpt,
                             "strength_score": 80.0,
                             "source_location": None,
                         }
                     )
+                    if len(results) >= max_claims_per_source:
+                        return results
 
-    # 3. Fallback: if no items found and excerpt has substantial text, extract the core topic summary sentence
-    if not results and source_excerpt and len(source_excerpt) >= 20:
-        first_sentence = source_excerpt.split(".")[0].strip()
-        if len(first_sentence) >= 15:
+    # 3. Unstructured Prose Extraction V2: Paragraph & sentence segmentation
+    # Split into paragraphs, then into individual sentences
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", source_excerpt) if p.strip()]
+    if not paragraphs:
+        paragraphs = [source_excerpt.strip()]
+
+    for para in paragraphs:
+        # Segment sentences on sentence terminators (. ! ?)
+        raw_sentences = re.split(r"(?<=[.!?])\s+", para)
+        for raw_s in raw_sentences:
+            s_clean = raw_s.strip()
+            # Bounded length & word count gating
+            if len(s_clean) < 25 or len(s_clean) > 500:
+                continue
+            words = s_clean.split()
+            if len(words) < 4:
+                continue
+            # Must contain letters
+            if not re.search(r"[a-zA-Z]{3,}", s_clean):
+                continue
+            # Boilerplate rejection
+            if _is_boilerplate(s_clean):
+                continue
+
+            norm = normalize_claim_text(s_clean)
+            if norm in seen_normalized:
+                continue
+            seen_normalized.add(norm)
+
+            # Exact excerpt provenance check: verify s_clean exists in source_excerpt
+            if s_clean not in source_excerpt:
+                continue
+
             results.append(
                 {
-                    "claim_text": first_sentence,
-                    "claim_type": ClaimType.FACT,
-                    "excerpt": first_sentence,
-                    "strength_score": 75.0,
+                    "claim_text": s_clean,
+                    "claim_type": _classify_claim_type(s_clean),
+                    "excerpt": s_clean,
+                    "strength_score": 80.0,
                     "source_location": None,
                 }
             )
+            if len(results) >= max_claims_per_source:
+                return results
 
     return results
 

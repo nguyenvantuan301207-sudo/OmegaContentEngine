@@ -28,11 +28,15 @@ from omega.application.claim_extractor import (
     normalize_claim_text,
 )
 from omega.application.research_discovery import (
+    ContentExtractionError,
     DiscoveryProviderError,
+    NullResearchContentExtractor,
+    ResearchContentExtractor,
     ResearchDiscoveryProvider,
     filter_and_deduplicate_candidates,
 )
 from omega.application.research_query_planner import plan_research_queries
+from omega.application.research_service import evaluate_canonical_claims
 from omega.application.source_normalizer import normalize_url
 from omega.application.source_provider import SourceAuthorityProvider
 from omega.domain.numeric_promise import (
@@ -46,6 +50,7 @@ from omega.domain.research import (
     ResearchAcquisitionMode,
     ResearchCoverageRoundTruth,
     ResearchCoverageStopReason,
+    ResearchOutcome,
     ResearchSourceCreate,
     ResearchSourceType,
 )
@@ -64,6 +69,7 @@ async def execute_coverage_driven_research(
     session: AsyncSession,
     request_id: UUID,
     discovery_provider: ResearchDiscoveryProvider | None = None,
+    content_extractor: ResearchContentExtractor | None = None,
     authority_provider: SourceAuthorityProvider | None = None,
     max_rounds: int = 3,
     max_queries_per_round: int = 3,
@@ -84,6 +90,9 @@ async def execute_coverage_driven_research(
     - brief (ResearchBriefResponse or None)
     - coverage_truth
     """
+    if content_extractor is None:
+        content_extractor = NullResearchContentExtractor()
+
     # 1. Load ResearchRequest with relationships
     req_res = await session.execute(
         select(ResearchRequest)
@@ -186,15 +195,24 @@ async def execute_coverage_driven_research(
     if eligible_init_sources:
         await session.flush()
 
+    # Canonical evaluation of existing claims
+    init_verified_claims, _, _ = evaluate_canonical_claims(
+        eligible_sources=eligible_init_sources,
+        claims=existing_claims,
+    )
+
     initial_families: list[str] = []
-    if existing_claims and contract:
-        vclaim_texts = [c.claim_text for c in existing_claims]
+    if init_verified_claims and contract:
+        vclaim_texts = [c.claim_text for c in init_verified_claims]
         initial_families = extract_distinct_entities(
             vclaim_texts,
             topic_title=topic_title,
             entity_type=contract.entity_type,
         )
     initial_supported_count = len(initial_families)
+
+    # Effective source limit: respect stricter of req.max_sources and max_total_acquired_sources
+    effective_max_sources = min(req.max_sources, max_total_acquired_sources)
 
     # If already fulfilled before discovery:
     if contract and initial_supported_count >= contract.promised_count:
@@ -203,10 +221,15 @@ async def execute_coverage_driven_research(
             request_id=request_id,
             authority_provider=authority_provider,
         )
+        init_stop_reason = (
+            ResearchCoverageStopReason.COVERAGE_FULFILLED
+            if brief.outcome == ResearchOutcome.SUFFICIENT
+            else ResearchCoverageStopReason.NUMERIC_COVERAGE_NOT_FULFILLED
+        )
         return {
             "request_id": str(request_id),
             "acquisition_mode": acquisition_mode,
-            "stop_reason": ResearchCoverageStopReason.COVERAGE_FULFILLED.value,
+            "stop_reason": init_stop_reason.value,
             "rounds_executed": 0,
             "initial_supported_count": initial_supported_count,
             "final_supported_count": initial_supported_count,
@@ -228,12 +251,13 @@ async def execute_coverage_driven_research(
     for round_num in range(1, max_rounds + 1):
         supported_before = len(current_supported_families)
 
-        # Budget Check: Total Acquired Sources
+        # Budget Check: Total Acquired Sources against effective ceiling
         current_sources_res = await session.execute(
             select(ResearchSource).where(ResearchSource.research_request_id == request_id)
         )
         current_source_count = len(current_sources_res.scalars().all())
-        if current_source_count >= max_total_acquired_sources:
+        remaining_capacity = effective_max_sources - current_source_count
+        if remaining_capacity <= 0:
             stop_reason = ResearchCoverageStopReason.SEARCH_BUDGET_EXHAUSTED
             break
 
@@ -292,28 +316,57 @@ async def execute_coverage_driven_research(
             )
             break
 
-        # Filter & deduplicate candidates
+        # Strictly bound round acceptance to remaining capacity
+        round_allowed = min(max_accepted_sources_per_round, remaining_capacity)
+
+        # Filter & deduplicate prospective candidates
         accepted, rejections = filter_and_deduplicate_candidates(
             candidates=raw_candidates,
             already_seen_urls=already_seen_urls,
-            max_accepted=max_accepted_sources_per_round,
+            max_accepted=round_allowed,
         )
 
-        # Ingest accepted sources into canonical pipeline
+        # Ingest accepted sources through ResearchContentExtractor into canonical pipeline
         sources_added_this_round = 0
         for cand in accepted:
+            if current_source_count + sources_added_this_round >= effective_max_sources:
+                rejections.append(f"CAPPED_AT_MAX_SOURCES: '{cand.canonical_url}'")
+                break
+
+            try:
+                extracted_doc = await content_extractor.extract_document(cand)
+            except (ContentExtractionError, Exception) as exc:
+                logger.warning("Content extraction failed", url=cand.canonical_url, error=str(exc))
+                rejections.append(f"EXTRACTION_FAILED: '{cand.canonical_url}'")
+                continue
+
+            if (
+                extracted_doc is None
+                or not extracted_doc.extracted_content
+                or len(extracted_doc.extracted_content.strip()) < 15
+            ):
+                rejections.append(f"CONTENT_UNAVAILABLE: '{cand.canonical_url}'")
+                continue
+
+            # CRITICAL AUTHORITY BOUNDARY:
+            # content_excerpt is strictly derived from extracted_doc.extracted_content.
+            # cand.snippet is ONLY preserved as discovery metadata / observability.
             src_in = ResearchSourceCreate(
                 source_type=ResearchSourceType.WEB_SEARCH,
-                title=cand.title,
-                publisher=cand.publisher,
-                author=cand.author,
-                url=cand.canonical_url,
-                content_excerpt=cand.content_excerpt,
-                primary_source_status=cand.primary_source_status,
-                published_at=cand.published_at,
-                language=cand.language,
-                region=cand.region,
-                metadata=cand.metadata,
+                title=extracted_doc.title or cand.title,
+                publisher=extracted_doc.publisher or cand.publisher,
+                author=extracted_doc.author or cand.author,
+                url=extracted_doc.canonical_url,
+                content_excerpt=extracted_doc.extracted_content,
+                primary_source_status=extracted_doc.primary_source_status,
+                published_at=extracted_doc.published_at or cand.published_at,
+                language=extracted_doc.language,
+                region=extracted_doc.region,
+                metadata={
+                    **cand.metadata,
+                    "discovery_snippet": cand.snippet,
+                    "content_provenance": extracted_doc.content_provenance,
+                },
             )
             await research_service.add_source(
                 session=session,
@@ -326,7 +379,7 @@ async def execute_coverage_driven_research(
                 already_seen_urls.add(norm_u)
             sources_added_this_round += 1
 
-        # Extract claims for sources added that don't have claims yet
+        # Extract claims for newly added sources
         all_sources_res = await session.execute(
             select(ResearchSource).where(ResearchSource.research_request_id == request_id)
         )
@@ -375,9 +428,15 @@ async def execute_coverage_driven_research(
                     curr_claims.append(claim_obj)
         await session.flush()
 
-        # Re-evaluate distinct coverage
-        if contract and curr_claims:
-            vtexts = [c.claim_text for c in curr_claims]
+        # Canonically evaluate claims for verified coverage derivation
+        verified_claims, _, _ = evaluate_canonical_claims(
+            eligible_sources=eligible_sources,
+            claims=curr_claims,
+        )
+
+        # Distinct coverage is strictly derived from VERIFIED claims only!
+        if contract and verified_claims:
+            vtexts = [c.claim_text for c in verified_claims]
             current_supported_families = extract_distinct_entities(
                 vtexts,
                 topic_title=topic_title,
@@ -411,6 +470,10 @@ async def execute_coverage_driven_research(
             stop_reason = ResearchCoverageStopReason.COVERAGE_FULFILLED
             break
 
+        if current_source_count + sources_added_this_round >= effective_max_sources:
+            stop_reason = ResearchCoverageStopReason.SEARCH_BUDGET_EXHAUSTED
+            break
+
         if sources_added_this_round == 0:
             stop_reason = ResearchCoverageStopReason.NO_NEW_RELEVANT_SOURCES
             break
@@ -431,7 +494,23 @@ async def execute_coverage_driven_research(
         authority_provider=authority_provider,
     )
 
-    # 6. Update ResearchRequest with Coverage Expansion Observability
+    # 6. STOP REASON / BRIEF CONSISTENCY GATE
+    # Impossible state: stop_reason == COVERAGE_FULFILLED while brief.outcome != SUFFICIENT
+    if (
+        brief.outcome != ResearchOutcome.SUFFICIENT
+        and stop_reason == ResearchCoverageStopReason.COVERAGE_FULFILLED
+    ):
+        logger.warning(
+            "Stop reason was COVERAGE_FULFILLED but canonical brief outcome was %s; failing closed to NUMERIC_COVERAGE_NOT_FULFILLED",
+            brief.outcome.value,
+            request_id=str(request_id),
+        )
+        if contract:
+            stop_reason = ResearchCoverageStopReason.NUMERIC_COVERAGE_NOT_FULFILLED
+        else:
+            stop_reason = ResearchCoverageStopReason.SEARCH_BUDGET_EXHAUSTED
+
+    # 7. Update ResearchRequest with Coverage Expansion Observability
     coverage_truth_dicts = [r.model_dump() for r in rounds_truth]
     req_meta["coverage_expansion"] = {
         "acquisition_mode": acquisition_mode,

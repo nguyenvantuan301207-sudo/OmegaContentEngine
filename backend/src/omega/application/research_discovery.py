@@ -10,7 +10,11 @@ from typing import Any, Protocol
 from urllib.parse import urlparse
 
 from omega.application.source_normalizer import normalize_url
-from omega.domain.research import DiscoveryCandidate, ResearchSourceType
+from omega.domain.research import (
+    DiscoveryCandidate,
+    ExtractedResearchDocument,
+    ResearchSourceType,
+)
 from omega.logging import get_logger
 
 logger = get_logger(service="omega-research-discovery")
@@ -24,6 +28,12 @@ class DiscoveryProviderError(Exception):
 
 class DiscoveryProviderUnavailableError(DiscoveryProviderError):
     """Raised when a discovery provider is unavailable, unconfigured, or failing."""
+
+    pass
+
+
+class ContentExtractionError(DiscoveryProviderError):
+    """Base exception for research document content extraction errors."""
 
     pass
 
@@ -45,6 +55,20 @@ class ResearchDiscoveryProvider(Protocol):
         ...
 
 
+class ResearchContentExtractor(Protocol):
+    """Protocol for extracting full document content from prospective sources."""
+
+    async def extract_document(
+        self,
+        candidate: DiscoveryCandidate,
+    ) -> ExtractedResearchDocument | None:
+        """Extract full document for a candidate.
+
+        Returns ExtractedResearchDocument on success, or None if extraction fails or is unavailable.
+        """
+        ...
+
+
 class NullDiscoveryProvider:
     """Default neutral discovery provider that returns no results."""
 
@@ -55,6 +79,16 @@ class NullDiscoveryProvider:
         filters: dict[str, Any] | None = None,
     ) -> list[DiscoveryCandidate]:
         return []
+
+
+class NullResearchContentExtractor:
+    """Default null content extractor that returns no extracted document."""
+
+    async def extract_document(
+        self,
+        candidate: DiscoveryCandidate,
+    ) -> ExtractedResearchDocument | None:
+        return None
 
 
 class InMemoryDiscoveryProvider:
@@ -103,6 +137,37 @@ class InMemoryDiscoveryProvider:
         return []
 
 
+class InMemoryResearchContentExtractor:
+    """Deterministic in-memory content extractor for testing and controlled simulations."""
+
+    def __init__(
+        self,
+        seeded_documents: dict[str, ExtractedResearchDocument] | list[ExtractedResearchDocument] | None = None,
+        fail: bool = False,
+        failure_message: str = "Configured extractor failure",
+    ) -> None:
+        self._seeded: dict[str, ExtractedResearchDocument] = {}
+        if isinstance(seeded_documents, dict):
+            for k, doc in seeded_documents.items():
+                self._seeded[normalize_url(k)] = doc
+        elif isinstance(seeded_documents, list):
+            for doc in seeded_documents:
+                self._seeded[normalize_url(doc.canonical_url)] = doc
+        self._fail = fail
+        self._failure_message = failure_message
+        self.call_history: list[str] = []
+
+    async def extract_document(
+        self,
+        candidate: DiscoveryCandidate,
+    ) -> ExtractedResearchDocument | None:
+        self.call_history.append(candidate.canonical_url)
+        if self._fail:
+            raise ContentExtractionError(self._failure_message)
+        norm_u = normalize_url(candidate.canonical_url)
+        return self._seeded.get(norm_u)
+
+
 def filter_and_deduplicate_candidates(
     candidates: list[DiscoveryCandidate],
     already_seen_urls: set[str],
@@ -113,7 +178,7 @@ def filter_and_deduplicate_candidates(
     Filters for:
     - Unsupported URL scheme (only http/https allowed)
     - Duplicate normalized URL across previous rounds or current batch
-    - Empty or low-information content excerpts (< 15 chars)
+    - Empty or low-information snippet (< 15 chars if present)
     - Short/invalid titles (< 3 chars)
 
     Returns:
@@ -147,8 +212,8 @@ def filter_and_deduplicate_candidates(
             reasons.append(f"LOW_INFORMATION_TITLE: '{c.title}'")
             continue
 
-        if len(c.content_excerpt.strip()) < 15:
-            reasons.append(f"LOW_INFORMATION_EXCERPT: '{c.canonical_url}'")
+        if c.snippet is not None and len(c.snippet.strip()) < 15:
+            reasons.append(f"LOW_INFORMATION_SNIPPET: '{c.canonical_url}'")
             continue
 
         seen_in_batch.add(norm_url)

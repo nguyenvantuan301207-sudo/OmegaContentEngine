@@ -1,9 +1,11 @@
-"""Unit tests for Automatic Research Coverage Expansion (P0.3).
+"""Unit tests for Automatic Research Coverage Expansion (P0.3 & P0.3a.1).
 
 Verifies discovery provider contracts, deterministic topic-grounded query planning,
-intent diversification, candidate deduplication, 2 -> 5 coverage expansion,
+intent diversification, candidate deduplication, ResearchContentExtractor boundary,
+discovery snippet cannot become evidence, 2 -> 5 verified coverage expansion,
 duplicate-family non-progress fail-closed, budget exhaustion, provider failure resilience,
-manual mode preservation, non-numeric topic support, and runtime truth observability.
+manual mode preservation, non-numeric topic support, stop-reason/brief consistency,
+deterministic claim extractor V2, and runtime truth observability.
 """
 
 from __future__ import annotations
@@ -14,10 +16,12 @@ from typing import Any
 import pytest
 
 from omega.application import research_service
+from omega.application.claim_extractor import extract_deterministic_claims_from_source
 from omega.application.research_coverage_service import execute_coverage_driven_research
 from omega.application.research_discovery import (
     DiscoveryProviderUnavailableError,
     InMemoryDiscoveryProvider,
+    InMemoryResearchContentExtractor,
     NullDiscoveryProvider,
     filter_and_deduplicate_candidates,
 )
@@ -28,6 +32,7 @@ from omega.domain.numeric_promise import (
 )
 from omega.domain.research import (
     DiscoveryCandidate,
+    ExtractedResearchDocument,
     PrimarySourceStatus,
     ResearchCoverageStopReason,
     ResearchOutcome,
@@ -40,6 +45,7 @@ from omega.infrastructure.models import (
     Channel,
     ResearchBrief,
     ResearchClaim,
+    ResearchConflict,
     ResearchRequest,
     ResearchSource,
     TopicCandidate,
@@ -98,6 +104,8 @@ class FakeAsyncSession:
             return FakeResult(list(self.claims))
         elif entity is ResearchBrief:
             return FakeResult(list(self.briefs))
+        elif entity is ResearchConflict:
+            return FakeResult(list(self.conflicts))
         return FakeResult([])
 
     def add(self, obj):
@@ -123,7 +131,11 @@ class FakeAsyncSession:
         pass
 
 
-def make_test_fixture(topic_title: str = CANONICAL_TOPIC, acquisition_mode: str = "AUTOMATIC_SEARCH"):
+def make_test_fixture(
+    topic_title: str = CANONICAL_TOPIC,
+    acquisition_mode: str = "AUTOMATIC_SEARCH",
+    max_sources: int = 15,
+):
     channel_id = uuid.uuid4()
     topic_id = uuid.uuid4()
     req_id = uuid.uuid4()
@@ -152,7 +164,7 @@ def make_test_fixture(topic_title: str = CANONICAL_TOPIC, acquisition_mode: str 
         status=ResearchRequestStatus.PENDING.value,
         language="en",
         region="US",
-        max_sources=15,
+        max_sources=max_sources,
         minimum_source_quality=50.0,
         minimum_claim_confidence=50.0,
         metadata_={
@@ -263,31 +275,31 @@ def test_filter_and_deduplicate_candidates():
         canonical_url="https://engineering.org/mechanisms-1",
         title="Mechanism Guide 1",
         publisher="Civil Engineering Org",
-        content_excerpt="Plastic shrinkage happens when evaporation exceeds bleed rate.",
+        snippet="Plastic shrinkage happens when evaporation exceeds bleed rate.",
     )
     cand_dup = DiscoveryCandidate(
         canonical_url="https://engineering.org/mechanisms-1",
         title="Duplicate Guide",
         publisher="Civil Engineering Org",
-        content_excerpt="Plastic shrinkage occurs early in curing.",
+        snippet="Plastic shrinkage occurs early in curing.",
     )
     cand_bad_scheme = DiscoveryCandidate(
         canonical_url="ftp://files.org/paper.pdf",
         title="FTP Document",
         publisher="FTP Host",
-        content_excerpt="Valid text but invalid scheme.",
+        snippet="Valid text but invalid scheme.",
     )
     cand_empty_excerpt = DiscoveryCandidate(
         canonical_url="https://engineering.org/empty",
         title="Empty Paper",
         publisher="Org",
-        content_excerpt="Too short",
+        snippet="Too short",
     )
     cand2 = DiscoveryCandidate(
         canonical_url="https://engineering.org/mechanisms-2",
         title="Mechanism Guide 2",
         publisher="ACI Journal",
-        content_excerpt="Drying shrinkage develops over months of internal water loss.",
+        snippet="Drying shrinkage develops over months of internal water loss.",
     )
 
     already_seen = {"https://engineering.org/already-seen"}
@@ -301,7 +313,7 @@ def test_filter_and_deduplicate_candidates():
     assert accepted[1].canonical_url == "https://engineering.org/mechanisms-2"
     assert any("DUPLICATE_URL" in r for r in reasons)
     assert any("UNSUPPORTED_SCHEME" in r for r in reasons)
-    assert any("LOW_INFORMATION_EXCERPT" in r for r in reasons)
+    assert any("LOW_INFORMATION_SNIPPET" in r for r in reasons)
 
 
 # ── 4. Discovery Provider Contracts ──
@@ -330,7 +342,7 @@ async def test_coverage_expansion_two_to_five_mechanisms():
     """Synthetic Scenario (Phase R):
     Starts with 2 initial verified mechanisms in DB.
     Discovery provider returns sources containing 3 more distinct mechanisms.
-    Orchestrator discovers sources, ingests them, verifies 5/5 mechanisms,
+    Orchestrator discovers sources, extracts documents, ingests them, verifies 5/5 mechanisms,
     and produces SUFFICIENT ResearchBrief outcome.
     """
     session, req, channel_id, topic_id = make_test_fixture()
@@ -369,31 +381,57 @@ async def test_coverage_expansion_two_to_five_mechanisms():
             canonical_url="https://materialsscience.org/thermal-cracking",
             title="Thermal Contraction Cracking in Mass Pours",
             publisher="Materials Science Press",
-            content_excerpt="Thermal contraction cracking happens during rapid cooling of massive concrete elements.",
+            snippet="Thermal contraction cracking snippet for mass concrete.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         ),
         DiscoveryCandidate(
             canonical_url="https://concretetech.org/asr-damage",
             title="Alkali-Silica Reaction Internal Deterioration",
             publisher="Concrete Technology Institute",
-            content_excerpt="Alkali-silica reaction (ASR) creates internal expansive gel causing map cracking.",
+            snippet="Alkali-silica reaction (ASR) snippet for concrete map cracking.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         ),
         DiscoveryCandidate(
             canonical_url="https://civileng.org/structural-overload",
             title="Structural Overloading and Shear Failure",
             publisher="Civil Engineering Org",
-            content_excerpt="Structural overloading produces flexural tensile cracks when design load capacity is exceeded.",
+            snippet="Structural overloading snippet for flexural tensile cracks.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        ),
+    ]
+
+    expansion_docs = [
+        ExtractedResearchDocument(
+            canonical_url="https://materialsscience.org/thermal-cracking",
+            title="Thermal Contraction Cracking in Mass Pours",
+            publisher="Materials Science Press",
+            extracted_content="Thermal contraction cracking happens during rapid cooling of massive concrete elements.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        ),
+        ExtractedResearchDocument(
+            canonical_url="https://concretetech.org/asr-damage",
+            title="Alkali-Silica Reaction Internal Deterioration",
+            publisher="Concrete Technology Institute",
+            extracted_content="Alkali-silica reaction (ASR) creates internal expansive gel causing map cracking.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        ),
+        ExtractedResearchDocument(
+            canonical_url="https://civileng.org/structural-overload",
+            title="Structural Overloading and Shear Failure",
+            publisher="Civil Engineering Org",
+            extracted_content="Structural overloading produces flexural tensile cracks when design load capacity is exceeded.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         ),
     ]
 
     provider = InMemoryDiscoveryProvider(seeded_candidates=expansion_candidates)
+    extractor = InMemoryResearchContentExtractor(seeded_documents=expansion_docs)
 
     result = await execute_coverage_driven_research(
         session=session,
         request_id=req.id,
         discovery_provider=provider,
+        content_extractor=extractor,
         authority_provider=authority,
         max_rounds=3,
     )
@@ -446,35 +484,52 @@ async def test_duplicate_family_non_progress_fails_closed():
     await research_service.add_source(session, req.id, src1, authority_provider=authority)
     await research_service.add_source(session, req.id, src2, authority_provider=authority)
 
-    # Provider returns sources with different URLs describing ONLY the same 2 mechanism families!
     duplicate_candidates = [
         DiscoveryCandidate(
             canonical_url="https://concretecontractor.com/article-1",
             title="More on Plastic Shrinkage in Hot Weather",
             publisher="Concrete Contractor Monthly",
-            content_excerpt="Hot weather plastic shrinkage causes surface tension cracks before curing finishes.",
+            snippet="Hot weather plastic shrinkage causes surface tension cracks.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         ),
         DiscoveryCandidate(
             canonical_url="https://concretecontractor.com/article-2",
             title="Understanding Long-Term Drying Shrinkage",
             publisher="Concrete Contractor Monthly",
-            content_excerpt="Restrained drying shrinkage produces tensile stress in hardened concrete members.",
+            snippet="Restrained drying shrinkage produces tensile stress in hardened concrete.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        ),
+    ]
+    duplicate_docs = [
+        ExtractedResearchDocument(
+            canonical_url="https://concretecontractor.com/article-1",
+            title="More on Plastic Shrinkage in Hot Weather",
+            publisher="Concrete Contractor Monthly",
+            extracted_content="Hot weather plastic shrinkage causes surface tension cracks before curing finishes.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        ),
+        ExtractedResearchDocument(
+            canonical_url="https://concretecontractor.com/article-2",
+            title="Understanding Long-Term Drying Shrinkage",
+            publisher="Concrete Contractor Monthly",
+            extracted_content="Restrained drying shrinkage produces tensile stress in hardened concrete members.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         ),
     ]
 
     provider = InMemoryDiscoveryProvider(seeded_candidates=duplicate_candidates)
+    extractor = InMemoryResearchContentExtractor(seeded_documents=duplicate_docs)
 
     result = await execute_coverage_driven_research(
         session=session,
         request_id=req.id,
         discovery_provider=provider,
+        content_extractor=extractor,
         authority_provider=authority,
         max_rounds=2,
     )
 
-    # Distinct coverage remains 2 despite new claims!
+    # Distinct coverage remains 2 despite new sources!
     assert result["final_supported_count"] == 2
     # Fails closed: outcome must NOT be SUFFICIENT
     assert result["brief"].outcome != ResearchOutcome.SUFFICIENT
@@ -515,22 +570,32 @@ async def test_budget_exhaustion_stops_boundedly():
     await research_service.add_source(session, req.id, src1, authority_provider=authority)
     await research_service.add_source(session, req.id, src2, authority_provider=authority)
 
-    # Only 1 additional mechanism available (total = 3, promised = 5)
     one_additional = [
         DiscoveryCandidate(
             canonical_url="https://thermalpress.org/thermal-cracking",
             title="Thermal Cracking",
             publisher="Thermal Press",
-            content_excerpt="Thermal contraction cracking occurs during cooling of thick slabs.",
+            snippet="Thermal contraction cracking occurs during cooling of thick slabs.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        )
+    ]
+    one_doc = [
+        ExtractedResearchDocument(
+            canonical_url="https://thermalpress.org/thermal-cracking",
+            title="Thermal Cracking",
+            publisher="Thermal Press",
+            extracted_content="Thermal contraction cracking occurs during cooling of thick slabs.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         )
     ]
     provider = InMemoryDiscoveryProvider(seeded_candidates=one_additional)
+    extractor = InMemoryResearchContentExtractor(seeded_documents=one_doc)
 
     result = await execute_coverage_driven_research(
         session=session,
         request_id=req.id,
         discovery_provider=provider,
+        content_extractor=extractor,
         authority_provider=authority,
         max_rounds=2,
     )
@@ -539,6 +604,7 @@ async def test_budget_exhaustion_stops_boundedly():
     assert result["stop_reason"] in (
         ResearchCoverageStopReason.SEARCH_BUDGET_EXHAUSTED.value,
         ResearchCoverageStopReason.NO_NEW_RELEVANT_SOURCES.value,
+        ResearchCoverageStopReason.NUMERIC_COVERAGE_NOT_FULFILLED.value,
     )
     assert result["brief"].outcome != ResearchOutcome.SUFFICIENT
 
@@ -576,7 +642,7 @@ async def test_manual_mode_preservation():
             canonical_url="https://some-site.com/test",
             title="Some Title",
             publisher="Publisher",
-            content_excerpt="Some excerpt about concrete.",
+            snippet="Some excerpt about concrete.",
         )
     ])
 
@@ -608,31 +674,56 @@ async def test_non_numeric_topic_quality_pass():
             canonical_url="https://physicsjournal.org/resonance-basics",
             title="Foundations of Mechanical Resonance",
             publisher="Physics Journal",
-            content_excerpt="Mechanical resonance occurs when a physical system drives another system at harmonic frequency.",
+            snippet="Resonance occurs when driving frequency matches natural frequency.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         ),
         DiscoveryCandidate(
             canonical_url="https://acoustics.org/damping-effects",
             title="Damping Effects in Oscillating Systems",
             publisher="Acoustics Institute",
-            content_excerpt="Damping reduces resonant peak amplitude and prevents structural catastrophic failure.",
+            snippet="Damping reduces resonant peak amplitude.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         ),
         DiscoveryCandidate(
             canonical_url="https://physicsjournal.org/dynamic-amplification",
             title="Dynamic Amplification Factor in Resonance",
             publisher="Physics Journal",
-            content_excerpt="Dynamic amplification factors reach maximum amplitude when driving frequency equals natural frequency.",
+            snippet="Amplification peaks at resonance frequency.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        ),
+    ]
+    docs = [
+        ExtractedResearchDocument(
+            canonical_url="https://physicsjournal.org/resonance-basics",
+            title="Foundations of Mechanical Resonance",
+            publisher="Physics Journal",
+            extracted_content="Mechanical resonance occurs when a physical system drives another system at harmonic frequency.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        ),
+        ExtractedResearchDocument(
+            canonical_url="https://acoustics.org/damping-effects",
+            title="Damping Effects in Oscillating Systems",
+            publisher="Acoustics Institute",
+            extracted_content="Damping reduces resonant peak amplitude and prevents structural catastrophic failure.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        ),
+        ExtractedResearchDocument(
+            canonical_url="https://physicsjournal.org/dynamic-amplification",
+            title="Dynamic Amplification Factor in Resonance",
+            publisher="Physics Journal",
+            extracted_content="Dynamic amplification factors reach maximum amplitude when driving frequency equals natural frequency.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         ),
     ]
 
     provider = InMemoryDiscoveryProvider(seeded_candidates=candidates)
+    extractor = InMemoryResearchContentExtractor(seeded_documents=docs)
 
     result = await execute_coverage_driven_research(
         session=session,
         request_id=req.id,
         discovery_provider=provider,
+        content_extractor=extractor,
         authority_provider=authority,
     )
 
@@ -654,16 +745,27 @@ async def test_idempotent_retry_and_observability():
             canonical_url="https://aci.org/mechanism-1",
             title="Mechanism 1",
             publisher="ACI Journal",
-            content_excerpt="Plastic shrinkage happens during early curing of flatwork slabs.",
+            snippet="Plastic shrinkage happens during early curing.",
             primary_source_status=PrimarySourceStatus.CONFIRMED,
         ),
     ]
+    docs = [
+        ExtractedResearchDocument(
+            canonical_url="https://aci.org/mechanism-1",
+            title="Mechanism 1",
+            publisher="ACI Journal",
+            extracted_content="Plastic shrinkage happens during early curing of flatwork slabs.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        )
+    ]
     provider = InMemoryDiscoveryProvider(seeded_candidates=candidates)
+    extractor = InMemoryResearchContentExtractor(seeded_documents=docs)
 
     res1 = await execute_coverage_driven_research(
         session=session,
         request_id=req.id,
         discovery_provider=provider,
+        content_extractor=extractor,
         authority_provider=authority,
         max_rounds=1,
     )
@@ -677,3 +779,400 @@ async def test_idempotent_retry_and_observability():
     # Check request metadata persistence
     assert "coverage_expansion" in req.metadata_
     assert req.metadata_["coverage_expansion"]["stop_reason"] is not None
+
+
+# ── 12. Phase B Regression: Discovery Snippet Cannot Become Evidence ──
+
+
+@pytest.mark.asyncio
+async def test_discovery_snippet_cannot_become_evidence():
+    """Regression test proving SEARCH_SNIPPET_CAN_BECOME_EVIDENCE = NO:
+    A discovery snippet explicitly claims:
+        'Thermal contraction is a major concrete cracking mechanism'
+    but the extracted source document does NOT support that proposition.
+
+    Required result:
+    - no verified thermal-contraction claim may be created from the snippet
+    - snippet must not appear as ClaimEvidence authority
+    - numeric coverage must not increase because of the snippet
+    """
+    session, req, channel_id, topic_id = make_test_fixture()
+
+    authority = ManualAuthorityProvider({
+        "aci journal": 90.0,
+        "structural engineering review": 90.0,
+        "curing guide publisher": 85.0,
+    })
+
+    # Seed 2 initial mechanisms (Plastic Shrinkage and Drying Shrinkage)
+    src1 = ResearchSourceCreate(
+        source_type=ResearchSourceType.MANUAL,
+        title="Plastic Shrinkage Guide",
+        publisher="ACI Journal",
+        url="https://aci.org/plastic-shrinkage-p03a1",
+        content_excerpt="Plastic shrinkage cracks occur when rapid evaporation takes place on freshly poured concrete.",
+        primary_source_status=PrimarySourceStatus.CONFIRMED,
+    )
+    src2 = ResearchSourceCreate(
+        source_type=ResearchSourceType.MANUAL,
+        title="Drying Shrinkage Review",
+        publisher="Structural Engineering Review",
+        url="https://structeng.org/drying-shrinkage-p03a1",
+        content_excerpt="Drying shrinkage manifests as internal moisture leaves hardened concrete paste over time.",
+        primary_source_status=PrimarySourceStatus.CONFIRMED,
+    )
+    await research_service.add_source(session, req.id, src1, authority_provider=authority)
+    await research_service.add_source(session, req.id, src2, authority_provider=authority)
+
+    # Snippet makes a concrete claim, but the extracted document DOES NOT support it!
+    cand = DiscoveryCandidate(
+        canonical_url="https://curingguide.org/curing-protocols",
+        title="Standard Field Curing Protocols",
+        publisher="Curing Guide Publisher",
+        snippet="Thermal contraction is a major concrete cracking mechanism caused by steep thermal gradients.",
+        primary_source_status=PrimarySourceStatus.CONFIRMED,
+    )
+    doc = ExtractedResearchDocument(
+        canonical_url="https://curingguide.org/curing-protocols",
+        title="Standard Field Curing Protocols",
+        publisher="Curing Guide Publisher",
+        # Document text only discusses curing procedures for plastic shrinkage, nothing about thermal cracking mechanism!
+        extracted_content="Field curing procedures must maintain ambient moisture to prevent plastic shrinkage cracking in fresh concrete.",
+        primary_source_status=PrimarySourceStatus.CONFIRMED,
+    )
+
+    provider = InMemoryDiscoveryProvider(seeded_candidates=[cand])
+    extractor = InMemoryResearchContentExtractor(seeded_documents=[doc])
+
+    result = await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        content_extractor=extractor,
+        authority_provider=authority,
+        max_rounds=1,
+    )
+
+    # 1. Snippet MUST NOT appear in ResearchSource.content_excerpt
+    sources = session.sources
+    ingested_web_src = next(s for s in sources if s.url == "https://curingguide.org/curing-protocols")
+    assert "thermal contraction" not in ingested_web_src.content_excerpt.lower()
+    assert ingested_web_src.content_excerpt == doc.extracted_content
+
+    # 2. Snippet MUST NOT appear as ClaimEvidence authority
+    claims = session.claims
+    all_evidence = [e for c in claims for e in (c.evidence or [])]
+    for ev in all_evidence:
+        assert "thermal contraction is a major concrete cracking mechanism" not in ev.excerpt.lower()
+
+    # 3. Numeric coverage MUST NOT increase because of the snippet!
+    final_families = result["final_supported_families"]
+    assert "thermal" not in " ".join(final_families).lower()
+    assert result["final_supported_count"] == 2  # Remains 2, does NOT become 3!
+
+
+# ── 13. Phase C Regression: 5 Raw Families / 3 Verified Coverage Hardening ──
+
+
+@pytest.mark.asyncio
+async def test_five_raw_families_three_verified_coverage_fails_closed():
+    """Regression test proving:
+    - 5 distinct raw claim families exist
+    - only 3 pass canonical verification
+    - promised_count = 5
+
+    Required:
+        VERIFIED_SUPPORTED_COUNT = 3
+        COVERAGE_FULFILLED = NO
+        additional research continues if budget remains (or stops unfulfilled if exhausted)
+    """
+    session, req, channel_id, topic_id = make_test_fixture()
+
+    authority = ManualAuthorityProvider({
+        "materials press": 90.0,
+    })
+
+    # Ingest 3 verified FACT claims and 2 unverified CAUSAL claims
+    # (In OMEGA scoring, ClaimType.CAUSAL claims are not verified as absolute facts)
+    doc_text = """
+Plastic shrinkage cracking occurs when early evaporation rate exceeds surface water bleeding.
+Drying shrinkage develops over months as hardened paste steadily loses internal moisture.
+Thermal contraction cracking takes place when massive elements cool rapidly after hydration.
+Alkali-silica reaction causes expansive gel swelling under uncertain chemical exposure conditions.
+Structural overload causes flexural tension failure when applied load exceeds design limit.
+"""
+    # Create claims directly in source metadata
+    structured_claims = [
+        {"text": "Plastic shrinkage cracking occurs when early evaporation rate exceeds surface water bleeding.", "type": "FACT", "strength_score": 90.0},
+        {"text": "Drying shrinkage develops over months as hardened paste steadily loses internal moisture.", "type": "FACT", "strength_score": 90.0},
+        {"text": "Thermal contraction cracking takes place when massive elements cool rapidly after hydration.", "type": "FACT", "strength_score": 90.0},
+        # These 2 are CAUSAL -> evaluate_claim_confidence marks is_verified = False!
+        {"text": "Alkali-silica reaction causes expansive gel swelling under uncertain chemical exposure conditions.", "type": "CAUSAL", "strength_score": 80.0},
+        {"text": "Structural overload causes flexural tension failure when applied load exceeds design limit.", "type": "CAUSAL", "strength_score": 80.0},
+    ]
+
+    src = ResearchSourceCreate(
+        source_type=ResearchSourceType.MANUAL,
+        title="Comprehensive Crack Mechanisms Overview",
+        publisher="Materials Press",
+        url="https://materialspress.org/crack-mechanisms",
+        content_excerpt=doc_text,
+        primary_source_status=PrimarySourceStatus.CONFIRMED,
+        metadata={"claims": structured_claims},
+    )
+    await research_service.add_source(session, req.id, src, authority_provider=authority)
+
+    # Empty discovery provider (no additional sources)
+    provider = NullDiscoveryProvider()
+
+    result = await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        authority_provider=authority,
+        max_rounds=1,
+    )
+
+    # 5 raw claims exist, but only 3 pass canonical verification!
+    assert len(session.claims) == 5
+    verified_claims = [c for c in session.claims if c.is_verified]
+    assert len(verified_claims) == 3
+
+    # Coverage MUST be 3, NOT 5!
+    assert result["final_supported_count"] == 3
+    assert result["stop_reason"] != ResearchCoverageStopReason.COVERAGE_FULFILLED.value
+    assert result["brief"].outcome != ResearchOutcome.SUFFICIENT
+
+
+# ── 14. Phase C Positive Regression: 5 Verified Distinct Families Fulfill Coverage ──
+
+
+@pytest.mark.asyncio
+async def test_five_raw_five_verified_distinct_families_fulfills_coverage():
+    """Verify that when 5 raw claims exist and ALL 5 pass canonical verification,
+    coverage is genuinely fulfilled.
+    """
+    session, req, channel_id, topic_id = make_test_fixture()
+    authority = ManualAuthorityProvider({
+        "materials press": 90.0,
+        "concrete science review": 90.0,
+    })
+
+    claims_part1 = [
+        {"text": "Plastic shrinkage cracking occurs when early evaporation exceeds bleeding.", "type": "FACT", "strength_score": 90.0},
+        {"text": "Drying shrinkage develops over months as hardened paste loses internal moisture.", "type": "FACT", "strength_score": 90.0},
+        {"text": "Thermal contraction cracking takes place when massive elements cool unevenly.", "type": "FACT", "strength_score": 90.0},
+    ]
+    claims_part2 = [
+        {"text": "Alkali-silica reaction produces internal expansive gel resulting in map cracking.", "type": "FACT", "strength_score": 90.0},
+        {"text": "Structural overloading produces flexural tensile cracks when design load is exceeded.", "type": "FACT", "strength_score": 90.0},
+    ]
+
+    src1 = ResearchSourceCreate(
+        source_type=ResearchSourceType.MANUAL,
+        title="Three Initial Concrete Mechanisms",
+        publisher="Materials Press",
+        url="https://materialspress.org/three-mechanisms",
+        content_excerpt="Comprehensive review of three distinct cracking mechanisms.",
+        primary_source_status=PrimarySourceStatus.CONFIRMED,
+        metadata={"claims": claims_part1},
+    )
+    src2 = ResearchSourceCreate(
+        source_type=ResearchSourceType.MANUAL,
+        title="Two Additional Concrete Mechanisms",
+        publisher="Concrete Science Review",
+        url="https://concretescience.org/two-mechanisms",
+        content_excerpt="Comprehensive review of chemical and structural cracking mechanisms.",
+        primary_source_status=PrimarySourceStatus.CONFIRMED,
+        metadata={"claims": claims_part2},
+    )
+    await research_service.add_source(session, req.id, src1, authority_provider=authority)
+    await research_service.add_source(session, req.id, src2, authority_provider=authority)
+
+    provider = NullDiscoveryProvider()
+    result = await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        authority_provider=authority,
+        max_rounds=1,
+    )
+
+    assert result["final_supported_count"] == 5
+    assert result["stop_reason"] == ResearchCoverageStopReason.COVERAGE_FULFILLED.value
+    assert result["brief"].outcome == ResearchOutcome.SUFFICIENT
+
+
+# ── 15. Phase D Regression: Stop Reason / Brief Consistency Gate ──
+
+
+@pytest.mark.asyncio
+async def test_stop_reason_brief_consistency_enforced():
+    """Verify impossible final state is prevented:
+    stop_reason == COVERAGE_FULFILLED while brief.outcome != SUFFICIENT.
+    If brief.outcome is not SUFFICIENT, stop_reason MUST fail closed to a non-fulfilled reason.
+    """
+    session, req, channel_id, topic_id = make_test_fixture()
+    authority = ManualAuthorityProvider({"low quality press": 40.0})  # Below minimum_source_quality (50.0)!
+
+    src = ResearchSourceCreate(
+        source_type=ResearchSourceType.MANUAL,
+        title="Low Quality Source",
+        publisher="Low Quality Press",
+        url="https://lowqual.org/article",
+        content_excerpt="Some concrete cracking information from an unverified source.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+    )
+    await research_service.add_source(session, req.id, src, authority_provider=authority)
+
+    result = await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=NullDiscoveryProvider(),
+        authority_provider=authority,
+    )
+
+    # Inconsistent state (COVERAGE_FULFILLED + PARTIAL/INSUFFICIENT) must be blocked
+    assert result["brief"].outcome != ResearchOutcome.SUFFICIENT
+    assert result["stop_reason"] != ResearchCoverageStopReason.COVERAGE_FULFILLED.value
+
+
+# ── 16. Phase E Regression: Deterministic Claim Extractor V2 Multi-Sentence Prose ──
+
+
+def test_deterministic_claim_extraction_v2_multi_sentence_prose():
+    """Mandatory positive regression for V2 claim extractor:
+    One extracted technical document contains three separate explanatory mechanism
+    sentences in different paragraphs.
+    Required:
+    - multiple useful claims can be extracted
+    - every claim has an exact excerpt from the document
+    - no invented proposition exists
+    """
+    doc_prose = """
+Plastic shrinkage cracking occurs when early surface evaporation rate exceeds bleeding rate.
+
+Drying shrinkage develops over months as hardened concrete paste steadily loses absorbed moisture.
+
+Thermal contraction cracking takes place when massive structural elements cool unevenly from peak hydration temperatures.
+"""
+    claims = extract_deterministic_claims_from_source(
+        source_title="Cracking Mechanisms in Concrete Structures",
+        source_excerpt=doc_prose,
+        metadata={},
+        max_claims_per_source=5,
+    )
+
+    assert len(claims) == 3
+
+    # Exact excerpt provenance: every claim excerpt must exist verbatim in doc_prose!
+    for c in claims:
+        assert c["excerpt"] in doc_prose
+        assert len(c["claim_text"]) >= 25
+        assert c["strength_score"] >= 70.0
+
+    # Ensure no invented propositions exist
+    texts = [c["claim_text"] for c in claims]
+    assert any("plastic shrinkage" in t.lower() for t in texts)
+    assert any("drying shrinkage" in t.lower() for t in texts)
+    assert any("thermal contraction" in t.lower() for t in texts)
+
+
+# ── 17. Phase E Negative Regression: Boilerplate Rejection ──
+
+
+def test_deterministic_claim_extraction_v2_boilerplate_rejection():
+    """Mandatory negative regression:
+    Navigation, cookie, menu, and legal boilerplate must not become a technical claim.
+    """
+    boilerplate_text = """
+Accept all cookies to enhance your browsing experience on our civil engineering portal.
+
+Copyright 2026 Concrete World Publishing, All Rights Reserved.
+
+Privacy Policy and Terms of Service apply to all registered members.
+
+Subscribe to our daily newsletter for industry news and structural updates.
+
+Click here to read more articles or skip to main content navigation.
+"""
+    claims = extract_deterministic_claims_from_source(
+        source_title="Boilerplate Page",
+        source_excerpt=boilerplate_text,
+        metadata={},
+    )
+    # Zero claims extracted from boilerplate!
+    assert len(claims) == 0
+
+
+# ── 18. Phase F Regression: Strict Source Budgets & Partial Capacity Bound ──
+
+
+@pytest.mark.asyncio
+async def test_strict_source_budget_respects_both_limits_and_partial_round():
+    """Verify strict source budget hard bounds:
+    1. Effective ceiling respects min(req.max_sources, max_total_acquired_sources).
+    2. If request currently has 9 sources and effective maximum is 10,
+       a discovery round may ingest at most 1 additional source (partial capacity).
+    3. Never accept a full round batch and overshoot the ceiling.
+    """
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=10)
+
+    authority = ManualAuthorityProvider({"aci journal": 90.0, "round publisher": 85.0})
+
+    # Seed 9 existing sources into the session
+    for i in range(1, 10):
+        src = ResearchSourceCreate(
+            source_type=ResearchSourceType.MANUAL,
+            title=f"Existing Source {i}",
+            publisher="ACI Journal",
+            url=f"https://aci.org/source-{i}",
+            content_excerpt=f"Valid technical prose for pre-existing source number {i} in the database.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        )
+        await research_service.add_source(session, req.id, src, authority_provider=authority)
+
+    assert len(session.sources) == 9
+
+    # Provider returns 5 candidates for this round
+    five_candidates = [
+        DiscoveryCandidate(
+            canonical_url=f"https://roundpub.org/new-source-{i}",
+            title=f"New Source {i}",
+            publisher="Round Publisher",
+            snippet=f"Snippet for candidate number {i} in discovery round.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        )
+        for i in range(1, 6)
+    ]
+    five_docs = [
+        ExtractedResearchDocument(
+            canonical_url=f"https://roundpub.org/new-source-{i}",
+            title=f"New Source {i}",
+            publisher="Round Publisher",
+            extracted_content=f"Extracted content for prospective source number {i} in round.",
+            primary_source_status=PrimarySourceStatus.CONFIRMED,
+        )
+        for i in range(1, 6)
+    ]
+
+    provider = InMemoryDiscoveryProvider(seeded_candidates=five_candidates)
+    extractor = InMemoryResearchContentExtractor(seeded_documents=five_docs)
+
+    result = await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=provider,
+        content_extractor=extractor,
+        authority_provider=authority,
+        max_accepted_sources_per_round=5,
+        max_total_acquired_sources=15,  # Stricter is req.max_sources = 10!
+        max_rounds=2,
+    )
+
+    # Exactly 1 additional source could be accepted (9 + 1 = 10)
+    assert len(session.sources) == 10
+    assert result["stop_reason"] in (
+        ResearchCoverageStopReason.SEARCH_BUDGET_EXHAUSTED.value,
+        ResearchCoverageStopReason.NUMERIC_COVERAGE_NOT_FULFILLED.value,
+    )
