@@ -79,3 +79,33 @@ export async function proceedToProductionHandoff({
     scriptVersionId: currentScript.id,
   };
 }
+
+export async function createFreshProductionHandoff({
+  channelId,
+  scripts,
+  currentQaStatus,
+  createRequest,
+}: {
+  channelId: string;
+  scripts: ScriptVersionSummary[];
+  currentQaStatus?: ScriptQAStatus | string | null;
+  createRequest: (
+    channelId: string,
+    payload: { script_version_id: string },
+  ) => Promise<ProductionRequest>;
+}): Promise<ProductionHandoffResult> {
+  const currentScript = resolveCurrentScript(scripts);
+  if (!currentScript) {
+    throw new Error("Exactly one current script version is required to create a new production request.");
+  }
+  const effectiveQaStatus = currentQaStatus ?? currentScript.qa_status;
+  if (!isScriptEligibleForProduction(effectiveQaStatus)) {
+    throw new Error(
+      `Script QA status is ${effectiveQaStatus}. Only scripts with PASSED or PASSED_WITH_WARNINGS status can proceed to production.`,
+    );
+  }
+  const created = await createRequest(channelId, {
+    script_version_id: currentScript.id,
+  });
+  return { requestId: created.id, scriptVersionId: currentScript.id, reused: false };
+}

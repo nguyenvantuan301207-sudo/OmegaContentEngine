@@ -72,6 +72,7 @@ import {
 
 import { NarrativePlanPanel } from "@/components/workflow/NarrativePlanPanel";
 import {
+  createFreshProductionHandoff,
   isScriptEligibleForProduction,
   proceedToProductionHandoff,
   resolveCurrentScript,
@@ -106,6 +107,10 @@ export default function ContentEnginePage({
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [busy, setBusy] = useState(false);
   const [proceedingProduction, setProceedingProduction] = useState(false);
+  const [creatingFreshProduction, setCreatingFreshProduction] = useState(false);
+  const [freshProductionOpen, setFreshProductionOpen] = useState(false);
+  const productionActionRef = useRef(false);
+  const freshConfirmationRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -363,8 +368,50 @@ export default function ContentEnginePage({
       ? qa.status
       : currentScript?.qa_status;
   const isQaEligible = isScriptEligibleForProduction(effectiveQaStatus);
+  const productionActionPending = proceedingProduction || creatingFreshProduction;
+  const productionActionDisabled = busy || archived || productionActionPending ||
+    loading || detailsLoading || selected?.status !== "SUCCEEDED" ||
+    !currentScript || !isQaEligible;
+
+  function openFreshProductionConfirmation() {
+    if (productionActionRef.current || productionActionDisabled) return;
+    freshConfirmationRef.current = true;
+    setFreshProductionOpen(true);
+  }
+
+  function cancelFreshProductionConfirmation() {
+    if (productionActionRef.current) return;
+    freshConfirmationRef.current = false;
+    setFreshProductionOpen(false);
+  }
+
+  async function handleCreateFreshProduction() {
+    if (!freshConfirmationRef.current || productionActionRef.current || productionActionDisabled) return;
+    // Consume confirmation synchronously, including before React updates state.
+    freshConfirmationRef.current = false;
+    productionActionRef.current = true;
+    setCreatingFreshProduction(true);
+    setError(null);
+    try {
+      await createFreshProductionHandoff({
+        channelId,
+        scripts,
+        currentQaStatus: effectiveQaStatus,
+        createRequest: createProductionRequest,
+      });
+      void setSelectedChannelId(channelId);
+      router.push("/production");
+    } catch (reason: unknown) {
+      setError(reason instanceof Error ? reason.message : "Failed to create new production request.");
+    } finally {
+      setFreshProductionOpen(false);
+      setCreatingFreshProduction(false);
+      productionActionRef.current = false;
+    }
+  }
 
   async function handleProceedToProduction() {
+    if (productionActionRef.current || productionActionDisabled) return;
     if (!currentScript) {
       setError("A current script version is required to proceed to production.");
       return;
@@ -376,6 +423,7 @@ export default function ContentEnginePage({
       return;
     }
 
+    productionActionRef.current = true;
     setProceedingProduction(true);
     setError(null);
     try {
@@ -396,6 +444,7 @@ export default function ContentEnginePage({
       );
     } finally {
       setProceedingProduction(false);
+      productionActionRef.current = false;
     }
   }
 
@@ -552,7 +601,7 @@ export default function ContentEnginePage({
                           <button
                             className="btn btn-secondary btn-sm"
                             type="button"
-                            disabled={busy || archived || proceedingProduction}
+                            disabled={busy || archived || productionActionPending}
                             onClick={() => setConfirmAction("regenerate")}
                           >
                             Regenerate
@@ -560,13 +609,7 @@ export default function ContentEnginePage({
                           <button
                             className="btn btn-primary btn-sm"
                             type="button"
-                            disabled={
-                              busy ||
-                              archived ||
-                              proceedingProduction ||
-                              !currentScript ||
-                              !isQaEligible
-                            }
+                            disabled={productionActionDisabled}
                             onClick={() => void handleProceedToProduction()}
                             title={
                               !currentScript
@@ -579,6 +622,14 @@ export default function ContentEnginePage({
                             {proceedingProduction
                               ? "Preparing production…"
                               : "Proceed to production"}
+                          </button>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            type="button"
+                            disabled={productionActionDisabled}
+                            onClick={openFreshProductionConfirmation}
+                          >
+                            New production request
                           </button>
                         </>
                       ) : null}
@@ -782,6 +833,15 @@ export default function ContentEnginePage({
           </FormField>
         </form>
       </Dialog>
+      <ConfirmDialog
+        open={freshProductionOpen}
+        title="Create new production request"
+        description="Create a separate production from the current approved script? Existing production requests, render jobs, and artifacts will remain unchanged."
+        confirmLabel="Create new production"
+        busy={productionActionDisabled}
+        onCancel={cancelFreshProductionConfirmation}
+        onConfirm={() => void handleCreateFreshProduction()}
+      />
       <ConfirmDialog
         open={confirmAction === "regenerate"}
         title="Regenerate script"

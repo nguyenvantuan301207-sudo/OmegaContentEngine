@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import ts from "typescript";
 import {
   canFinalizeSelection, canMaterializeCampaign, canStartCampaignMission,
   isCanonicalSelectionCandidateEligible, isSelectionRunCampaignEligible, isValidSelectionCount,
@@ -23,6 +24,7 @@ import type {
   ScriptVersionSummary,
 } from "../src/lib/api.ts";
 import {
+  createFreshProductionHandoff,
   isScriptEligibleForProduction,
   proceedToProductionHandoff,
   resolveCurrentScript,
@@ -877,4 +879,183 @@ test("Content detail loading resolves unique current and clears ambiguous detail
   assert.match(details, /Exactly one current ScriptVersion is required/);
   assert.match(details, /setScript\(null\)/);
   assert.match(details, /setQa\(null\)/);
+});
+
+const freshCurrent: ScriptVersionSummary = {
+  id: "script-v2-current", content_request_id: "content", version: 2,
+  is_current: true, title: "Current", estimated_word_count: 20,
+  estimated_duration_seconds: 10, qa_status: "PASSED", created_at: "2026-10-02T00:00:00Z",
+};
+const freshHistorical: ScriptVersionSummary = {
+  ...freshCurrent, id: "script-v1-historical", version: 1, is_current: false,
+};
+const priorSuccess: ProductionRequest = {
+  id: "prior-success", channel_id: "channel", script_version_id: freshCurrent.id,
+  content_request_id: "content", channel_dna_revision_id: "dna", mode: "INTERACTIVE",
+  status: "SUCCEEDED", target_width: 1920, target_height: 1080, fps: 30,
+  video_codec: "h264", audio_codec: "aac", container_format: "mp4",
+  created_at: "2026-10-03T00:00:00Z",
+};
+
+test("normal proceed reuses same-script SUCCEEDED production with zero creates", async () => {
+  let creates = 0;
+  const result = await proceedToProductionHandoff({
+    channelId: "channel", scripts: [freshHistorical, freshCurrent],
+    listRequests: async () => [priorSuccess],
+    createRequest: async () => { creates++; throw new Error("must reuse"); },
+  });
+  assert.deepEqual(result, { requestId: priorSuccess.id, scriptVersionId: freshCurrent.id, reused: true });
+  assert.equal(creates, 0);
+});
+
+test("fresh handoff creates once from exact current v2 without reading or reusing prior success", async () => {
+  const calls: Array<{ channelId: string; payload: { script_version_id: string } }> = [];
+  const result = await createFreshProductionHandoff({
+    channelId: "channel", scripts: [freshHistorical, freshCurrent],
+    createRequest: async (channelId, payload) => {
+      calls.push({ channelId, payload });
+      return { ...priorSuccess, id: "fresh-request", status: "DRAFT" };
+    },
+  });
+  assert.deepEqual(calls, [{ channelId: "channel", payload: { script_version_id: freshCurrent.id } }]);
+  assert.deepEqual(result, { requestId: "fresh-request", scriptVersionId: freshCurrent.id, reused: false });
+  assert.notEqual(result.requestId, priorSuccess.id);
+  const source = readFileSync(new URL("../src/lib/content-production-handoff.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(source.slice(source.indexOf("export async function createFreshProductionHandoff")), /listRequests|existingRequests/);
+});
+
+test("fresh handoff rejects historical-only, zero and multiple current scripts before creating", async () => {
+  for (const scripts of [[], [freshHistorical], [freshCurrent, { ...freshCurrent, id: "ambiguous" }]]) {
+    let creates = 0;
+    await assert.rejects(createFreshProductionHandoff({
+      channelId: "channel", scripts,
+      createRequest: async () => { creates++; return priorSuccess; },
+    }), /Exactly one current/);
+    assert.equal(creates, 0);
+  }
+});
+
+test("fresh handoff accepts only approved effective QA, including overrides and null fallback", async () => {
+  for (const status of ["PASSED", "PASSED_WITH_WARNINGS", "BLOCKED", "PENDING", "FAILED", "UNKNOWN"]) {
+    for (const override of [false, true]) {
+      let creates = 0;
+      const promise = createFreshProductionHandoff({
+        channelId: "channel",
+        scripts: [{ ...freshCurrent, qa_status: override ? "PASSED" : status as ScriptVersionSummary["qa_status"] }],
+        currentQaStatus: override ? status : null,
+        createRequest: async () => { creates++; return { ...priorSuccess, id: "fresh" }; },
+      });
+      if (status === "PASSED" || status === "PASSED_WITH_WARNINGS") {
+        assert.equal((await promise).reused, false);
+        assert.equal(creates, 1);
+      } else {
+        await assert.rejects(promise, /Script QA status/);
+        assert.equal(creates, 0);
+      }
+    }
+  }
+});
+
+// Execute the actual page event handlers with controlled API promises. This also
+// exercises callbacks from the same render before React can update disabled state.
+function freshPageHarness(createRequest: () => Promise<ProductionRequest>, disabled = false) {
+  const source = readFileSync(new URL("../src/app/channels/[id]/content/page.tsx", import.meta.url), "utf8");
+  const tree = ts.createSourceFile("page.tsx", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const names = ["openFreshProductionConfirmation", "cancelFreshProductionConfirmation", "handleCreateFreshProduction", "handleProceedToProduction"];
+  const functions: string[] = [];
+  function visit(node: ts.Node) {
+    if (ts.isFunctionDeclaration(node) && node.name && names.includes(node.name.text)) functions.push(node.getText(tree));
+    ts.forEachChild(node, visit);
+  }
+  visit(tree);
+  assert.equal(functions.length, names.length);
+  const state = { open: false, pending: false, error: null as string | null, channel: "", routes: [] as string[], normalCalls: 0 };
+  const context = {
+    productionActionRef: { current: false }, freshConfirmationRef: { current: false },
+    productionActionDisabled: disabled, currentScript: freshCurrent, isQaEligible: true,
+    channelId: "channel", scripts: [freshHistorical, freshCurrent], effectiveQaStatus: "PASSED",
+    setFreshProductionOpen: (value: boolean) => { state.open = value; },
+    setCreatingFreshProduction: (value: boolean) => { state.pending = value; },
+    setProceedingProduction: (value: boolean) => { state.pending = value; },
+    setError: (value: string | null) => { state.error = value; },
+    setSelectedChannelId: (value: string) => { state.channel = value; },
+    router: { push: (value: string) => { state.routes.push(value); } },
+    createFreshProductionHandoff, createProductionRequest: createRequest,
+    listProductionRequests: async () => [],
+    proceedToProductionHandoff: async () => { state.normalCalls++; return priorSuccess; },
+  };
+  const code = ts.transpileModule(functions.join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+  const handlers = new Function(...Object.keys(context), `${code}\nreturn { ${names.join(",")} };`)(...Object.values(context)) as {
+    openFreshProductionConfirmation: () => void;
+    cancelFreshProductionConfirmation: () => void;
+    handleCreateFreshProduction: () => Promise<void>;
+    handleProceedToProduction: () => Promise<void>;
+  };
+  return { state, handlers };
+}
+
+test("fresh UI opening and cancellation create nothing; confirmation creates once despite repeated callbacks", async () => {
+  let creates = 0;
+  let release!: (request: ProductionRequest) => void;
+  const deferred = new Promise<ProductionRequest>((resolve) => { release = resolve; });
+  const { state, handlers } = freshPageHarness(async () => { creates++; return deferred; });
+  await handlers.handleCreateFreshProduction();
+  handlers.openFreshProductionConfirmation();
+  assert.equal(state.open, true);
+  assert.equal(creates, 0);
+  handlers.cancelFreshProductionConfirmation();
+  await handlers.handleCreateFreshProduction();
+  assert.equal(creates, 0);
+  handlers.openFreshProductionConfirmation();
+  const first = handlers.handleCreateFreshProduction();
+  await handlers.handleCreateFreshProduction();
+  await handlers.handleProceedToProduction();
+  assert.equal(creates, 1);
+  assert.equal(state.normalCalls, 0);
+  assert.equal(state.pending, true);
+  assert.deepEqual(state.routes, []);
+  release({ ...priorSuccess, id: "new" });
+  await first;
+  await handlers.handleCreateFreshProduction();
+  assert.equal(creates, 1);
+  assert.equal(state.open, false);
+  assert.equal(state.pending, false);
+  assert.equal(state.channel, "channel");
+  assert.deepEqual(state.routes, ["/production"]);
+});
+
+test("fresh UI failure surfaces error without automatic retry; disabled action cannot open or submit", async () => {
+  let creates = 0;
+  const failing = async () => { creates++; throw new Error("POST failed"); };
+  const { handlers, state } = freshPageHarness(failing);
+  handlers.openFreshProductionConfirmation();
+  await handlers.handleCreateFreshProduction();
+  await handlers.handleCreateFreshProduction();
+  assert.equal(creates, 1);
+  assert.equal(state.error, "POST failed");
+  assert.equal(state.pending, false);
+  assert.equal(state.open, false);
+  assert.deepEqual(state.routes, []);
+  const blocked = freshPageHarness(failing, true);
+  blocked.handlers.openFreshProductionConfirmation();
+  await blocked.handlers.handleCreateFreshProduction();
+  assert.equal(blocked.state.open, false);
+  assert.equal(creates, 1);
+});
+
+test("fresh UI uses secondary confirmed action, shared authority gates and newest-first production navigation", () => {
+  const page = readFileSync(new URL("../src/app/channels/[id]/content/page.tsx", import.meta.url), "utf8");
+  assert.ok(page.includes('"Proceed to production"'));
+  assert.match(page, /className="btn btn-secondary btn-sm"\s+type="button"\s+disabled=\{productionActionDisabled\}\s+onClick=\{openFreshProductionConfirmation\}[\s\S]*?New production request/);
+  const dialog = page.match(/<ConfirmDialog\s+open=\{freshProductionOpen\}[\s\S]*?\/>/)?.[0] || "";
+  assert.match(dialog, /onConfirm=\{\(\) => void handleCreateFreshProduction\(\)\}/);
+  assert.match(dialog, /busy=\{productionActionDisabled\}/);
+  assert.doesNotMatch(dialog, /destructive/);
+  assert.match(page, /productionActionPending = proceedingProduction \|\| creatingFreshProduction/);
+  assert.match(page, /productionActionDisabled = busy \|\| archived \|\| productionActionPending \|\|[\s\S]*?!currentScript \|\| !isQaEligible/);
+  assert.match(page, /onClick=\{\(\) => void handleProceedToProduction\(\)\}/);
+  const production = readFileSync(new URL("../src/app/production/page.tsx", import.meta.url), "utf8");
+  assert.match(production, /Date.parse\(b.created_at\) - Date.parse\(a.created_at\)/);
+  assert.match(production, /const found = newest\(await listProductionRequests\(targetChannelId\)\)/);
+  assert.match(production, /const target = found.find\([\s\S]*?\?\? found\[0\]/);
 });
