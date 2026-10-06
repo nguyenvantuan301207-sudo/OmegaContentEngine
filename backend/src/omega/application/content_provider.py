@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Protocol
 
 from omega.application.content_pacing import (
@@ -9,7 +10,52 @@ from omega.application.content_pacing import (
     estimate_duration_seconds,
     plan_retention_beats,
 )
+from omega.application.content_qa import NUMERICAL_REGEX
+from omega.application.script_meta_guard import is_meta_content, is_source_proposition
+from omega.application.semantic_asset_query import subject_tokens
 from omega.domain.content import ContentStatementType, HookType
+
+
+def resolve_section_role(outline_sec: dict[str, Any], idx: int, total_sections: int) -> str:
+    role_val = outline_sec.get("narrative_role") or outline_sec.get("role")
+    if role_val:
+        return str(role_val).upper()
+    title = str(outline_sec.get("title") or "")
+    match = re.match(r"^\[([A-Z_]+)\]", title)
+    if match:
+        return match.group(1).upper()
+    title_lower = title.lower()
+    if any(k in title_lower for k in ("hook", "intro", "opening")):
+        return "HOOK"
+    if any(k in title_lower for k in ("promise", "contract")):
+        return "PROMISE"
+    if any(k in title_lower for k in ("closing", "conclusion", "wrap", "recap", "outro", "summary")):
+        return "CLOSING"
+    if any(k in title_lower for k in ("takeaway", "synthesis", "actionable")):
+        return "TAKEAWAY"
+    if "cta" in title_lower:
+        return "CTA"
+    if "context" in title_lower or "background" in title_lower:
+        return "CONTEXT"
+    if "payoff" in title_lower or "resolution" in title_lower:
+        return "PAYOFF"
+    if any(k in title_lower for k in ("development", "mechanism", "finding", "evidence", "practice", "trade-off")):
+        return "DEVELOPMENT"
+    if total_sections > 1 and idx == 0:
+        return "HOOK"
+    return "BODY"
+
+
+def is_intro_structural_role(role: str) -> bool:
+    return role in ("HOOK", "PROMISE", "INTRO", "INTRODUCTION")
+
+
+def is_concluding_structural_role(role: str) -> bool:
+    return role in ("TAKEAWAY", "CLOSING", "CTA", "CONCLUSION", "SYNTHESIS")
+
+
+def is_body_role(role: str) -> bool:
+    return not is_intro_structural_role(role) and not is_concluding_structural_role(role)
 
 
 class ContentGenerationProvider(Protocol):
@@ -341,7 +387,9 @@ class TemplateContentProvider:
         target_duration_seconds: int,
     ) -> dict[str, Any]:
         pace = intent_dict.get("pace", DEFAULT_PACE)
-        verified_claims = brief_dict.get("verified_claims", [])
+        verified_claims = brief_dict.get("verified_claims", []) or []
+        brief_summary = brief_dict.get("summary") or ""
+        brief_id = brief_dict.get("id")
 
         hook_text = (
             selected_hook.get("text")
@@ -356,48 +404,250 @@ class TemplateContentProvider:
         claim_map = {str(c.get("claim_id")): c for c in verified_claims if c.get("claim_id")}
 
         sections: list[dict[str, Any]] = []
+        grounded_body_claims: list[tuple[str, list[dict[str, Any]]]] = []
+        topic_words = set(subject_tokens(topic_title))
+
+        body_section_indices = [
+            i for i, s in enumerate(outline_sections)
+            if is_body_role(resolve_section_role(s, i, len(outline_sections)))
+        ]
+
+        used_body_claim_ids: set[str] = set()
 
         for idx, outline_sec in enumerate(outline_sections):
             heading = outline_sec.get("title", f"Section {idx + 1}")
             key_points = outline_sec.get("key_points") or [heading]
             claim_refs = set(outline_sec.get("claim_refs") or [])
+            role = resolve_section_role(outline_sec, idx, len(outline_sections))
+
+            if is_meta_content(heading):
+                role_label = role.title() if role else f"Section {idx + 1}"
+                heading = f"{role_label} {idx + 1}: {topic_title}"
 
             sec_verified_claims = [claim_map[cid] for cid in claim_refs if cid in claim_map]
-            if not sec_verified_claims and verified_claims:
-                assigned_idx = idx - 1 if idx > 0 else 0
-                if 0 <= assigned_idx < len(verified_claims) and idx not in (0, len(outline_sections) - 1):
-                    sec_verified_claims = [verified_claims[assigned_idx]]
 
             raw_stmts: list[tuple[str, ContentStatementType, str | None, list[dict[str, Any]]]] = []
 
-            from omega.application.script_meta_guard import is_meta_content, is_source_proposition
-            from omega.application.semantic_asset_query import subject_tokens
+            if is_body_role(role):
+                # ── B1: Body / Explanatory Sections ──
+                if not sec_verified_claims and verified_claims:
+                    body_pos = body_section_indices.index(idx) if idx in body_section_indices else 0
+                    if 0 <= body_pos < len(verified_claims):
+                        sec_verified_claims = [verified_claims[body_pos]]
 
-            # Preserve exact claims and citations. Never increase duration by padding.
-            for vc in sec_verified_claims:
-                claim_text = vc.get("text") or vc.get("claim_text", "")
-                if not claim_text.strip() or is_meta_content(claim_text):
-                    continue
-                cits = [{
-                    "research_brief_id": brief_dict.get("id"),
-                    "claim_id": vc.get("claim_id"),
-                    "evidence_id": cit.get("evidence_id"),
-                    "source_id": cit.get("source_id"),
-                } for cit in vc.get("citations", [])]
-                raw_stmts.append((claim_text, ContentStatementType.FACTUAL, None, cits))
+                sec_verified_claims = [
+                    vc for vc in sec_verified_claims
+                    if str(vc.get("claim_id")) not in used_body_claim_ids
+                ]
 
-            # Source key points may be used verbatim only when they are substantive
-            # subject-specific prose, not plan role placeholders or instructions.
-            topic_words = set(subject_tokens(topic_title))
-            for kp in key_points:
-                if not is_source_proposition(kp) or not topic_words.intersection(subject_tokens(kp)):
-                    continue
-                if len(kp.split()) < 6 or kp.lower().startswith(("factual detail", "core mechanism", "key detail")):
-                    continue
-                if kp.strip() not in [t for t, *_ in raw_stmts]:
-                    raw_stmts.append((kp.strip(), ContentStatementType.INTERPRETIVE, None, []))
-            if not raw_stmts:
-                raise ValueError(f"INSUFFICIENT_GROUNDED_SCRIPT_CONTENT: section {idx + 1}")
+                # Preserve exact claims and citations. Never increase duration by padding.
+                for vc in sec_verified_claims:
+                    claim_text = vc.get("text") or vc.get("claim_text", "")
+                    if not claim_text.strip() or is_meta_content(claim_text):
+                        continue
+                    cits = [{
+                        "research_brief_id": brief_id,
+                        "claim_id": vc.get("claim_id"),
+                        "evidence_id": cit.get("evidence_id"),
+                        "source_id": cit.get("source_id"),
+                    } for cit in vc.get("citations", []) if isinstance(cit, dict)]
+                    raw_stmts.append((claim_text, ContentStatementType.FACTUAL, None, cits))
+                    grounded_body_claims.append((claim_text, cits))
+                    if vc.get("claim_id"):
+                        used_body_claim_ids.add(str(vc.get("claim_id")))
+
+                # Source key points may be used verbatim only when they are substantive
+                # subject-specific prose, not plan role placeholders or instructions.
+                for kp in key_points:
+                    if not is_source_proposition(kp) or not topic_words.intersection(subject_tokens(kp)):
+                        continue
+                    if len(kp.split()) < 6 or kp.lower().startswith(("factual detail", "core mechanism", "key detail")):
+                        continue
+                    if kp.strip() not in [t for t, *_ in raw_stmts]:
+                        raw_stmts.append((kp.strip(), ContentStatementType.INTERPRETIVE, None, []))
+                        grounded_body_claims.append((kp.strip(), []))
+
+                if not raw_stmts:
+                    raise ValueError(f"INSUFFICIENT_GROUNDED_SCRIPT_CONTENT: section {idx + 1}")
+
+            elif is_intro_structural_role(role):
+                # ── B2: Hook / Intro Structural Sections ──
+                has_claim_auth = bool(verified_claims)
+                has_summary_auth = bool(
+                    brief_summary
+                    and len(brief_summary.strip()) >= 10
+                    and (topic_words & set(subject_tokens(brief_summary)))
+                )
+                hook_cand = (selected_hook.get("text") or selected_hook.get("hook_text") or "").strip()
+                hook_cits = [{
+                    "research_brief_id": brief_id,
+                    "claim_id": c.get("claim_id"),
+                    "evidence_id": c.get("evidence_id"),
+                    "source_id": c.get("source_id"),
+                } for c in selected_hook.get("citations", []) if isinstance(c, dict)]
+                has_hook_auth = bool(
+                    hook_cand
+                    and (topic_words & set(subject_tokens(hook_cand)))
+                    and (has_claim_auth or has_summary_auth or hook_cits)
+                )
+
+                if not (has_claim_auth or has_summary_auth or has_hook_auth):
+                    raise ValueError(f"INSUFFICIENT_GROUNDED_SCRIPT_CONTENT: section {idx + 1}")
+
+                for vc in sec_verified_claims:
+                    claim_text = vc.get("text") or vc.get("claim_text", "")
+                    if not claim_text.strip() or is_meta_content(claim_text):
+                        continue
+                    cits = [{
+                        "research_brief_id": brief_id,
+                        "claim_id": vc.get("claim_id"),
+                        "evidence_id": cit.get("evidence_id"),
+                        "source_id": cit.get("source_id"),
+                    } for cit in vc.get("citations", []) if isinstance(cit, dict)]
+                    raw_stmts.append((claim_text, ContentStatementType.FACTUAL, None, cits))
+
+                if role in ("HOOK", "INTRO", "INTRODUCTION") and not raw_stmts:
+                    if has_hook_auth and not is_meta_content(hook_cand) and not NUMERICAL_REGEX.search(hook_cand):
+                        s_type = ContentStatementType.FACTUAL if hook_cits else ContentStatementType.CREATIVE
+                        qual = f"Hook authority grounded in '{topic_title}'"
+                        raw_stmts.append((hook_cand, s_type, qual, hook_cits))
+                    elif has_claim_auth:
+                        top_c = verified_claims[0]
+                        c_text = top_c.get("text") or top_c.get("claim_text", "")
+                        if c_text and not is_meta_content(c_text):
+                            cits = [{
+                                "research_brief_id": brief_id,
+                                "claim_id": top_c.get("claim_id"),
+                                "evidence_id": cit.get("evidence_id"),
+                                "source_id": cit.get("source_id"),
+                            } for cit in top_c.get("citations", []) if isinstance(cit, dict)]
+                            raw_stmts.append((
+                                f"Understanding {topic_title} begins with verified research: {c_text.rstrip('.')}.",
+                                ContentStatementType.FACTUAL,
+                                f"Opening hook derived from research brief {brief_id}",
+                                cits,
+                            ))
+
+                elif role == "PROMISE" and not raw_stmts:
+                    promise_stmt = (
+                        f"We will examine the foundational factors behind {topic_title} "
+                        "through engineering observations and field analysis."
+                    )
+                    raw_stmts.append((
+                        promise_stmt,
+                        ContentStatementType.INTERPRETIVE,
+                        f"Grounded promise contract for topic '{topic_title}'",
+                        [],
+                    ))
+
+                for kp in key_points:
+                    if not is_source_proposition(kp) or not topic_words.intersection(subject_tokens(kp)):
+                        continue
+                    if len(kp.split()) < 6 or kp.lower().startswith(("factual detail", "core mechanism", "key detail")):
+                        continue
+                    if kp.strip() not in [t for t, *_ in raw_stmts]:
+                        raw_stmts.append((kp.strip(), ContentStatementType.INTERPRETIVE, None, []))
+
+                if not raw_stmts:
+                    raise ValueError(f"INSUFFICIENT_GROUNDED_SCRIPT_CONTENT: section {idx + 1}")
+
+            elif is_concluding_structural_role(role):
+                # ── B3: Conclusion / CTA Structural Sections ──
+                has_claim_auth = bool(verified_claims or grounded_body_claims)
+                has_summary_auth = bool(
+                    brief_summary
+                    and len(brief_summary.strip()) >= 10
+                    and (topic_words & set(subject_tokens(brief_summary)))
+                )
+                if not (has_claim_auth or has_summary_auth):
+                    raise ValueError(f"INSUFFICIENT_GROUNDED_SCRIPT_CONTENT: section {idx + 1}")
+
+                for vc in sec_verified_claims:
+                    claim_text = vc.get("text") or vc.get("claim_text", "")
+                    if not claim_text.strip() or is_meta_content(claim_text):
+                        continue
+                    cits = [{
+                        "research_brief_id": brief_id,
+                        "claim_id": vc.get("claim_id"),
+                        "evidence_id": cit.get("evidence_id"),
+                        "source_id": cit.get("source_id"),
+                    } for cit in vc.get("citations", []) if isinstance(cit, dict)]
+                    raw_stmts.append((claim_text, ContentStatementType.FACTUAL, None, cits))
+
+                if role in ("TAKEAWAY", "SYNTHESIS") and not raw_stmts:
+                    source_claims = grounded_body_claims or [
+                        (c.get("text") or c.get("claim_text", ""), [
+                            {
+                                "research_brief_id": brief_id,
+                                "claim_id": c.get("claim_id"),
+                                "evidence_id": cit.get("evidence_id"),
+                                "source_id": cit.get("source_id"),
+                            }
+                            for cit in c.get("citations", [])
+                            if isinstance(cit, dict)
+                        ])
+                        for c in verified_claims
+                    ]
+                    if source_claims:
+                        synth_claims = [c_text.rstrip(".") for c_text, _ in source_claims[:2] if c_text]
+                        if synth_claims:
+                            synth_stmt = (
+                                f"Analyzing {topic_title} requires accounting for verified mechanisms: "
+                                + "; ".join(synth_claims)
+                                + "."
+                            )
+                            synth_cits = [cit for _, cits in source_claims[:2] for cit in cits]
+                            raw_stmts.append((
+                                synth_stmt,
+                                ContentStatementType.INTERPRETIVE,
+                                f"Synthesis of grounded mechanisms for '{topic_title}'",
+                                synth_cits,
+                            ))
+
+                elif role in ("CLOSING", "CONCLUSION") and not raw_stmts:
+                    closing_stmt = (
+                        f"Rigorous analysis requires identifying these specific factors early "
+                        f"and applying verified controls to {topic_title}."
+                    )
+                    raw_stmts.append((
+                        closing_stmt,
+                        ContentStatementType.INTERPRETIVE,
+                        f"Closing synthesis for '{topic_title}'",
+                        [],
+                    ))
+                    cta_stmt = (
+                        "Review the research brief citations in the description, inspect evidence carefully, "
+                        "and subscribe for further detailed breakdowns."
+                    )
+                    raw_stmts.append((
+                        cta_stmt,
+                        ContentStatementType.CTA,
+                        f"Viewer call-to-action for '{topic_title}'",
+                        [],
+                    ))
+
+                elif role == "CTA" and not raw_stmts:
+                    cta_stmt = (
+                        "Review the research brief citations in the description, inspect evidence carefully, "
+                        "and subscribe for further detailed breakdowns."
+                    )
+                    raw_stmts.append((
+                        cta_stmt,
+                        ContentStatementType.CTA,
+                        f"Viewer call-to-action for '{topic_title}'",
+                        [],
+                    ))
+
+                for kp in key_points:
+                    if not is_source_proposition(kp) or not topic_words.intersection(subject_tokens(kp)):
+                        continue
+                    if len(kp.split()) < 6 or kp.lower().startswith(("factual detail", "core mechanism", "key detail")):
+                        continue
+                    if kp.strip() not in [t for t, *_ in raw_stmts]:
+                        raw_stmts.append((kp.strip(), ContentStatementType.INTERPRETIVE, None, []))
+
+                if not raw_stmts:
+                    raise ValueError(f"INSUFFICIENT_GROUNDED_SCRIPT_CONTENT: section {idx + 1}")
 
             statements = []
             for s_idx, (st_text, s_type, q_note, cits) in enumerate(raw_stmts):
