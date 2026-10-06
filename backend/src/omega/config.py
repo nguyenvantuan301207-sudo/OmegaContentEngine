@@ -141,6 +141,32 @@ class Settings(BaseSettings):
     research_max_accepted_sources_per_round: int = 5
     research_max_total_sources: int = 15
 
+    # ── P0.3b Tavily Search & Extract Provider Settings ──
+    tavily_api_key: str | None = None
+    research_discovery_provider: str = "NONE"
+    research_tavily_search_depth: str = "basic"
+    research_tavily_extract_depth: str = "basic"
+    research_tavily_timeout_seconds: float = 30.0
+    research_tavily_max_response_bytes: int = 5_000_000
+
+    @field_validator("research_discovery_provider")
+    @classmethod
+    def validate_research_discovery_provider(cls, v: str) -> str:
+        upper = v.upper().strip()
+        if upper not in ("NONE", "TAVILY"):
+            raise ValueError(f"research_discovery_provider must be 'NONE' or 'TAVILY', got '{v}'")
+        return upper
+
+    @field_validator("research_acquisition_mode")
+    @classmethod
+    def validate_research_acquisition_mode(cls, v: str) -> str:
+        upper = v.upper().strip()
+        if upper not in ("MANUAL", "AUTOMATIC_SEARCH"):
+            raise ValueError(
+                f"research_acquisition_mode must be 'MANUAL' or 'AUTOMATIC_SEARCH', got '{v}'"
+            )
+        return upper
+
     # Production access control: Fail-closed in production if None
     metrics_auth_token: str | None = None
     operator_auth_token: str | None = None

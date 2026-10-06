@@ -235,3 +235,62 @@ class ExternalSearchAdapterContract:
 
     INTERFACE_VERSION = "1.0.0"
     SUPPORTED_SOURCE_TYPE = ResearchSourceType.WEB_SEARCH
+
+
+def build_research_discovery_stack(
+    settings: Any,
+    client: Any = None,
+    retry_delay_fn: Any = None,
+) -> tuple[ResearchDiscoveryProvider, ResearchContentExtractor]:
+    """Build canonical discovery and extraction stack according to runtime settings.
+
+    Invariants:
+    1. 'NONE' returns (NullDiscoveryProvider(), NullResearchContentExtractor()).
+    2. 'TAVILY' builds (TavilyDiscoveryProvider, TavilyResearchContentExtractor) if key configured.
+    3. 'TAVILY' without valid API key fails closed with DiscoveryProviderUnavailableError.
+    4. Unsupported provider raises DiscoveryProviderUnavailableError.
+    """
+    provider_type = getattr(settings, "research_discovery_provider", "NONE")
+    provider_str = (provider_type or "NONE").upper().strip()
+
+    if provider_str == "NONE":
+        return NullDiscoveryProvider(), NullResearchContentExtractor()
+
+    if provider_str == "TAVILY":
+        api_key = getattr(settings, "tavily_api_key", None)
+        if not api_key or not str(api_key).strip():
+            raise DiscoveryProviderUnavailableError(
+                "TAVILY research discovery provider requested but TAVILY_API_KEY is not configured"
+            )
+
+        from omega.infrastructure.tavily_provider import (
+            TavilyDiscoveryProvider,
+            TavilyResearchContentExtractor,
+        )
+
+        search_depth = getattr(settings, "research_tavily_search_depth", "basic")
+        extract_depth = getattr(settings, "research_tavily_extract_depth", "basic")
+        timeout_seconds = getattr(settings, "research_tavily_timeout_seconds", 30.0)
+        max_bytes = getattr(settings, "research_tavily_max_response_bytes", 5_000_000)
+
+        discovery_provider = TavilyDiscoveryProvider(
+            api_key=str(api_key).strip(),
+            search_depth=search_depth,
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=max_bytes,
+            client=client,
+            retry_delay_fn=retry_delay_fn,
+        )
+        content_extractor = TavilyResearchContentExtractor(
+            api_key=str(api_key).strip(),
+            extract_depth=extract_depth,
+            timeout_seconds=timeout_seconds,
+            max_response_bytes=max_bytes,
+            client=client,
+            retry_delay_fn=retry_delay_fn,
+        )
+        return discovery_provider, content_extractor
+
+    raise DiscoveryProviderUnavailableError(
+        f"Unsupported research discovery provider: '{provider_str}'"
+    )

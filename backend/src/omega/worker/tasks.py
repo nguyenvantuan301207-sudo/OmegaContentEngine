@@ -797,7 +797,9 @@ def _execute_canonical_research(
         from sqlalchemy import select
 
         from omega.application import research_service
+        from omega.config import get_settings
         from omega.domain.research import (
+            ResearchAcquisitionMode,
             ResearchOutcome,
             ResearchRequestCreate,
             ResearchRequestStatus,
@@ -857,6 +859,14 @@ def _execute_canonical_research(
                     )
                 )
             ).scalar_one_or_none()
+            settings = get_settings()
+            target_acq_mode = ResearchAcquisitionMode.MANUAL
+            if (
+                settings.research_acquisition_mode == "AUTOMATIC_SEARCH"
+                and settings.research_discovery_provider == "TAVILY"
+            ):
+                target_acq_mode = ResearchAcquisitionMode.AUTOMATIC_SEARCH
+
             if request is None:
                 created = await research_service.create_research_request(
                     async_session,
@@ -864,7 +874,11 @@ def _execute_canonical_research(
                     ResearchRequestCreate(
                         topic_candidate_id=topic_id,
                         mission_execution_id=execution_id,
-                        metadata={"canonical_task_identity": identity},
+                        acquisition_mode=target_acq_mode,
+                        metadata={
+                            "canonical_task_identity": identity,
+                            "acquisition_mode": target_acq_mode.value,
+                        },
                     ),
                 )
                 request = await async_session.get(ResearchRequest, created.id)
@@ -877,6 +891,9 @@ def _execute_canonical_research(
                 or dict(request.metadata_ or {}).get("canonical_task_identity") != identity
             ):
                 raise ValueError("ResearchRequest canonical lineage is invalid")
+
+            req_meta = dict(request.metadata_ or {})
+            req_acq_mode = req_meta.get("acquisition_mode", ResearchAcquisitionMode.MANUAL.value)
 
             brief = None
             if request.status == ResearchRequestStatus.SUCCEEDED.value:
@@ -897,14 +914,40 @@ def _execute_canonical_research(
             ):
                 raise ValueError(f"ResearchRequest cannot run from state '{request.status}'")
             else:
-                if source_batch is not None:
-                    await research_service.batch_add_sources(
-                        async_session,
-                        request.id,
-                        source_batch,
+                if req_acq_mode == ResearchAcquisitionMode.AUTOMATIC_SEARCH.value:
+                    from omega.application.research_coverage_service import execute_coverage_driven_research
+                    from omega.application.research_discovery import build_research_discovery_stack
+
+                    discovery_provider, content_extractor = build_research_discovery_stack(settings)
+                    cov_result = await execute_coverage_driven_research(
+                        session=async_session,
+                        request_id=request.id,
+                        discovery_provider=discovery_provider,
+                        content_extractor=content_extractor,
+                        max_rounds=settings.research_max_rounds,
+                        max_queries_per_round=settings.research_max_queries_per_round,
+                        max_candidates_per_query=settings.research_max_candidates_per_query,
+                        max_accepted_sources_per_round=settings.research_max_accepted_sources_per_round,
+                        max_total_acquired_sources=settings.research_max_total_sources,
                     )
-                generated = await research_service.run_research(async_session, request.id)
-                brief = await async_session.get(ResearchBrief, generated.id)
+                    brief_resp = cov_result.get("brief")
+                    if brief_resp is not None:
+                        brief = await async_session.get(ResearchBrief, brief_resp.id)
+                    if hasattr(async_session, "refresh"):
+                        await async_session.refresh(request)
+                    else:
+                        refreshed = await async_session.get(ResearchRequest, request.id)
+                        if refreshed is not None:
+                            request = refreshed
+                else:
+                    if source_batch is not None:
+                        await research_service.batch_add_sources(
+                            async_session,
+                            request.id,
+                            source_batch,
+                        )
+                    generated = await research_service.run_research(async_session, request.id)
+                    brief = await async_session.get(ResearchBrief, generated.id)
 
             if (
                 brief is None
