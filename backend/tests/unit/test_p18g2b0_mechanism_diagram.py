@@ -310,8 +310,8 @@ def test_16_template_payload_resolver_uses_mechanism_spec_for_flow_diagram():
     assert edges[0].to_node == "database connection timeouts"
 
 
-def test_17_template_payload_resolver_fallback_to_generic_diagram():
-    """When resolve_mechanism_diagram_spec returns None, generic _extract_diagram still succeeds."""
+def test_17_template_payload_resolver_explicit_transfer_diagram():
+    """Explicit transfer relations remain admitted without capitalization-only extraction."""
     scene = StoryboardScene(
         sequence_index=1,
         section_id="Architecture Section",
@@ -395,8 +395,8 @@ def test_18_planner_promotion_payload_parity_guarantee():
     ]
 
 
-def test_19_legacy_canonical_direction_isolated_from_mechanism_spec():
-    """Legacy VisualDirector directions must isolate from mechanism extraction and use legacy generic diagram extraction."""
+def test_19_legacy_canonical_direction_uses_shared_semantic_admission():
+    """Legacy directions preserve metadata and require the same supported source relationships."""
     scene = StoryboardScene(
         sequence_index=1,
         section_id="Infrastructure Section",
@@ -428,11 +428,11 @@ def test_19_legacy_canonical_direction_isolated_from_mechanism_spec():
     # 4. Prove legacy generic diagram extraction was used exactly
     assert payload.inputs[TemplateInputKey.NODES] == expected_nodes
     assert payload.inputs[TemplateInputKey.EDGES] == expected_edges
-    assert payload.inputs[TemplateInputKey.NODES] != list(mech_spec.nodes)
+    assert payload.inputs[TemplateInputKey.NODES] == list(mech_spec.nodes)
 
 
-def test_20_legacy_canonical_direction_never_calls_mechanism_extractor(monkeypatch):
-    """Monkeypatch test proving resolve_mechanism_diagram_spec is NOT invoked for legacy canonical directions."""
+def test_20_legacy_canonical_direction_fails_closed_without_supported_relation(monkeypatch):
+    """No legacy path can bypass semantic admission when shared extraction rejects the source."""
     scene = StoryboardScene(
         sequence_index=1,
         section_id="Infrastructure Section",
@@ -445,18 +445,16 @@ def test_20_legacy_canonical_direction_never_calls_mechanism_extractor(monkeypat
     )
     direction = VisualDirector().resolve(scene)
 
-    def _poison_mechanism_spec(*args, **kwargs):
-        raise AssertionError("resolve_mechanism_diagram_spec must NEVER be called on legacy canonical paths!")
+    import pytest
+    from omega.application.template_payload_resolver import TemplatePayloadError
 
     monkeypatch.setattr(
         "omega.application.template_payload_resolver.resolve_mechanism_diagram_spec",
-        _poison_mechanism_spec,
+        lambda *args, **kwargs: None,
     )
+    with pytest.raises(TemplatePayloadError):
+        TemplatePayloadResolver().resolve(scene, direction)
 
-    resolver = TemplatePayloadResolver()
-    payload = resolver.resolve(scene, direction)
-    assert payload.template_id == VisualTemplateId.FLOW_DIAGRAM
-    assert TemplateInputKey.NODES in payload.inputs
 
 
 def test_21_negative_g2_metadata_gate_fallbacks():

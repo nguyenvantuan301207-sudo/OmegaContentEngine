@@ -44,21 +44,22 @@ def resolve_beat_query_hint(
     had_hint = False
     if is_meaningful_query(beat.asset_query_hint):
         had_hint = True
-        if not is_unrelated_stock_concept(beat.asset_query_hint):
+        if not is_unrelated_stock_concept(beat.asset_query_hint, source_text=scene.asset_source_text + " " + scene.visual_brief):
             return beat.asset_query_hint
     if is_meaningful_query(scene.asset_query_hint):
         had_hint = True
-        if not is_unrelated_stock_concept(scene.asset_query_hint):
+        if not is_unrelated_stock_concept(scene.asset_query_hint, source_text=scene.asset_source_text + " " + scene.visual_brief):
             return scene.asset_query_hint
     if is_meaningful_query(scene.visual_brief):
         had_hint = True
-        if not is_unrelated_stock_concept(scene.visual_brief):
+        if not is_unrelated_stock_concept(scene.visual_brief, source_text=scene.asset_source_text + " " + scene.visual_brief):
             return scene.visual_brief
 
     if had_hint:
         return derive_semantic_asset_query(
             beat.narration_span or scene.narration_excerpt,
             fallback_topic=scene.section_id,
+            subject_text=scene.subject_text,
         )
 
     return None
@@ -111,6 +112,12 @@ class BeatVisualDirector:
         # 1. Strategy authority: preferred beat strategy wins, parent strategy is fallback
         strategy = beat.preferred_visual_strategy or scene.visual_strategy
 
+        if strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
+            from omega.application.semantic_asset_query import validate_semantic_query
+
+            if scene.subject_text is not None and not validate_semantic_query(resolve_beat_query_hint(beat, scene), scene.asset_source_text).valid:
+                strategy = VisualStrategy.KINETIC_TEXT
+
         # 2. Canonical mapping to render mode, template ID, template motion, rationale
         render_mode, template_id, template_motion, rationale = map_visual_strategy(
             strategy
@@ -125,6 +132,7 @@ class BeatVisualDirector:
                 VisualAssetRequirement(
                     kind=VisualAssetKind.IMAGE,
                     query_hint=query_hint,
+                    source_text=scene.asset_source_text,
                     purpose=f"Primary visual for beat {beat.beat_index} image explainer",
                 )
             )
@@ -133,6 +141,7 @@ class BeatVisualDirector:
                 VisualAssetRequirement(
                     kind=VisualAssetKind.BROLL,
                     query_hint=query_hint,
+                    source_text=scene.asset_source_text,
                     purpose=f"Primary visual for beat {beat.beat_index} broll explainer",
                 )
             )
@@ -141,6 +150,7 @@ class BeatVisualDirector:
                 VisualAssetRequirement(
                     kind=VisualAssetKind.SCREENSHOT,
                     query_hint=query_hint,
+                    source_text=scene.asset_source_text,
                     purpose=f"Primary visual for beat {beat.beat_index} screenshot focus",
                 )
             )

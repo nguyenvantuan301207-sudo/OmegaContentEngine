@@ -165,6 +165,7 @@ def adapt_storyboard_scene_view(
         on_screen_text=safe_ost,
         motion_hint=parent_scene.motion_hint,
         asset_query_hint=query_hint,
+        subject_text=parent_scene.subject_text,
         importance=parent_scene.importance,
         citations=list(parent_scene.citations),
     )

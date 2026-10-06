@@ -86,6 +86,11 @@ class StoryboardScene(BaseModel):
     on_screen_text: str | None = None
     motion_hint: str | None = None
     asset_query_hint: str | None = None
+    subject_text: str | None = None
+
+    @property
+    def asset_source_text(self) -> str:
+        return f"{self.subject_text or self.section_id} {self.narration_excerpt}"
     importance: str = "NORMAL"
     citations: list[dict[str, Any]] = Field(default_factory=list)
 
@@ -146,7 +151,8 @@ class StoryboardEngine:
                         statements=current_group,
                         is_first=is_first_scene,
                         is_last=is_very_last,
-                        history=[s.visual_strategy for s in scenes[-2:]]
+                        history=[s.visual_strategy for s in scenes[-2:]],
+                        subject_text=script_dict.get("title"),
                     )
                     scenes.append(scene)
                     sequence_index += 1
@@ -182,7 +188,8 @@ class StoryboardEngine:
         statements: list[dict[str, Any]],
         is_first: bool,
         is_last: bool,
-        history: list[VisualStrategy]
+        history: list[VisualStrategy],
+        subject_text: str | None = None,
     ) -> StoryboardScene:
         narration = " ".join(s.get("statement_text", "") for s in statements)
         word_count = len(narration.split())
@@ -261,7 +268,8 @@ class StoryboardEngine:
             visual_brief=brief,
             on_screen_text=on_screen_text,
             motion_hint=motion_hint,
-            asset_query_hint=derive_semantic_asset_query(narration, fallback_topic=section_heading),
+            subject_text=subject_text,
+            asset_query_hint=derive_semantic_asset_query(narration, fallback_topic=section_heading, subject_text=subject_text),
             importance="HIGH" if citations else "NORMAL",
             citations=citations
         )

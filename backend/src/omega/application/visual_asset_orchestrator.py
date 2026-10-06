@@ -33,6 +33,12 @@ class VisualAssetOrchestrator:
             self._providers[name] = provider
 
     async def resolve(self, request: VisualAssetRequest) -> ResolvedVisualAsset:
+        if request.source_text is not None:
+            from omega.application.semantic_asset_query import SemanticGroundingError, validate_semantic_query
+
+            decision = validate_semantic_query(request.query, request.source_text)
+            if not decision.valid:
+                raise SemanticGroundingError(decision)
         all_candidates: list[VisualAssetCandidate] = []
 
         sorted_provider_names = sorted(self._providers.keys())
@@ -56,6 +62,16 @@ class VisualAssetOrchestrator:
 
         best_candidate = self._engine.select_candidate(request, all_candidates)
         if not best_candidate:
+            if request.source_text is not None:
+                from omega.application.semantic_asset_query import SemanticGroundingError, validate_provider_semantics
+
+                for candidate in all_candidates:
+                    decision = validate_provider_semantics(
+                        source_text=request.source_text, query=request.query,
+                        metadata=candidate.metadata, source_page_url=candidate.source_page_url,
+                    )
+                    if not decision.valid:
+                        raise SemanticGroundingError(decision)
             raise VisualAssetOrchestratorError("No suitable candidates selected")
 
         target_provider = self._providers.get(best_candidate.provider)

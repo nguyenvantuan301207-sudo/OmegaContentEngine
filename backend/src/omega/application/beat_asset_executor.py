@@ -26,6 +26,7 @@ from omega.application.visual_asset_engine import (
     VisualAssetEngine,
     VisualAssetRequest,
 )
+from omega.application.semantic_asset_query import SemanticGroundingError
 from omega.application.visual_direction import VisualAssetKind
 from omega.infrastructure.visual_asset_materializer import VisualAssetMaterializer
 
@@ -33,6 +34,8 @@ ProviderFallbackReason = Literal[
     "PROVIDER_UNAVAILABLE",
     "PROVIDER_RESOLUTION_FAILED",
     "PROVIDER_MATERIALIZATION_FAILED",
+    "QUERY_SEMANTIC_REJECTED",
+    "PROVIDER_SEMANTIC_MISMATCH",
 ]
 
 
@@ -304,7 +307,15 @@ async def resolve_provider_asset(
         reason = "PROVIDER_UNAVAILABLE"
     else:
         try:
+            if request.source_text is not None:
+                from omega.application.semantic_asset_query import validate_semantic_query
+
+                decision = validate_semantic_query(request.query, request.source_text)
+                if not decision.valid:
+                    raise SemanticGroundingError(decision)
             resolved = await resolver.resolve(request)
+        except SemanticGroundingError as exc:
+            reason = "PROVIDER_SEMANTIC_MISMATCH" if exc.decision.code == "PROVIDER_ASSET_SEMANTIC_MISMATCH" else "QUERY_SEMANTIC_REJECTED"
         except Exception:
             reason = "PROVIDER_RESOLUTION_FAILED"
         if resolved is None:
@@ -313,10 +324,25 @@ async def resolve_provider_asset(
         if resolved.kind != request.kind:
             raise BeatAssetExecutionError("Resolved asset kind does not match requested kind")
         try:
+            if request.source_text is not None:
+                from omega.application.semantic_asset_query import validate_provider_semantics
+
+                decision = validate_provider_semantics(
+                    source_text=request.source_text, query=request.query,
+                    metadata=resolved.metadata, source_page_url=resolved.source_page_url,
+                )
+                if not decision.valid:
+                    raise SemanticGroundingError(decision)
+                resolved = resolved.model_copy(update={"metadata": {
+                    **resolved.metadata, "semantic_relevance": decision.as_metadata(),
+                }})
             if request.kind == VisualAssetKind.IMAGE:
                 bound_vis = materializer.materialize(resolved)
             else:
                 bound_br = materializer.materialize_broll(resolved)
+        except SemanticGroundingError:
+            reason = "PROVIDER_SEMANTIC_MISMATCH"
+            resolved = None
         except Exception:
             reason = "PROVIDER_MATERIALIZATION_FAILED"
             resolved = None

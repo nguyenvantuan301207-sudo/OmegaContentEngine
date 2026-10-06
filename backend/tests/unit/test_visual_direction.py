@@ -14,17 +14,17 @@ from omega.application.visual_direction import (
 def director():
     return VisualDirector()
 
-def create_scene(strategy: VisualStrategy, query_hint: str = None, brief: str = None) -> StoryboardScene:
+def create_scene(strategy: VisualStrategy, query_hint: str = None, brief: str = None, narration: str = "test") -> StoryboardScene:
     return StoryboardScene(
         sequence_index=1,
         section_id="test",
         purpose="test",
         source_statement_references=[1],
-        narration_excerpt="test",
+        narration_excerpt=narration,
         estimated_duration_seconds=5.0,
         visual_strategy=strategy,
         visual_brief=brief or "",
-        on_screen_text="test",
+        on_screen_text=narration,
         motion_hint="",
         asset_query_hint=query_hint or ""
     )
@@ -38,12 +38,21 @@ def test_title_motion_mapping(director):
     assert len(direction.asset_requirements) == 0
 
 def test_diagram_mapping(director):
-    scene = create_scene(VisualStrategy.DIAGRAM)
+    scene = create_scene(
+        VisualStrategy.DIAGRAM,
+        narration="Sunlight causes Rayleigh scattering in atmospheric particles.",
+    )
     direction = director.resolve(scene)
     assert direction.render_mode == VisualRenderMode.TEMPLATE
     assert direction.template_id == VisualTemplateId.FLOW_DIAGRAM
     assert direction.motion_profile == "sequential_flow"
     assert len(direction.asset_requirements) == 0
+
+def test_generic_diagram_falls_back_to_kinetic_text(director):
+    scene = create_scene(VisualStrategy.DIAGRAM, narration="Regarding Why Concrete Cracks Mechanisms")
+    direction = director.resolve(scene)
+    assert direction.render_mode == VisualRenderMode.TEMPLATE
+    assert direction.template_id == VisualTemplateId.KINETIC_TEXT
 
 def test_statistic_mapping(director):
     scene = create_scene(VisualStrategy.STATISTIC)

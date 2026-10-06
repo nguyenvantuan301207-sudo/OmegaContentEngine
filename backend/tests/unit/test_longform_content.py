@@ -2,7 +2,6 @@
 
 import pytest
 
-from omega.application.content_pacing import estimate_duration_seconds
 from omega.application.content_provider import TemplateContentProvider
 from omega.domain.content import ContentGenerationRequestCreate, ContentType
 
@@ -64,19 +63,13 @@ def test_longform_script_generation_duration_and_depth():
     }
     dna = {"brand_voice": {"tone": "AUTHORITATIVE", "pace": "MODERATE"}}
 
-    outline_480, script_480 = _generate(provider, topic, brief, dna, 480)
-    outline_840, script_840 = _generate(provider, topic, brief, dna, 840)
-    outline_1320, script_1320 = _generate(provider, topic, brief, dna, 1320)
-
-    assert len(outline_480["sections"]) < len(outline_840["sections"])
-    assert len(outline_840["sections"]) < len(outline_1320["sections"])
-    assert len(outline_480["sections"]) != len(outline_1320["sections"])
-    assert len(outline_1320["sections"]) > len(outline_480["sections"])
-    assert script_480["estimated_word_count"] < script_840["estimated_word_count"]
-    assert script_840["estimated_word_count"] < script_1320["estimated_word_count"]
-    assert script_840["estimated_duration_seconds"] == estimate_duration_seconds(
-        script_840["estimated_word_count"], "MODERATE"
-    )
-
-    paragraphs = [section["narration_text"] for section in script_1320["sections"]]
-    assert len(paragraphs) == len(set(paragraphs))
+    # Duration growth cannot manufacture depth from one verified sentence.
+    outlines = []
+    for duration in (480, 840, 1320):
+        intent = provider.generate_intent(topic, None, brief, dna)
+        hook = provider.generate_hooks(topic, brief, dna, intent)[0]
+        outline = provider.generate_outline(topic, brief, dna, intent, hook, duration)
+        outlines.append(outline)
+        with pytest.raises(ValueError, match="INSUFFICIENT_GROUNDED_SCRIPT_CONTENT"):
+            provider.generate_script(topic, brief, dna, intent, hook, outline, duration)
+    assert len(outlines[0]["sections"]) < len(outlines[1]["sections"]) < len(outlines[2]["sections"])

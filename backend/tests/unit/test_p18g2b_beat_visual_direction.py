@@ -46,13 +46,14 @@ def _make_scene(
     visual_strategy: VisualStrategy = VisualStrategy.BROLL,
     asset_query_hint: str | None = "sunset atmosphere",
     visual_brief: str = "Cinematic sunset over mountains",
+    narration_excerpt: str = "Sunlight traverses atmospheric layers.",
 ) -> StoryboardScene:
     return StoryboardScene(
         sequence_index=sequence_index,
         section_id="sec_1",
         purpose="Explain scattering",
         source_statement_references=[1, 2],
-        narration_excerpt="Sunlight traverses atmospheric layers.",
+        narration_excerpt=narration_excerpt,
         estimated_duration_seconds=6.0,
         visual_strategy=visual_strategy,
         visual_brief=visual_brief,
@@ -168,7 +169,13 @@ def test_06_existing_visual_director_output_unchanged():
     """Existing VisualDirector.resolve(scene) produces identical output before and after refactoring."""
     director = VisualDirector()
     for strat in VisualStrategy:
-        scene = _make_scene(visual_strategy=strat)
+        if strat == VisualStrategy.DIAGRAM:
+            scene = _make_scene(
+                visual_strategy=strat,
+                narration_excerpt="Sunlight causes Rayleigh scattering in atmospheric particles.",
+            )
+        else:
+            scene = _make_scene(visual_strategy=strat)
         direction = director.resolve(scene)
         expected_mode, expected_template, expected_motion, expected_rationale = map_visual_strategy(strat)
 

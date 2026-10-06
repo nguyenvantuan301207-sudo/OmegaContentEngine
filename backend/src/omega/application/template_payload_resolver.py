@@ -46,6 +46,12 @@ def can_resolve_diagram_payload(content: str | None, is_g2_mechanism: bool = Fal
     text = content.strip()
     if is_g2_mechanism:
         mech_spec = resolve_mechanism_diagram_spec(text)
+        if mech_spec is None:
+            for s in re.split(r"(?<=[.!?])\s+", text):
+                if s.strip():
+                    mech_spec = resolve_mechanism_diagram_spec(s.strip())
+                    if mech_spec is not None:
+                        break
         if mech_spec is not None and len(mech_spec.nodes) >= 2:
             return True
     resolver = TemplatePayloadResolver()
@@ -207,6 +213,12 @@ class TemplatePayloadResolver:
             )
 
             mech_spec = resolve_mechanism_diagram_spec(content) if is_g2_mechanism_beat else None
+            if mech_spec is None and is_g2_mechanism_beat:
+                for s in re.split(r"(?<=[.!?])\s+", content):
+                    if s.strip():
+                        mech_spec = resolve_mechanism_diagram_spec(s.strip())
+                        if mech_spec is not None:
+                            break
             if mech_spec is not None and len(mech_spec.nodes) >= 2:
                 inputs[TemplateInputKey.NODES] = list(mech_spec.nodes)
                 inputs[TemplateInputKey.EDGES] = [
@@ -315,36 +327,19 @@ class TemplatePayloadResolver:
         return inputs
 
     def _extract_diagram(self, text: str) -> tuple[list[str], list[TemplateEdge]]:
-        matches = re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\b", text)
-        raw_nodes = []
-        for m in matches:
-            node = m.group(1).strip()
-            node = re.sub(r"^(The|A|An)\s+", "", node, flags=re.IGNORECASE)
-            if node and node not in ("The", "A", "An") and node not in raw_nodes:
-                raw_nodes.append(node)
-
-        if len(raw_nodes) < 2:
-            conceptual_pattern = re.compile(
-                r"\b(?:"
-                r"(?:system|software|service|data|network|request|event|ingestion|processing|delivery|deployment|workflow)\s+"
-                r"(?:architecture|workflow|pipeline|process|flow|relationship|components?|stages?)"
-                r"|architecture|workflow|pipeline|process|flow|relationship|components?|stages?"
-                r")\b",
-                re.IGNORECASE,
-            )
-            for match in conceptual_pattern.finditer(text):
-                node = match.group(0).strip().lower()
-                if node not in raw_nodes:
-                    raw_nodes.append(node)
-
-        nodes = raw_nodes[:5]
-        edges = []
-        for i in range(len(nodes) - 1):
-            edges.append(TemplateEdge(from_node=nodes[i], to_node=nodes[i+1]))
-
-        return nodes, edges
-
-
+        spec = resolve_mechanism_diagram_spec(text)
+        if spec is None:
+            for s in re.split(r"(?<=[.!?])\s+", text):
+                if s.strip():
+                    spec = resolve_mechanism_diagram_spec(s.strip())
+                    if spec is not None:
+                        break
+        if spec is None:
+            return [], []
+        return list(spec.nodes), [
+            TemplateEdge(from_node=e.from_node, to_node=e.to_node, label=e.label)
+            for e in spec.edges
+        ]
 
     def _extract_metric(self, text: str) -> str | None:
         return extract_trustworthy_metric(text)

@@ -47,6 +47,7 @@ class VisualAssetRequirement(BaseModel):
     query_hint: str | None
     purpose: str
     required: bool = True
+    source_text: str | None = None
 
 
 class VisualDirection(BaseModel):
@@ -111,6 +112,11 @@ class VisualDirector:
 
     def resolve(self, scene: StoryboardScene) -> VisualDirection:
         strategy = scene.visual_strategy
+        if strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):
+            from omega.application.semantic_asset_query import validate_semantic_query
+
+            if scene.subject_text is not None and not validate_semantic_query(self._resolve_query_hint(scene), scene.asset_source_text).valid:
+                strategy = VisualStrategy.KINETIC_TEXT
         if strategy == VisualStrategy.DIAGRAM:
             from omega.application.template_payload_resolver import can_resolve_diagram_payload
 
@@ -132,18 +138,21 @@ class VisualDirector:
             assets.append(VisualAssetRequirement(
                 kind=VisualAssetKind.IMAGE,
                 query_hint=self._resolve_query_hint(scene),
+                source_text=scene.asset_source_text,
                 purpose="Primary visual for image explainer"
             ))
         elif strategy == VisualStrategy.BROLL:
             assets.append(VisualAssetRequirement(
                 kind=VisualAssetKind.BROLL,
                 query_hint=self._resolve_query_hint(scene),
+                source_text=scene.asset_source_text,
                 purpose="Primary visual for broll explainer"
             ))
         elif strategy == VisualStrategy.SCREENSHOT:
             assets.append(VisualAssetRequirement(
                 kind=VisualAssetKind.SCREENSHOT,
                 query_hint=self._resolve_query_hint(scene),
+                source_text=scene.asset_source_text,
                 purpose="Primary visual for screenshot focus"
             ))
 

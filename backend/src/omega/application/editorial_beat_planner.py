@@ -352,7 +352,7 @@ class EditorialBeatPlanner:
             )
 
             # Query hint: use deterministic semantic asset query derivation
-            query_hint = derive_semantic_asset_query(span, fallback_topic=scene.section_id)
+            query_hint = derive_semantic_asset_query(span, fallback_topic=scene.section_id, subject_text=scene.subject_text)
 
             beats.append(
                 EditorialBeatSpec(

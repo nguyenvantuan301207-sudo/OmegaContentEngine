@@ -76,8 +76,8 @@ def test_flow_diagram_resolve(resolver, scene_base):
     assert nodes == ["Manufacturer", "Distribution Center", "Retailer"]
     edges = payload.inputs[TemplateInputKey.EDGES]
     assert edges == [
-        TemplateEdge(from_node="Manufacturer", to_node="Distribution Center"),
-        TemplateEdge(from_node="Distribution Center", to_node="Retailer")
+        TemplateEdge(from_node="Manufacturer", to_node="Distribution Center", label="ships"),
+        TemplateEdge(from_node="Distribution Center", to_node="Retailer", label="sends")
     ]
 
 
@@ -96,14 +96,10 @@ def test_flow_diagram_resolves_sealed_conceptual_text(resolver, scene_base):
         rationale="",
     )
 
-    payload = resolver.resolve(scene_base, direction)
+    # Concept lists do not support a directed mechanism relationship.
+    with pytest.raises(TemplatePayloadError):
+        resolver.resolve(scene_base, direction)
 
-    assert payload.inputs[TemplateInputKey.NODES] == [
-        "system architecture",
-        "workflow pipeline",
-        "components",
-        "data stages",
-    ]
 
 
 def test_flow_diagram_resolves_independent_lowercase_concepts(resolver, scene_base):

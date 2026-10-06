@@ -721,6 +721,7 @@ class VisualDirectorBeatAdapter:
                 VisualAssetRequirement(
                     kind=kind,
                     query_hint=beat.asset_query_hint or scene.asset_query_hint,
+                    source_text=scene.asset_source_text,
                     purpose=f"Visual asset for beat {beat.beat_index} ({beat.visual_role.value})",
                     required=True,
                 )

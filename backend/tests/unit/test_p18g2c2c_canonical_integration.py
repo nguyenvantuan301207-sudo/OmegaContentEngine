@@ -100,6 +100,8 @@ def _execution(plan):
         provider = index != 1
         assets.append(
             SimpleNamespace(
+                parent_scene_index=1,
+                beat_index=index,
                 action=(
                     BeatAssetAction.REUSE_COMPATIBLE if index == 2 else
                     BeatAssetAction.ACQUIRE_IF_NEEDED if provider else
@@ -108,6 +110,7 @@ def _execution(plan):
                 required_kind=VisualAssetKind.BROLL if provider else None,
                 reuse_from_beat_index=0 if index == 2 else None,
                 resolved_asset=acquired if provider else None,
+                fallback_reason_code=None,
             )
         )
     return SimpleNamespace(parent_scene_index=1, assets=tuple(assets))
@@ -353,7 +356,7 @@ async def test_pre_provider_ineligibility_and_one_beat_plan_use_legacy(tmp_path,
 
 
 def test_g2c2c_version_boundaries_are_exact():
-    assert CANONICAL_RENDER_SEMANTICS_VERSION == 6
+    assert CANONICAL_RENDER_SEMANTICS_VERSION == 7
     assert SUBTITLE_SEMANTICS_VERSION == 3
 
 

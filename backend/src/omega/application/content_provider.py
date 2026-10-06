@@ -7,7 +7,6 @@ from typing import Any, Protocol
 from omega.application.content_pacing import (
     DEFAULT_PACE,
     estimate_duration_seconds,
-    estimate_target_word_count,
     plan_retention_beats,
 )
 from omega.domain.content import ContentStatementType, HookType
@@ -354,27 +353,12 @@ class TemplateContentProvider:
         sec_duration = target_duration_seconds // num_sections
         beats = plan_retention_beats(target_duration_seconds, num_sections)
 
-        target_words = estimate_target_word_count(target_duration_seconds, pace)
-        words_per_section = max(20, target_words // num_sections)
-
-        domain_neutral_lenses = (
-            "the primary operational factors and observed boundary conditions",
-            "observable indicators and variables that practitioners should monitor",
-            "the causal progression and preventative safeguards",
-            "trade-offs between immediate intervention and long-term stability",
-            "structured inspection criteria based on verified evidence",
-            "connecting these documented observations to disciplined decision-making",
-            "the underlying stages, physical dynamics, and material relationships",
-            "synthesizing the evidence-backed priorities for execution",
-        )
-
         claim_map = {str(c.get("claim_id")): c for c in verified_claims if c.get("claim_id")}
 
         sections: list[dict[str, Any]] = []
 
         for idx, outline_sec in enumerate(outline_sections):
             heading = outline_sec.get("title", f"Section {idx + 1}")
-            objective = outline_sec.get("objective", f"Examine {heading}.")
             key_points = outline_sec.get("key_points") or [heading]
             claim_refs = set(outline_sec.get("claim_refs") or [])
 
@@ -386,56 +370,34 @@ class TemplateContentProvider:
 
             raw_stmts: list[tuple[str, ContentStatementType, str | None, list[dict[str, Any]]]] = []
 
-            # 1. Orientation / Transition
-            if idx == 0:
-                trans_text = f"In this analysis, we examine {objective.lower().rstrip('.')}."
-            else:
-                trans_text = (
-                    outline_sec.get("transition")
-                    or f"Moving forward, we examine {objective.lower().rstrip('.')}."
-                )
-            raw_stmts.append((trans_text, ContentStatementType.TRANSITION, None, []))
+            from omega.application.script_meta_guard import is_meta_content, is_source_proposition
+            from omega.application.semantic_asset_query import subject_tokens
 
-            # 2. Verified factual claims with exact citations
+            # Preserve exact claims and citations. Never increase duration by padding.
             for vc in sec_verified_claims:
                 claim_text = vc.get("text") or vc.get("claim_text", "")
-                cits = [
-                    {
-                        "research_brief_id": brief_dict.get("id"),
-                        "claim_id": vc.get("claim_id"),
-                        "evidence_id": cit.get("evidence_id"),
-                        "source_id": cit.get("source_id"),
-                    }
-                    for cit in vc.get("citations", [])
-                ]
-                raw_stmts.append(
-                    (f"Research confirms: {claim_text}", ContentStatementType.FACTUAL, None, cits)
-                )
+                if not claim_text.strip() or is_meta_content(claim_text):
+                    continue
+                cits = [{
+                    "research_brief_id": brief_dict.get("id"),
+                    "claim_id": vc.get("claim_id"),
+                    "evidence_id": cit.get("evidence_id"),
+                    "source_id": cit.get("source_id"),
+                } for cit in vc.get("citations", [])]
+                raw_stmts.append((claim_text, ContentStatementType.FACTUAL, None, cits))
 
-            # 3. Grounded key points
+            # Source key points may be used verbatim only when they are substantive
+            # subject-specific prose, not plan role placeholders or instructions.
+            topic_words = set(subject_tokens(topic_title))
             for kp in key_points:
-                kp_clean = kp.rstrip(".")
-                text = (
-                    f"Regarding {kp_clean.lower()}, practitioners must evaluate the operational process, "
-                    f"foundational mechanisms, and core components that govern {topic_title}."
-                )
-                raw_stmts.append((text, ContentStatementType.INTERPRETIVE, None, []))
-
-            # 4. Word count & depth scaling
-            current_words = sum(len(t.split()) for t, *_ in raw_stmts)
-            lens_index = 0
-            while current_words < words_per_section and lens_index < len(domain_neutral_lenses):
-                kp_clean = key_points[lens_index % len(key_points)].rstrip(".")
-                lens = domain_neutral_lenses[lens_index]
-                text = (
-                    f"For {kp_clean.lower()}, this section examines {lens}. "
-                    f"The analysis connects the specific behavior of {topic_title} to verified "
-                    "principles, identifies what would challenge working assumptions, "
-                    "and explains how practitioners can apply the finding with rigorous care."
-                )
-                raw_stmts.append((text, ContentStatementType.INTERPRETIVE, None, []))
-                current_words += len(text.split())
-                lens_index += 1
+                if not is_source_proposition(kp) or not topic_words.intersection(subject_tokens(kp)):
+                    continue
+                if len(kp.split()) < 6 or kp.lower().startswith(("factual detail", "core mechanism", "key detail")):
+                    continue
+                if kp.strip() not in [t for t, *_ in raw_stmts]:
+                    raw_stmts.append((kp.strip(), ContentStatementType.INTERPRETIVE, None, []))
+            if not raw_stmts:
+                raise ValueError(f"INSUFFICIENT_GROUNDED_SCRIPT_CONTENT: section {idx + 1}")
 
             statements = []
             for s_idx, (st_text, s_type, q_note, cits) in enumerate(raw_stmts):

@@ -186,9 +186,11 @@ async def test_partial_parent_preserves_success_and_immutable_timeline(tmp_path,
         assert truth.source_url == "https://example.com/media"
         assert truth.source_page_url == "https://example.com/page"
         assert truth.license_url == "https://example.com/license"
-        assert truth.provider_metadata == {"id": 9, "url": "https://example.com/photo"}
+        assert truth.provider_metadata["id"] == 9
+        assert truth.provider_metadata["url"] == "https://example.com/photo"
+        assert truth.provider_metadata.get("semantic_relevance", {}).get("code") == "VALID"
         assert truth.asset_action == "ACQUIRE_IF_NEEDED"
-    assert renderer.render_plan.call_args.kwargs["asset_execution"].assets[0].resolved_asset is resolved
+    assert renderer.render_plan.call_args.kwargs["asset_execution"].assets[0].resolved_asset.asset_id == resolved.asset_id
 
 
 @pytest.mark.asyncio

@@ -145,6 +145,18 @@ def run_content_qa_checks(
 ) -> tuple[ScriptQAStatus, list[dict[str, Any]]]:
     """Execute canonical local QA checks against script draft, Channel DNA, and ResearchBrief."""
     findings: list[dict[str, Any]] = []
+    from omega.application.script_meta_guard import script_meta_evidence
+
+    meta = script_meta_evidence(script_data)
+    if meta:
+        findings.append({
+            "rule_code": QARuleCode.SCRIPT_META_CONTENT.value,
+            "severity": QASeverity.BLOCKING.value,
+            "message": "Planning instructions or repeated padding in viewer copy.",
+            "section_index": None,
+            "statement_order": None,
+            "details": {"evidence_count": len(meta)},
+        })
 
     sections = script_data.get("sections", [])
     hook_text = script_data.get("hook_text", "").strip()

@@ -741,6 +741,11 @@ class ProductionQAEngine:
                     )
 
         # ── Calculate Overall Status ──
+        from omega.application.creative_semantic_qa import semantic_production_findings
+
+        findings.extend(semantic_production_findings(
+            script_version_data, snapshot=runtime_truth_snapshot, scenes=scenes_data,
+        ))
         has_blocking = any(
             f.severity in (ProductionQASeverity.BLOCKING, ProductionQASeverity.ERROR)
             for f in findings

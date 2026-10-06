@@ -109,6 +109,7 @@ def _snapshot(beats: list[dict]) -> ProductionRuntimeTruthSnapshot:
             "scenes": [
                 {
                     "sequence_index": 1,
+                    "narration_text": "Asset A enters the queue, then Asset B produces the output.",
                     "original_strategy": "BROLL",
                     "effective_strategy": "BROLL",
                     "template_id": None,
@@ -165,7 +166,7 @@ def _inputs(snapshot: ProductionRuntimeTruthSnapshot) -> dict:
             "target_height": 1080,
             "video_codec": "h264",
         },
-        "script_version_data": {"id": "script"},
+        "script_version_data": {"id": "script", "title": "Asset A and Asset B processing"},
         "content_request_data": {"channel_dna_revision_id": "dna"},
         "assets_data": [
             {

@@ -19,6 +19,7 @@ class VisualAssetRequest(BaseModel):
     query: str
     purpose: str
     required: bool
+    source_text: str | None = None
     preferred_orientation: str | None = None
     preferred_width: int | None = None
     preferred_height: int | None = None
@@ -125,6 +126,7 @@ class VisualAssetEngine:
                 query=clean_query,
                 purpose=requirement.purpose,
                 required=requirement.required,
+                source_text=requirement.source_text,
                 preferred_orientation=None,
                 preferred_width=None,
                 preferred_height=None,
@@ -145,6 +147,15 @@ class VisualAssetEngine:
                 continue
             if not c.source_url and not c.source_page_url:
                 continue
+            if request.source_text is not None:
+                from omega.application.semantic_asset_query import validate_provider_semantics
+
+                decision = validate_provider_semantics(
+                    source_text=request.source_text, query=request.query,
+                    metadata=c.metadata, source_page_url=c.source_page_url,
+                )
+                if not decision.valid:
+                    continue
             valid_candidates.append((i, c))
 
         if not valid_candidates:

@@ -69,7 +69,11 @@ def test_1_and_2_generic_provider_domain_neutral_and_concrete_canary():
 
     intent = provider.generate_intent(topic, None, brief, dna)
     hooks = provider.generate_hooks(topic, brief, dna, intent)
-    outline = provider.generate_outline(topic, brief, dna, intent, hooks[0], 480)
+    outline = {"sections": [{
+        "title": "Grounded subject mechanisms",
+        "key_points": [],
+        "claim_refs": [c["claim_id"] for c in brief["verified_claims"]],
+    }]}
     script = provider.generate_script(topic, brief, dna, intent, hooks[0], outline, 480)
 
     forbidden_backend_terms = [
@@ -119,7 +123,11 @@ def test_3_software_topic_allowed_when_grounded_in_authority():
 
     intent = provider.generate_intent(topic, None, brief, dna)
     hooks = provider.generate_hooks(topic, brief, dna, intent)
-    outline = provider.generate_outline(topic, brief, dna, intent, hooks[0], 300)
+    outline = {"sections": [{
+        "title": "Grounded subject mechanisms",
+        "key_points": [],
+        "claim_refs": [c["claim_id"] for c in brief["verified_claims"]],
+    }]}
     script = provider.generate_script(topic, brief, dna, intent, hooks[0], outline, 300)
 
     # QA check must pass without TOPIC_AUTHORITY_MISMATCH
@@ -156,7 +164,7 @@ def test_4_and_5_narrative_plan_drives_script_and_claims_preserve_citations():
             section_order=1,
             role=NarrativeSectionRole.HOOK,
             objective="Engage civil engineers with concrete cracking puzzle.",
-            key_information=["Visual evidence of cracking", "Economic impact of premature failure"],
+            key_information=["Concrete cracks form when surface moisture evaporates before curing."],
             target_duration_seconds=30,
             target_information_density=InformationDensity.LOW,
             transition_hint="Let's examine the first mechanism.",
@@ -186,7 +194,7 @@ def test_4_and_5_narrative_plan_drives_script_and_claims_preserve_citations():
             section_order=3,
             role=NarrativeSectionRole.CLOSING,
             objective="Summarize mitigation strategies and best practices.",
-            key_information=["Early curing methods", "Moisture barriers"],
+            key_information=["Concrete curing reduces moisture loss at the surface."],
             target_duration_seconds=30,
             target_information_density=InformationDensity.MEDIUM,
             transition_hint="Closing perspective.",
@@ -321,7 +329,11 @@ def test_9_valid_topic_aligned_content_not_blocked():
 
     intent = provider.generate_intent(topic, None, brief, dna)
     hooks = provider.generate_hooks(topic, brief, dna, intent)
-    outline = provider.generate_outline(topic, brief, dna, intent, hooks[0], 200)
+    outline = {"sections": [{
+        "title": "Grounded subject mechanisms",
+        "key_points": [],
+        "claim_refs": [c["claim_id"] for c in brief["verified_claims"]],
+    }]}
     script = provider.generate_script(topic, brief, dna, intent, hooks[0], outline, 200)
 
     status, findings = run_content_qa_checks(

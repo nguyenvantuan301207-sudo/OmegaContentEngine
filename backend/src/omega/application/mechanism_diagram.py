@@ -53,6 +53,11 @@ def _clean_node(phrase: str) -> str | None:
     if not cleaned:
         return None
 
+    from omega.application.script_meta_guard import is_meta_content
+    from omega.application.semantic_asset_query import subject_tokens
+
+    if is_meta_content(cleaned) or not subject_tokens(cleaned):
+        return None
     words = cleaned.split()
     # Reject oversized clauses
     if len(cleaned) > 85 or len(words) > 10:
@@ -162,6 +167,38 @@ def resolve_mechanism_diagram_spec(text: str) -> MechanismDiagramSpec | None:
     if m:
         cause, effect = m.group(1), m.group(2)
         return _build_spec(cause, effect, source_text=text)
+
+    m = re.fullmatch(
+        r"(?:the\s+)?(.+?)\s+(moves|flows)\s+through\s+(.+?)\s+into\s+(.+?)\.?",
+        norm_text, flags=re.IGNORECASE,
+    )
+    if m:
+        nodes = tuple(_clean_node(m.group(i)) for i in (1, 3, 4))
+        if all(nodes) and len(set(nodes)) == 3:
+            return MechanismDiagramSpec(
+                nodes=nodes,
+                edges=(MechanismDiagramEdge(from_node=nodes[0], to_node=nodes[1], label=m.group(2)),
+                       MechanismDiagramEdge(from_node=nodes[1], to_node=nodes[2], label=m.group(2))),
+                source_text=text,
+            )
+
+    # Explicit transfer/flow grammar: relation verbs, not capitalization or order.
+    m = re.fullmatch(
+        r"(?:the\s+)?(.+?)\s+(ships|sends|transfers|passes|feeds|moves|flows)\s+"
+        r"(?:products\s+|data\s+|them\s+)?(?:to|through|into)\s+(?:the\s+)?(.+?)"
+        r"(?:,\s*which\s+(sends|transfers|passes|feeds|moves|notifies)\s+(?:them\s+|data\s+)?(?:to\s+)?(?:the\s+)?(.+?))?\.?",
+        norm_text, flags=re.IGNORECASE,
+    )
+    if m:
+        raw_nodes = [m.group(1), m.group(3)] + ([m.group(5)] if m.group(5) else [])
+        nodes = [_clean_node(n) for n in raw_nodes]
+        if all(nodes) and len(set(nodes)) == len(nodes):
+            labels = [m.group(2), m.group(4)]
+            return MechanismDiagramSpec(
+                nodes=tuple(nodes),
+                edges=tuple(MechanismDiagramEdge(from_node=nodes[i], to_node=nodes[i + 1], label=labels[i]) for i in range(len(nodes) - 1)),
+                source_text=text,
+            )
 
     return None
 

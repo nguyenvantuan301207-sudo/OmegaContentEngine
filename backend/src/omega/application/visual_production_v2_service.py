@@ -180,7 +180,7 @@ class VerticalSliceError(Exception):
 
 KARAOKE_SUBTITLE_VERSION = "v1"
 SUBTITLE_SEMANTICS_VERSION = 3
-CANONICAL_RENDER_SEMANTICS_VERSION = 6
+CANONICAL_RENDER_SEMANTICS_VERSION = 7
 FINAL_MASTER_TARGET_I = -16.0
 FINAL_MASTER_TARGET_TP = -1.5
 FINAL_MASTER_TARGET_LRA = 7.0
@@ -1070,15 +1070,15 @@ class VisualProductionV2Service:
             # replaces only affected units in a new execution plan.
             units = []
             for unit in plan.units:
-                direction_view = unit.direction_view
-                if direction_view.template_id == VisualTemplateId.FLOW_DIAGRAM:
-                    scene_view = unit.scene_view
+                direction_view = getattr(unit, "direction_view", None)
+                if getattr(direction_view, "template_id", None) == VisualTemplateId.FLOW_DIAGRAM:
+                    scene_view = getattr(unit, "scene_view", None)
                     unit_content = (
-                        scene_view.narration_excerpt
-                        or scene_view.on_screen_text
-                        or scene_view.visual_brief
+                        getattr(scene_view, "narration_excerpt", None)
+                        or getattr(scene_view, "on_screen_text", None)
+                        or getattr(scene_view, "visual_brief", None)
                     )
-                    dir_meta = direction_view.metadata or {}
+                    dir_meta = getattr(direction_view, "metadata", None) or {}
                     is_g2 = (
                         dir_meta.get("semantic_role")
                         == BeatSemanticRole.MECHANISM.value
@@ -1203,8 +1203,11 @@ class VisualProductionV2Service:
                         provider_metadata=(
                             _safe_provider_metadata(provider_asset.metadata)
                             if provider_asset else (
-                                {"fallback_reason_code": asset.fallback_reason_code}
-                                if asset.fallback_reason_code else {}
+                                {"fallback_reason_code": getattr(asset, "fallback_reason_code", None)}
+                                if getattr(asset, "fallback_reason_code", None) else (
+                                    {"diagram_semantics": getattr(metadata, "diagram_semantics", None)}
+                                    if getattr(metadata, "diagram_semantics", None) else {}
+                                )
                             )
                         ),
                         provider_asset_content_sha256=(
@@ -1232,8 +1235,8 @@ class VisualProductionV2Service:
                 "visual_width": None,
                 "visual_height": None,
                 "visual_duration_ms": duration_ms,
-                "text_fitting": (),
-                "text_truncated": False,
+                "text_fitting": tuple(item for meta in rendered.beat_metadata for item in getattr(meta, "text_fitting", ())),
+                "text_truncated": any(item.get("text_truncated", False) for meta in rendered.beat_metadata for item in getattr(meta, "text_fitting", ())),
             }
 
         if scene.visual_strategy in (VisualStrategy.IMAGE, VisualStrategy.BROLL):

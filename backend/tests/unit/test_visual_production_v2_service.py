@@ -779,6 +779,9 @@ async def test_full_successful_vertical_slice_v0(tmp_path: Path, lineage_data, m
     assert manifest["content_sha256"] == res.content_sha256
     assert manifest["visual_asset_mode"] == "PEXELS"
     provider_metadata = manifest["scenes"][1]["asset_provider_metadata"]
+    semantic_relevance = provider_metadata.pop("semantic_relevance")
+    assert semantic_relevance["code"] == "VALID"
+    assert semantic_relevance["source_anchors"]
     assert provider_metadata == {
         "download": "https://cdn.example/video.mp4",
         "nested": {
@@ -840,7 +843,7 @@ async def test_provider_secret_error_redaction(tmp_path: Path):
     scene = StoryboardScene(
         sequence_index=1, section_id="Sec1", purpose="Hook", source_statement_references=[1],
         narration_excerpt="Title scene hook", estimated_duration_seconds=5,
-        visual_strategy=VisualStrategy.IMAGE, visual_brief="Title", asset_query_hint="ocean clouds",
+        visual_strategy=VisualStrategy.IMAGE, visual_brief="Title", asset_query_hint="title scene",
     )
     result = await svc._render_parent_visual(
         script_dict={}, scene=scene, duration_seconds=5, canonical_visual_mode="PEXELS",
@@ -1801,7 +1804,7 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data, provider_failur
                 ),
                 StoryboardScene(
                     sequence_index=2, section_id="Sec2", purpose="Body", source_statement_references=[2],
-                    narration_excerpt="Body", estimated_duration_seconds=5.0, visual_strategy=VisualStrategy.IMAGE, visual_brief="Body", asset_query_hint="test image"
+                    narration_excerpt="Body", estimated_duration_seconds=5.0, visual_strategy=VisualStrategy.IMAGE, visual_brief="Body", asset_query_hint="body"
                 )
             ],
         )
@@ -1842,7 +1845,7 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data, provider_failur
             base_fingerprint,
             scene_index=2,
             visual_strategy_override=VisualStrategy.IMAGE,
-            asset_query_override="regenerated query test",
+            asset_query_override="body",
         )
     assert orch.resolve.await_count == provider_calls_before_rejection
     assert render_calls == render_calls_before_rejection
@@ -1867,7 +1870,7 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data, provider_failur
     res_rev1 = await svc.regenerate_scene(
         session, m_exec.id, req.id, base_fingerprint, scene_index=2,
         visual_strategy_override=VisualStrategy.IMAGE,
-        asset_query_override="regenerated query test"
+        asset_query_override="body"
     )
 
     # Verify ONLY selected scene rendered
@@ -1931,7 +1934,7 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data, provider_failur
     res_rev1_dup = await svc.regenerate_scene(
         session, m_exec.id, req.id, base_fingerprint, scene_index=2,
         visual_strategy_override=VisualStrategy.IMAGE,
-        asset_query_override="regenerated query test"
+        asset_query_override="body"
     )
     assert res_rev1_dup.run_fingerprint == rev1_fingerprint
     assert render_calls == []
@@ -1941,7 +1944,7 @@ async def test_regenerate_scene_v1(tmp_path: Path, lineage_data, provider_failur
     res_rev2 = await svc.regenerate_scene(
         session, m_exec.id, req.id, base_fingerprint, scene_index=2,
         visual_strategy_override=VisualStrategy.BROLL,
-        asset_query_override="regenerated query test"
+        asset_query_override="body"
     )
     assert res_rev2.run_fingerprint != rev1_fingerprint
     assert res_rev2.run_fingerprint != base_fingerprint

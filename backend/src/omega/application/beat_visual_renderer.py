@@ -203,6 +203,8 @@ class BeatClipMetadata(BaseModel):
     template_id: VisualTemplateId = Field(description="Resolved template ID")
     camera_motion_intent: BeatMotionIntent = Field(description="Applied camera motion intent")
     video_sha256: str = Field(description="SHA-256 hash of rendered beat MP4")
+    text_fitting: tuple[dict, ...] = ()
+    diagram_semantics: dict | None = None
 
 
 class BeatVisualRenderResult(BaseModel):
@@ -395,6 +397,10 @@ class BeatVisualRenderer:
                     template_id=unit.direction_view.template_id,
                     camera_motion_intent=unit.camera_motion_intent,
                     video_sha256=video_result.video_sha256,
+                    text_fitting=tuple(item.model_dump() for item in doc.text_fitting),
+                    diagram_semantics=({"source_text": unit.scene_view.narration_excerpt,
+                                        "inputs": payload.model_dump(mode="json")["inputs"]}
+                                       if payload.template_id == VisualTemplateId.FLOW_DIAGRAM else None),
                 )
                 return rendered_clip, metadata
 

@@ -167,6 +167,7 @@ class PexelsAssetProvider:
                     metadata={
                         "photographer": photographer,
                         "photographer_url": photo.get("photographer_url"),
+                        **({"alt": photo["alt"]} if isinstance(photo.get("alt"), str) else {}),
                         "search_query": request.query,
                     }
                 ))

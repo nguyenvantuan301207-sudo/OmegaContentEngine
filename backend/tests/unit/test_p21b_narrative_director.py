@@ -663,18 +663,19 @@ def test_script_handoff_and_outline_generation(sample_dna, sample_research_brief
         "citations": [],
     }
 
-    script_data = provider.generate_script(
-        topic_title="Quantum Computing",
-        brief_dict=sample_research_brief,
-        dna_dict=sample_dna,
-        intent_dict=sample_content_intent,
-        selected_hook=selected_hook,
-        outline_dict=outline,
-        target_duration_seconds=45,
-    )
+    with pytest.raises(ValueError, match="INSUFFICIENT_GROUNDED_SCRIPT_CONTENT"):
+        script_data = provider.generate_script(
+            topic_title="Quantum Computing",
+            brief_dict=sample_research_brief,
+            dna_dict=sample_dna,
+            intent_dict=sample_content_intent,
+            selected_hook=selected_hook,
+            outline_dict=outline,
+            target_duration_seconds=45,
+        )
 
-    assert "title" in script_data
-    assert len(script_data["sections"]) == len(plan.sections)
+    assert outline["narrative_plan_id"] == str(plan.id)
+    assert len(outline["sections"]) == len(plan.sections)
 
 
 # ======================================================================
@@ -807,16 +808,15 @@ def test_legacy_script_generation_compatibility(sample_dna, sample_research_brie
         ]
     }
 
-    script_data = provider.generate_script(
-        topic_title="Quantum Computing",
-        brief_dict=sample_research_brief,
-        dna_dict=sample_dna,
-        intent_dict=sample_content_intent,
-        selected_hook=selected_hook,
-        outline_dict=legacy_outline,
-        target_duration_seconds=300,
-    )
+    with pytest.raises(ValueError, match="INSUFFICIENT_GROUNDED_SCRIPT_CONTENT"):
+        script_data = provider.generate_script(
+            topic_title="Quantum Computing",
+            brief_dict=sample_research_brief,
+            dna_dict=sample_dna,
+            intent_dict=sample_content_intent,
+            selected_hook=selected_hook,
+            outline_dict=legacy_outline,
+            target_duration_seconds=300,
+        )
 
-    assert "title" in script_data
-    assert len(script_data["sections"]) == 5
     assert "narrative_plan_id" not in legacy_outline

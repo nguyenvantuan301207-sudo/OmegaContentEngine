@@ -437,6 +437,7 @@ class ProductionRenderService:
             "video_codec": req.video_codec,
         }
         script_data = {
+            "title": req.script_version.title,
             "id": req.script_version_id,
             "hook_text": req.script_version.hook_text,
             "cta_text": req.script_version.cta_text,

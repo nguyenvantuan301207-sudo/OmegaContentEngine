@@ -10,10 +10,40 @@ from omega.application.storyboard_engine import (
 
 def test_storyboard_engine_longform():
     provider = TemplateContentProvider()
-    intent = provider.generate_intent("Understanding the Global Logistics Supply Chain", None, {}, {})
-    hooks = provider.generate_hooks("Understanding the Global Logistics Supply Chain", {}, {}, intent)
-    outline = provider.generate_outline("Understanding the Global Logistics Supply Chain", {}, {}, intent, hooks[0], 450)
-    script = provider.generate_script("Understanding the Global Logistics Supply Chain", {}, {}, intent, hooks[0], outline, 450)
+    topic = "Understanding the Global Logistics Supply Chain"
+    verified_claims = [
+        {
+            "claim_id": f"c-00{i}",
+            "text": f"Global supply chain logistics mechanism {i} requires verified tracking of cargo vessels across international freight lanes.",
+            "citations": [{"evidence_id": f"ev-{i}", "source_id": f"src-{i}"}],
+        }
+        for i in range(1, 35)
+    ]
+    verified_claims[5]["text"] = "In this logistics pipeline, port congestion causes container dwell times to exceed operational limits."
+    brief = {
+        "id": "brief-logistics",
+        "title": topic,
+        "summary": "Verified logistics supply chain dynamics.",
+        "verified_claims": verified_claims,
+        "uncertain_claims": [],
+        "contradictions": [],
+    }
+    dna = {"brand_voice": {"tone": "AUTHORITATIVE", "pace": "MODERATE"}}
+    intent = provider.generate_intent(topic, None, brief, dna)
+    hook = provider.generate_hooks(topic, brief, dna, intent)[0]
+    sections = []
+    for idx in range(6):
+        c_slice = verified_claims[idx * 5 : (idx + 1) * 5]
+        sections.append({
+            "section_id": f"sec_{idx + 1}",
+            "title": f"Section {idx + 1} on Supply Chain Operations",
+            "key_points": [],
+            "claim_refs": [c["claim_id"] for c in c_slice],
+            "estimated_duration_seconds": 75,
+        })
+    outline = {"sections": sections, "narrative_plan_id": "np-1", "title": topic}
+    script = provider.generate_script(topic, brief, dna, intent, hook, outline, 450)
+    script["estimated_duration_seconds"] = 450
 
     # Inject actual code into one statement so longform storyboard exercises CODE_DEMO
     script["sections"][2]["statements"][0]["statement_text"] = "def optimize_pipeline(): return 42"
@@ -84,7 +114,8 @@ def test_storyboard_engine_routing_v2():
     check_strat("We define a function.", VisualStrategy.BROLL)
 
     # B. Architecture signal
-    check_strat("The system architecture defines the pipeline stages.", VisualStrategy.DIAGRAM)
+    check_strat("In this pipeline, high ingress traffic causes queue overflow across consumer nodes.", VisualStrategy.DIAGRAM)
+    check_strat("The system architecture defines the pipeline stages.", VisualStrategy.IMAGE)
 
     # C. Strong statistics
     check_strat("We saw a 50% increase in throughput.", VisualStrategy.STATISTIC)
