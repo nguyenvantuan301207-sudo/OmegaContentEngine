@@ -45,6 +45,16 @@ DEFAULT_MAX_RESPONSE_BYTES = 5_000_000  # 5MB safe bound
 MAX_RETRIES = 2
 MAX_RETRY_AFTER_SECONDS = 5.0
 
+# ── Response Normalization Bounds (P0.3c.1) ──
+MAX_DISCOVERY_SNIPPET_CHARS = 1000
+MAX_DISCOVERY_TITLE_CHARS = 300
+MAX_DISCOVERY_PUBLISHER_CHARS = 200
+MAX_DISCOVERY_URL_CHARS = 1000
+MAX_EXTRACTED_TITLE_CHARS = 300
+
+FALLBACK_DISCOVERY_TITLE = "Untitled source"
+FALLBACK_PUBLISHER = "unknown"
+
 
 def derive_publisher_from_url(url: str) -> str:
     """Deterministically derive a publisher name from a URL hostname."""
@@ -55,9 +65,45 @@ def derive_publisher_from_url(url: str) -> str:
             netloc = netloc[4:]
         if ":" in netloc:
             netloc = netloc.split(":")[0]
-        return netloc or "unknown"
+        publisher = netloc or FALLBACK_PUBLISHER
     except Exception:
-        return "unknown"
+        publisher = FALLBACK_PUBLISHER
+    publisher = publisher.strip()[:MAX_DISCOVERY_PUBLISHER_CHARS]
+    return publisher if publisher else FALLBACK_PUBLISHER
+
+
+def _normalize_discovery_snippet(raw: Any) -> str:
+    """Normalize untrusted search content into a bounded discovery snippet.
+
+    Discovery snippets are prospective references only, not canonical evidence.
+    """
+    if not isinstance(raw, str):
+        return ""
+    cleaned = raw.strip()
+    return cleaned[:MAX_DISCOVERY_SNIPPET_CHARS]
+
+
+def _normalize_discovery_title(raw: Any) -> str:
+    """Normalize untrusted search title into a safe, bounded string."""
+    if not isinstance(raw, str):
+        return FALLBACK_DISCOVERY_TITLE
+    cleaned = raw.strip()
+    if len(cleaned) < 2:
+        return FALLBACK_DISCOVERY_TITLE
+    return cleaned[:MAX_DISCOVERY_TITLE_CHARS]
+
+
+def _normalize_extracted_title(raw_title: Any, fallback_title: str | None = None) -> str:
+    """Normalize extracted document title, falling back to candidate title."""
+    if isinstance(raw_title, str):
+        cleaned = raw_title.strip()
+        if len(cleaned) >= 2:
+            return cleaned[:MAX_EXTRACTED_TITLE_CHARS]
+    if isinstance(fallback_title, str):
+        cleaned_fb = fallback_title.strip()
+        if len(cleaned_fb) >= 2:
+            return cleaned_fb[:MAX_EXTRACTED_TITLE_CHARS]
+    return FALLBACK_DISCOVERY_TITLE
 
 
 def _sanitize_secret(message: str, secret: str | None) -> str:
@@ -377,14 +423,32 @@ class TavilyDiscoveryProvider:
             if not isinstance(item, dict):
                 continue
             raw_url = item.get("url")
-            if not raw_url or not isinstance(raw_url, str):
+            if not isinstance(raw_url, str):
+                continue
+            raw_url_clean = raw_url.strip()
+            if not raw_url_clean:
                 continue
 
-            canonical_url = normalize_url(raw_url)
-            title = (item.get("title") or "Untitled").strip()
-            snippet = (item.get("content") or "").strip()
+            try:
+                canonical_url = normalize_url(raw_url_clean)
+                parsed_url = urlparse(canonical_url) if canonical_url else None
+            except Exception:
+                continue
+
+            # Normalized URL must be valid, have a network hostname, and be within bounded length. DO NOT truncate URLs.
+            if not canonical_url or not parsed_url or not parsed_url.netloc:
+                continue
+            if len(canonical_url) < 5 or len(canonical_url) > MAX_DISCOVERY_URL_CHARS:
+                continue
+
+            title = _normalize_discovery_title(item.get("title"))
+            snippet = _normalize_discovery_snippet(item.get("content"))
             publisher = derive_publisher_from_url(canonical_url)
-            score = item.get("score")
+
+            score_raw = item.get("score")
+            score: float | None = None
+            if isinstance(score_raw, (int, float)) and not isinstance(score_raw, bool):
+                score = float(score_raw)
 
             candidates.append(
                 DiscoveryCandidate(
@@ -476,26 +540,43 @@ class TavilyResearchContentExtractor:
         # Locate matching extraction result strictly by normalized URL
         matched_item: dict[str, Any] | None = None
         for item in results:
-            if isinstance(item, dict) and normalize_url(item.get("url", "")) == norm_url:
-                matched_item = item
-                break
+            if not isinstance(item, dict):
+                continue
+            item_url = item.get("url")
+            if not isinstance(item_url, str):
+                continue
+            try:
+                if normalize_url(item_url.strip()) == norm_url:
+                    matched_item = item
+                    break
+            except Exception:
+                continue
 
         if matched_item is None:
             self._url_cache[norm_url] = None
             return None
 
         raw_content = matched_item.get("raw_content")
-        if not raw_content or not isinstance(raw_content, str) or len(raw_content.strip()) < 15:
-            # Content unavailable or empty; MUST NOT fall back to snippet
+        if not raw_content or not isinstance(raw_content, str):
+            # Content unavailable or non-string; MUST NOT fall back to snippet
             self._url_cache[norm_url] = None
             return None
 
-        extracted_title = (matched_item.get("title") or candidate.title or "Untitled").strip()
+        cleaned_content = raw_content.strip()
+        if len(cleaned_content) < 15:
+            # Content too short; MUST NOT fall back to snippet
+            self._url_cache[norm_url] = None
+            return None
+
+        extracted_title = _normalize_extracted_title(
+            matched_item.get("title"),
+            fallback_title=candidate.title,
+        )
         extracted_doc = ExtractedResearchDocument(
             canonical_url=norm_url,
             title=extracted_title,
             publisher=candidate.publisher,
-            extracted_content=raw_content[:10000],
+            extracted_content=cleaned_content[:10000],
             content_provenance={
                 "extractor": "tavily_extract",
                 "extracted_url": norm_url,

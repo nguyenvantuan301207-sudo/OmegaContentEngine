@@ -78,6 +78,13 @@ from omega.infrastructure.models import (
     TopicCandidate,
 )
 from omega.infrastructure.tavily_provider import (
+    FALLBACK_DISCOVERY_TITLE,
+    FALLBACK_PUBLISHER,
+    MAX_DISCOVERY_PUBLISHER_CHARS,
+    MAX_DISCOVERY_SNIPPET_CHARS,
+    MAX_DISCOVERY_TITLE_CHARS,
+    MAX_DISCOVERY_URL_CHARS,
+    MAX_EXTRACTED_TITLE_CHARS,
     TAVILY_EXTRACT_URL,
     TAVILY_SEARCH_URL,
     TavilyAuthenticationError,
@@ -88,6 +95,7 @@ from omega.infrastructure.tavily_provider import (
     TavilyResponseTooLargeError,
     TavilyTimeoutError,
     TavilyUpstreamError,
+    derive_publisher_from_url,
 )
 from omega.worker import tasks as worker_tasks
 
@@ -2235,3 +2243,317 @@ async def test_canonical_default_zero_to_five_from_worker_budget():
     assert result["stop_reason"] == "COVERAGE_FULFILLED"
     assert len(session.sources) <= 15
     assert len(session.sources) == 15
+
+
+# ── 23. P0.3c.1 Response Normalization Tests ──
+
+
+@pytest.mark.asyncio
+async def test_search_snippet_oversized_bounded():
+    """Verify that search snippet > 1000 characters is bounded to <= 1000 without rejecting candidate."""
+    oversized_snippet = "A" * 5000
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {
+                    "url": "https://example.org/study-oversized",
+                    "title": "Valid Title",
+                    "content": oversized_snippet,
+                }
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidates = await provider.search("concrete mechanisms", limit=5)
+    assert len(candidates) == 1
+    cand = candidates[0]
+    assert len(cand.snippet) == MAX_DISCOVERY_SNIPPET_CHARS
+    assert len(cand.snippet) <= 1000
+    assert cand.snippet == "A" * 1000
+
+
+@pytest.mark.asyncio
+async def test_search_snippet_exact_limit_preserved():
+    """Verify that an exact 1000-character snippet is preserved completely."""
+    exact_snippet = "B" * 1000
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {
+                    "url": "https://example.org/study-exact",
+                    "title": "Exact Title",
+                    "content": exact_snippet,
+                }
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidates = await provider.search("concrete mechanisms", limit=5)
+    assert len(candidates) == 1
+    assert candidates[0].snippet == exact_snippet
+    assert len(candidates[0].snippet) == 1000
+
+
+@pytest.mark.asyncio
+async def test_search_snippet_non_string_handled_safely():
+    """Verify that non-string search content (e.g. None, int, dict) does not crash and yields empty string."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {"url": "https://example.org/doc1", "title": "Doc 1", "content": None},
+                {"url": "https://example.org/doc2", "title": "Doc 2", "content": 12345},
+                {"url": "https://example.org/doc3", "title": "Doc 3", "content": ["unexpected", "list"]},
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidates = await provider.search("concrete mechanisms", limit=5)
+    assert len(candidates) == 3
+    for cand in candidates:
+        assert cand.snippet == ""
+
+
+@pytest.mark.asyncio
+async def test_search_title_oversized_bounded():
+    """Verify that search title > 300 characters is bounded to <= 300."""
+    oversized_title = "C" * 600
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {
+                    "url": "https://example.org/oversized-title",
+                    "title": oversized_title,
+                    "content": "Short snippet",
+                }
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidates = await provider.search("concrete mechanisms", limit=5)
+    assert len(candidates) == 1
+    cand = candidates[0]
+    assert len(cand.title) == MAX_DISCOVERY_TITLE_CHARS
+    assert len(cand.title) <= 300
+    assert cand.title == "C" * 300
+
+
+@pytest.mark.asyncio
+async def test_search_title_invalid_or_missing_fallback():
+    """Verify that invalid, non-string, or too-short search title falls back to 'Untitled source'."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {"url": "https://example.org/t1", "title": None, "content": "test"},
+                {"url": "https://example.org/t2", "title": "", "content": "test"},
+                {"url": "https://example.org/t3", "title": " ", "content": "test"},
+                {"url": "https://example.org/t4", "title": "X", "content": "test"},  # < 2 chars
+                {"url": "https://example.org/t5", "title": 9999, "content": "test"},
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidates = await provider.search("concrete mechanisms", limit=5)
+    assert len(candidates) == 5
+    for cand in candidates:
+        assert cand.title == FALLBACK_DISCOVERY_TITLE
+        assert cand.title == "Untitled source"
+
+
+@pytest.mark.asyncio
+async def test_search_oversized_url_skipped_not_truncated():
+    """Verify that URL > 1000 characters is skipped entirely and NEVER truncated."""
+    long_path = "a" * 1050
+    oversized_url = f"https://example.org/{long_path}"
+    valid_url = "https://example.org/valid-path"
+    assert len(oversized_url) > MAX_DISCOVERY_URL_CHARS
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {"url": oversized_url, "title": "Oversized URL", "content": "test"},
+                {"url": valid_url, "title": "Valid URL", "content": "test"},
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidates = await provider.search("concrete mechanisms", limit=5)
+    assert len(candidates) == 1
+    assert candidates[0].canonical_url == valid_url
+    assert not any(c.canonical_url.startswith("https://example.org/a") for c in candidates)
+
+
+@pytest.mark.asyncio
+async def test_search_malformed_url_skipped():
+    """Verify that malformed or non-string URLs are skipped without raising exceptions."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {"url": None, "title": "No URL", "content": "test"},
+                {"url": 12345, "title": "Numeric URL", "content": "test"},
+                {"url": "", "title": "Empty URL", "content": "test"},
+                {"url": "   ", "title": "Whitespace URL", "content": "test"},
+                {"url": "http://", "title": "Too Short URL", "content": "test"},
+                {"url": "https://valid.org/doc", "title": "Valid", "content": "test"},
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidates = await provider.search("concrete mechanisms", limit=5)
+    assert len(candidates) == 1
+    assert candidates[0].canonical_url == "https://valid.org/doc"
+
+
+def test_derived_publisher_oversized_normalized():
+    """Verify that derived publisher name is safely bounded to MAX_DISCOVERY_PUBLISHER_CHARS (200)."""
+    long_subdomain = "sub." * 60  # > 240 chars
+    long_url = f"https://{long_subdomain}example.com/test"
+    pub = derive_publisher_from_url(long_url)
+    assert len(pub) <= MAX_DISCOVERY_PUBLISHER_CHARS
+    assert len(pub) <= 200
+    assert len(pub) > 0
+    assert derive_publisher_from_url("invalid_url_without_hostname") == FALLBACK_PUBLISHER
+
+
+@pytest.mark.asyncio
+async def test_search_result_unexpected_score_type_safe():
+    """Verify that score with unexpected type (string, dict, bool) defaults to None without crashing."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {"url": "https://example.org/s1", "title": "Title 1", "score": "0.95"},
+                {"url": "https://example.org/s2", "title": "Title 2", "score": True},
+                {"url": "https://example.org/s3", "title": "Title 3", "score": {"key": "val"}},
+                {"url": "https://example.org/s4", "title": "Title 4", "score": 0.88},
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidates = await provider.search("concrete mechanisms", limit=5)
+    assert len(candidates) == 4
+    assert candidates[0].metadata.get("discovery_score") is None
+    assert candidates[1].metadata.get("discovery_score") is None
+    assert candidates[2].metadata.get("discovery_score") is None
+    assert candidates[3].metadata.get("discovery_score") == 0.88
+
+
+@pytest.mark.asyncio
+async def test_extract_title_oversized_bounded():
+    """Verify that extract title > 300 characters is bounded to <= 300."""
+    long_extract_title = "E" * 500
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {
+                    "url": "https://engineering-standards.org/concrete/shrinkage",
+                    "title": long_extract_title,
+                    "raw_content": "Extensive investigation reveals plastic shrinkage cracking during early placement.",
+                }
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    extractor = TavilyResearchContentExtractor(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidate = DiscoveryCandidate(
+        canonical_url="https://engineering-standards.org/concrete/shrinkage",
+        title="Candidate Fallback Title",
+        publisher="engineering-standards.org",
+        snippet="Short snippet",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+    )
+
+    doc = await extractor.extract_document(candidate)
+    assert doc is not None
+    assert len(doc.title) == MAX_EXTRACTED_TITLE_CHARS
+    assert len(doc.title) <= 300
+    assert doc.title == "E" * 300
+
+
+@pytest.mark.asyncio
+async def test_extract_title_unusable_falls_back_to_candidate_title():
+    """Verify that extract title missing or empty falls back to candidate title."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {
+                    "url": "https://engineering-standards.org/concrete/shrinkage",
+                    "title": "",
+                    "raw_content": "Extensive investigation reveals plastic shrinkage cracking during early placement.",
+                }
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    extractor = TavilyResearchContentExtractor(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidate = DiscoveryCandidate(
+        canonical_url="https://engineering-standards.org/concrete/shrinkage",
+        title="Authoritative Candidate Title",
+        publisher="engineering-standards.org",
+        snippet="Short snippet",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+    )
+
+    doc = await extractor.extract_document(candidate)
+    assert doc is not None
+    assert doc.title == "Authoritative Candidate Title"
+
+
+@pytest.mark.asyncio
+async def test_extract_strict_url_match_enforced_and_no_fallback_to_other():
+    """Verify that extract only matches exact normalized URL and does not fall back to other results."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        data = {
+            "results": [
+                {
+                    "url": "https://other-domain.org/different-page",
+                    "title": "Other Page",
+                    "raw_content": "Extensive content about something else entirely.",
+                }
+            ]
+        }
+        return httpx.Response(200, json=data)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    extractor = TavilyResearchContentExtractor(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidate = DiscoveryCandidate(
+        canonical_url="https://engineering-standards.org/concrete/shrinkage",
+        title="Candidate Title",
+        publisher="engineering-standards.org",
+        snippet="Snippet text",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+    )
+
+    doc = await extractor.extract_document(candidate)
+    assert doc is None
