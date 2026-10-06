@@ -26,6 +26,11 @@ from omega.application.research_scorer import (
     determine_research_outcome,
     evaluate_claim_confidence,
 )
+from omega.domain.numeric_promise import (
+    NumericPromiseContract,
+    extract_distinct_entities,
+    extract_numeric_promise,
+)
 from omega.application.source_independence import cluster_source_independence
 from omega.application.source_normalizer import (
     bound_excerpt,
@@ -144,6 +149,12 @@ async def create_research_request(
             )
 
     request_id = uuid.uuid4()
+    req_metadata = dict(request_in.metadata or {})
+    if "numeric_contract" not in req_metadata and topic and topic.title:
+        promise = extract_numeric_promise(topic.title)
+        if promise:
+            req_metadata["numeric_contract"] = promise.to_dict()
+
     req = ResearchRequest(
         id=request_id,
         channel_id=channel_id,
@@ -158,7 +169,7 @@ async def create_research_request(
         max_sources=request_in.max_sources,
         minimum_source_quality=request_in.minimum_source_quality,
         minimum_claim_confidence=request_in.minimum_claim_confidence,
-        metadata_=request_in.metadata,
+        metadata_=req_metadata,
     )
     session.add(req)
     await session.commit()
@@ -645,12 +656,39 @@ async def run_research(
     uncertain_claims = [c for c in claims if not c.is_verified]
     independent_clusters_count = len(set(clusters.values()))
 
+    topic_title = req.topic_candidate.title if req.topic_candidate else (req.research_question or "Research Topic")
+
+    # Resolve numeric promise contract
+    contract: NumericPromiseContract | None = None
+    req_meta = dict(req.metadata_ or {})
+    if "numeric_contract" in req_meta and isinstance(req_meta["numeric_contract"], dict):
+        contract = NumericPromiseContract.from_dict(req_meta["numeric_contract"])
+    elif req.topic_candidate and req.topic_candidate.metadata_ and "numeric_contract" in req.topic_candidate.metadata_:
+        contract = NumericPromiseContract.from_dict(req.topic_candidate.metadata_["numeric_contract"])
+    elif topic_title:
+        contract = extract_numeric_promise(topic_title)
+
+    distinct_entities: list[str] = []
+    promised_count: int | None = None
+    distinct_entities_count: int | None = None
+    if contract:
+        promised_count = contract.promised_count
+        vclaim_texts = [c.claim_text for c in verified_claims]
+        distinct_entities = extract_distinct_entities(
+            vclaim_texts,
+            topic_title=topic_title,
+            entity_type=contract.entity_type,
+        )
+        distinct_entities_count = len(distinct_entities)
+
     outcome = determine_research_outcome(
         sources_count=len(eligible_sources),
         independent_sources_count=independent_clusters_count,
         verified_claims_count=len(verified_claims),
         open_high_conflicts_count=len(open_conflicts),
         profile=outcome_profile,
+        promised_count=promised_count,
+        distinct_entities_count=distinct_entities_count,
     )
 
     avg_conf = sum(c.confidence_score for c in claims) / len(claims) if claims else 0.0
@@ -746,7 +784,14 @@ async def run_research(
         if c.claim_type == ClaimType.QUOTE.value
     ]
 
-    topic_title = req.topic_candidate.title if req.topic_candidate else "Research Topic"
+    brief_metadata: dict[str, Any] = {}
+    if contract:
+        brief_metadata["numeric_contract"] = contract.to_dict()
+        brief_metadata["distinct_entities_supported"] = distinct_entities
+        brief_metadata["distinct_entities_count"] = len(distinct_entities)
+        brief_metadata["promised_count"] = contract.promised_count
+        brief_metadata["numeric_promise_fulfilled"] = (len(distinct_entities) >= contract.promised_count)
+
     summary_text = (
         f"Research briefing for '{topic_title}'. "
         f"Analyzed {len(eligible_sources)} qualifying sources of {len(sources)} stored sources "
@@ -790,6 +835,7 @@ async def run_research(
                 1 for s in eligible_sources if s.primary_source_status == PrimarySourceStatus.CONFIRMED.value
             ),
         },
+        metadata_=brief_metadata,
     )
     session.add(brief)
 

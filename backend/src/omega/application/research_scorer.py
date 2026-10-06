@@ -293,14 +293,27 @@ def determine_research_outcome(
     verified_claims_count: int,
     open_high_conflicts_count: int,
     profile: ResearchOutcomeProfile = DEFAULT_OUTCOME_PROFILE,
+    promised_count: int | None = None,
+    distinct_entities_count: int | None = None,
 ) -> ResearchOutcome:
     """Determine SUFFICIENT / PARTIAL / INSUFFICIENT research outcome."""
-    if (
+    normal_sufficient = (
         sources_count >= profile.min_sources_sufficient
         and independent_sources_count >= profile.min_independent_sources_sufficient
         and verified_claims_count >= profile.min_verified_claims_sufficient
         and open_high_conflicts_count <= profile.max_open_high_conflicts_sufficient
-    ):
+    )
+
+    if normal_sufficient:
+        if promised_count is not None and promised_count > 0:
+            if distinct_entities_count is None or distinct_entities_count < promised_count:
+                # Fails numeric promise coverage requirement
+                if (
+                    sources_count >= profile.min_sources_partial
+                    and verified_claims_count >= profile.min_claims_partial
+                ):
+                    return ResearchOutcome.PARTIAL
+                return ResearchOutcome.INSUFFICIENT
         return ResearchOutcome.SUFFICIENT
 
     if (

@@ -7,6 +7,7 @@ citation provenance mapping, and local QA verification.
 
 from __future__ import annotations
 
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -20,6 +21,11 @@ from sqlalchemy.orm import selectinload
 from omega.application.content_provider import ContentGenerationProvider, TemplateContentProvider
 from omega.application.content_qa import run_content_qa_checks
 from omega.application.statement_validator import validate_and_classify_statement
+from omega.domain.numeric_promise import (
+    NumericPromiseContract,
+    extract_distinct_entities,
+    extract_numeric_promise,
+)
 from omega.domain.channel import ChannelState
 from omega.domain.channel_dna import ChannelDNA
 from omega.domain.content import (
@@ -68,7 +74,7 @@ from omega.logging import get_logger
 logger = get_logger("omega-content-service")
 
 
-def _require_sufficient_brief(brief: ResearchBrief | None) -> None:
+def _require_sufficient_brief(brief: ResearchBrief | None, topic_title: str | None = None) -> None:
     """Enforce the authority boundary for the exact pinned research revision."""
     if brief is None:
         raise ValueError("Pinned ResearchBrief does not exist.")
@@ -78,6 +84,31 @@ def _require_sufficient_brief(brief: ResearchBrief | None) -> None:
             "Content generation requires a SUFFICIENT ResearchBrief; "
             "PARTIAL or INSUFFICIENT research cannot become authoritative content input."
         )
+
+    # Defense-in-depth: enforce numeric title promise coverage
+    title = topic_title or brief.title
+    contract: NumericPromiseContract | None = None
+    if brief.metadata_ and isinstance(brief.metadata_, dict) and "numeric_contract" in brief.metadata_:
+        contract = NumericPromiseContract.from_dict(brief.metadata_["numeric_contract"])
+    elif title:
+        clean_title = title
+        if clean_title.startswith("Research Brief: "):
+            clean_title = clean_title[len("Research Brief: "):]
+        clean_title = re.sub(r"\s*\(v\d+\)$", "", clean_title)
+        contract = extract_numeric_promise(clean_title)
+
+    if contract and contract.promised_count > 0:
+        distinct_entities = extract_distinct_entities(
+            brief.verified_claims,
+            topic_title=title,
+            entity_type=contract.entity_type,
+        )
+        if len(distinct_entities) < contract.promised_count:
+            raise ValueError(
+                f"ResearchBrief '{brief.id}' does not satisfy numeric title promise: "
+                f"promised {contract.promised_count} {contract.entity_type}(s), "
+                f"but verified claims support only {len(distinct_entities)} distinct {contract.entity_type}(s)."
+            )
 
 
 async def create_request(
@@ -129,7 +160,7 @@ async def create_request(
         raise ValueError(
             f"ResearchBrief with ID '{request_in.research_brief_id}' does not exist or does not match channel/topic."
         )
-    _require_sufficient_brief(brief)
+    _require_sufficient_brief(brief, candidate.title)
 
     # 4. Resolve Context Mode and Pin ChannelDNARevision
     mode: ContentGenerationMode
@@ -312,7 +343,7 @@ async def generate_content(
     if not req:
         raise ValueError(f"ContentGenerationRequest '{request_id}' not found.")
 
-    _require_sufficient_brief(req.research_brief)
+    _require_sufficient_brief(req.research_brief, req.topic_candidate.title if req.topic_candidate else None)
 
     if req.status == ContentRequestStatus.RUNNING.value:
         raise ValueError("Content generation request is already running.")

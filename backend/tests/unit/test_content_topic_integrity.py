@@ -323,7 +323,7 @@ def test_8_cross_domain_leakage_yields_blocking_topic_authority_mismatch():
 def test_9_valid_topic_aligned_content_not_blocked():
     """Valid civil engineering concrete script passes QA without TOPIC_AUTHORITY_MISMATCH."""
     provider = TemplateContentProvider()
-    topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
+    topic = "Why Concrete Cracks: Mechanical Mechanisms Every Civil Engineer Should Understand"
     brief = _make_concrete_brief()
     dna = {"brand_voice": {"tone": "AUTHORITATIVE", "pace": "MODERATE"}}
 

@@ -241,9 +241,14 @@ def test_g4_conclusion_synthesizes_grounded_body_propositions():
         ]
     }
 
+    topic = "Why Concrete Cracks: Mechanical Degradation and Prevention"
+    brief = dict(CANONICAL_BRIEF)
+    brief["topic_title"] = topic
+    brief["title"] = f"Research Brief: {topic} (v2)"
+
     script = provider.generate_script(
-        topic_title=CANONICAL_TOPIC,
-        brief_dict=CANONICAL_BRIEF,
+        topic_title=topic,
+        brief_dict=brief,
         dna_dict={},
         intent_dict={"pace": DEFAULT_PACE},
         selected_hook=hook,
@@ -268,8 +273,8 @@ def test_g4_conclusion_synthesizes_grounded_body_propositions():
         script_data=script,
         target_duration_seconds=240,
         dna_dict={},
-        brief_dict=CANONICAL_BRIEF,
-        topic_title=CANONICAL_TOPIC,
+        brief_dict=brief,
+        topic_title=topic,
         narrative_plan_dict=outline,
     )
     assert status in (ScriptQAStatus.PASSED, ScriptQAStatus.PASSED_WITH_WARNINGS)
@@ -445,7 +450,7 @@ def test_g8_exact_canary2_structure_succeeds_without_manual_edit():
     # 3. Overall script has zero meta evidence
     assert not script_meta_evidence(script)
 
-    # 4. Content QA passes without blocking findings
+    # 4. Content QA fails closed under P0.2 numeric promise contract
     status, findings = run_content_qa_checks(
         script_data=script,
         target_duration_seconds=360,
@@ -454,9 +459,16 @@ def test_g8_exact_canary2_structure_succeeds_without_manual_edit():
         topic_title=CANONICAL_TOPIC,
         narrative_plan_dict=canary2_outline,
     )
-    assert status in (ScriptQAStatus.PASSED, ScriptQAStatus.PASSED_WITH_WARNINGS)
-    blocking = [f for f in findings if f.get("severity") in ("BLOCKING", "ERROR")]
-    assert not blocking, f"Unexpected blocking QA findings: {blocking}"
+    # Canary #2 has 2 mechanisms for a title promising 5; P0.2 enforces BLOCKED status
+    assert status == ScriptQAStatus.BLOCKED
+    promise_finding = [f for f in findings if f["rule_code"] == "NUMERIC_PROMISE_UNFULFILLED"]
+    assert len(promise_finding) == 1
+    # Verify no structural or meta-filler blocking findings exist
+    other_blocking = [
+        f for f in findings
+        if f["rule_code"] != "NUMERIC_PROMISE_UNFULFILLED" and f.get("severity") in ("BLOCKING", "ERROR")
+    ]
+    assert not other_blocking, f"Unexpected structural/meta blocking findings: {other_blocking}"
 
 
 def test_reordered_sections_do_not_rely_on_index():

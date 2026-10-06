@@ -20,6 +20,7 @@ from omega.application.duplicate_detector import (
     compute_topic_fingerprint,
     normalize_text,
 )
+from omega.domain.numeric_promise import extract_numeric_promise
 from omega.application.signal_providers import (
     HistoricalPerformanceProvider,
     NullPerformanceProvider,
@@ -117,6 +118,12 @@ async def ingest_candidate(
     )
 
     # 4. Create TopicCandidate model
+    cand_metadata = dict(candidate_in.metadata or {})
+    if "numeric_contract" not in cand_metadata:
+        promise = extract_numeric_promise(candidate_in.title)
+        if promise:
+            cand_metadata["numeric_contract"] = promise.to_dict()
+
     candidate_id = uuid.uuid4()
     candidate = TopicCandidate(
         id=candidate_id,
@@ -138,7 +145,7 @@ async def ingest_candidate(
         reasons=[],
         score_breakdown={},
         idempotency_key=candidate_in.idempotency_key,
-        metadata_=candidate_in.metadata,
+        metadata_=cand_metadata,
     )
 
     # Add angles
@@ -290,6 +297,13 @@ async def update_candidate(
             entities=cand.entities,
             keywords=cand.keywords,
         )
+        promise = extract_numeric_promise(cand.title)
+        meta = dict(cand.metadata_ or {})
+        if promise:
+            meta["numeric_contract"] = promise.to_dict()
+        else:
+            meta.pop("numeric_contract", None)
+        cand.metadata_ = meta
 
     if update_in.summary is not None:
         cand.summary = update_in.summary.strip() if update_in.summary else None
@@ -300,7 +314,12 @@ async def update_candidate(
     if update_in.tags is not None:
         cand.tags = update_in.tags
     if update_in.metadata is not None:
-        cand.metadata_ = update_in.metadata
+        meta = dict(update_in.metadata)
+        if "numeric_contract" not in meta:
+            promise = extract_numeric_promise(cand.title)
+            if promise:
+                meta["numeric_contract"] = promise.to_dict()
+        cand.metadata_ = meta
 
     await session.commit()
     loaded_cand = await _reload_candidate(session, candidate_id)

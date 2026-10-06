@@ -11,6 +11,11 @@ from omega.domain.content import (
     QASeverity,
     ScriptQAStatus,
 )
+from omega.domain.numeric_promise import (
+    NumericPromiseContract,
+    extract_distinct_entities,
+    extract_numeric_promise,
+)
 
 NUMERICAL_REGEX = re.compile(
     r"\b\d+(\.\d+)?%|\b\d+\s*(ms|seconds|minutes|hours|days|years|gb|mb|kb|tb|req/s|ops/s|fps|users|dollars)\b|\$\d+",
@@ -407,6 +412,74 @@ def run_content_qa_checks(
                             },
                         }
                     )
+
+    # 11. NUMERIC_PROMISE_UNFULFILLED
+    contract: NumericPromiseContract | None = None
+    brief_meta = brief_dict.get("metadata", {}) if isinstance(brief_dict, dict) else {}
+    if isinstance(brief_meta, dict) and "numeric_contract" in brief_meta and isinstance(brief_meta["numeric_contract"], dict):
+        contract = NumericPromiseContract.from_dict(brief_meta["numeric_contract"])
+    if not contract and effective_title:
+        contract = extract_numeric_promise(effective_title)
+
+    if contract and contract.promised_count > 0:
+        brief_claims = brief_dict.get("verified_claims", []) if isinstance(brief_dict, dict) else []
+        brief_entities = extract_distinct_entities(
+            brief_claims,
+            topic_title=effective_title,
+            entity_type=contract.entity_type,
+        )
+
+        cited_claim_ids: set[str] = set()
+        script_text_corpus: list[str] = []
+        for sec in sections:
+            sec_heading = sec.get("heading", "")
+            sec_narration = sec.get("narration_text", "")
+            script_text_corpus.append(f"{sec_heading} {sec_narration}")
+            for st in sec.get("statements", []):
+                script_text_corpus.append(st.get("statement_text", ""))
+                for cit in st.get("citations", []):
+                    cid = cit.get("claim_id")
+                    if cid:
+                        cited_claim_ids.add(str(cid))
+
+        full_script_corpus = " ".join(script_text_corpus).lower()
+
+        if cited_claim_ids:
+            cited_claims = [c for c in brief_claims if str(c.get("claim_id") or c.get("id")) in cited_claim_ids]
+            grounded_entities = extract_distinct_entities(
+                cited_claims,
+                topic_title=effective_title,
+                entity_type=contract.entity_type,
+            )
+        else:
+            # Without explicit statement citations, check which verified brief entities are represented in script text
+            grounded_entities = []
+            for ent in brief_entities:
+                parts = [p for p in ent.split("_") if len(p) >= 4]
+                if parts and any(p in full_script_corpus for p in parts):
+                    grounded_entities.append(ent)
+
+        distinct_grounded_count = len(grounded_entities)
+        if distinct_grounded_count < contract.promised_count:
+            findings.append(
+                {
+                    "rule_code": QARuleCode.NUMERIC_PROMISE_UNFULFILLED.value,
+                    "severity": QASeverity.BLOCKING.value,
+                    "message": (
+                        f"Title promises {contract.promised_count} {contract.entity_type}(s), "
+                        f"but only {distinct_grounded_count} distinct grounded {contract.entity_type}(s) "
+                        f"are represented in explanatory content ({grounded_entities})."
+                    ),
+                    "section_index": None,
+                    "statement_order": None,
+                    "details": {
+                        "promised_count": contract.promised_count,
+                        "entity_type": contract.entity_type,
+                        "grounded_count": distinct_grounded_count,
+                        "grounded_entities": grounded_entities,
+                    },
+                }
+            )
 
     # Determine overall status
     has_blocking = any(
