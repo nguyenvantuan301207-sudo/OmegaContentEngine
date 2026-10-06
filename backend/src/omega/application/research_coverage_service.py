@@ -1,0 +1,469 @@
+"""Coverage-Driven Research Expansion Service (P0.3).
+
+Coordinates bounded research search planning, source discovery, deduplication,
+source ingestion, evidence extraction, distinct entity clustering, and fail-closed
+sufficiency gating.
+
+CRITICAL INVARIANTS:
+1. P0.2 NumericPromiseContract is the canonical sufficiency authority.
+2. System never invents missing promised entities or claims.
+3. Research authority is strictly derived from verified acquired sources.
+4. Discovery snippets are never treated as verified claims.
+5. All executions are bounded and idempotent.
+"""
+
+from __future__ import annotations
+
+import uuid
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
+
+from omega.application import research_service
+from omega.application.claim_extractor import (
+    extract_deterministic_claims_from_source,
+    normalize_claim_text,
+)
+from omega.application.research_discovery import (
+    DiscoveryProviderError,
+    ResearchDiscoveryProvider,
+    filter_and_deduplicate_candidates,
+)
+from omega.application.research_query_planner import plan_research_queries
+from omega.application.source_normalizer import normalize_url
+from omega.application.source_provider import SourceAuthorityProvider
+from omega.domain.numeric_promise import (
+    NumericPromiseContract,
+    extract_distinct_entities,
+    extract_numeric_promise,
+)
+from omega.domain.research import (
+    DiscoveryCandidate,
+    EvidenceDirection,
+    ResearchAcquisitionMode,
+    ResearchCoverageRoundTruth,
+    ResearchCoverageStopReason,
+    ResearchSourceCreate,
+    ResearchSourceType,
+)
+from omega.infrastructure.models import (
+    ClaimEvidence,
+    ResearchClaim,
+    ResearchRequest,
+    ResearchSource,
+)
+from omega.logging import get_logger
+
+logger = get_logger(service="omega-research-coverage-service")
+
+
+async def execute_coverage_driven_research(
+    session: AsyncSession,
+    request_id: UUID,
+    discovery_provider: ResearchDiscoveryProvider | None = None,
+    authority_provider: SourceAuthorityProvider | None = None,
+    max_rounds: int = 3,
+    max_queries_per_round: int = 3,
+    max_candidates_per_query: int = 5,
+    max_accepted_sources_per_round: int = 5,
+    max_total_acquired_sources: int = 15,
+) -> dict[str, Any]:
+    """Execute bounded coverage-driven research acquisition and brief compilation.
+
+    Returns an inspectable result summary containing:
+    - request_id
+    - acquisition_mode
+    - stop_reason
+    - rounds_executed
+    - initial_supported_count
+    - final_supported_count
+    - final_supported_families
+    - brief (ResearchBriefResponse or None)
+    - coverage_truth
+    """
+    # 1. Load ResearchRequest with relationships
+    req_res = await session.execute(
+        select(ResearchRequest)
+        .options(
+            selectinload(ResearchRequest.topic_candidate),
+            selectinload(ResearchRequest.sources),
+        )
+        .where(ResearchRequest.id == request_id)
+    )
+    req = req_res.scalar_one_or_none()
+    if not req:
+        raise ValueError(f"ResearchRequest '{request_id}' not found.")
+
+    req_meta = dict(req.metadata_ or {})
+    acquisition_mode = req_meta.get("acquisition_mode", ResearchAcquisitionMode.MANUAL.value)
+
+    topic_title = (
+        req.topic_candidate.title
+        if req.topic_candidate and req.topic_candidate.title
+        else (req.research_question or "Research Topic")
+    )
+
+    # Resolve NumericPromiseContract
+    contract: NumericPromiseContract | None = None
+    if "numeric_contract" in req_meta and isinstance(req_meta["numeric_contract"], dict):
+        contract = NumericPromiseContract.from_dict(req_meta["numeric_contract"])
+    elif req.topic_candidate and req.topic_candidate.metadata_ and "numeric_contract" in req.topic_candidate.metadata_:
+        contract = NumericPromiseContract.from_dict(req.topic_candidate.metadata_["numeric_contract"])
+    elif topic_title:
+        contract = extract_numeric_promise(topic_title)
+
+    promised_count = contract.promised_count if contract else None
+    entity_type = contract.entity_type if contract else None
+
+    # Check for MANUAL mode preservation
+    if acquisition_mode == ResearchAcquisitionMode.MANUAL.value or discovery_provider is None:
+        logger.info(
+            "ResearchRequest is in MANUAL mode; skipping automated discovery",
+            request_id=str(request_id),
+            acquisition_mode=acquisition_mode,
+        )
+        return {
+            "request_id": str(request_id),
+            "acquisition_mode": acquisition_mode,
+            "stop_reason": ResearchCoverageStopReason.MANUAL_ONLY_AWAITING_INPUT.value,
+            "rounds_executed": 0,
+            "initial_supported_count": 0,
+            "final_supported_count": 0,
+            "final_supported_families": [],
+            "brief": None,
+            "coverage_truth": [],
+            "manual_input_required": True,
+        }
+
+    # 2. Evaluate current verified distinct coverage
+    all_init_sources_res = await session.execute(
+        select(ResearchSource).where(ResearchSource.research_request_id == request_id)
+    )
+    all_init_sources = list(all_init_sources_res.scalars().all())
+    eligible_init_sources = [s for s in all_init_sources if s.quality_score >= req.minimum_source_quality]
+
+    existing_claims_res = await session.execute(
+        select(ResearchClaim)
+        .options(selectinload(ResearchClaim.evidence))
+        .where(ResearchClaim.research_request_id == request_id)
+    )
+    existing_claims = list(existing_claims_res.scalars().all())
+    existing_src_ids = {e.source_id for c in existing_claims for e in (c.evidence or [])}
+
+    for s in eligible_init_sources:
+        if s.id not in existing_src_ids:
+            extracted = extract_deterministic_claims_from_source(
+                source_title=s.title,
+                source_excerpt=s.content_excerpt,
+                metadata=dict(s.metadata_ or {}),
+            )
+            for item in extracted:
+                c_id = uuid.uuid4()
+                claim_obj = ResearchClaim(
+                    id=c_id,
+                    research_request_id=request_id,
+                    channel_id=req.channel_id,
+                    claim_text=item["claim_text"],
+                    normalized_claim=normalize_claim_text(item["claim_text"]),
+                    claim_type=item["claim_type"].value,
+                )
+                claim_obj.evidence.append(
+                    ClaimEvidence(
+                        id=uuid.uuid4(),
+                        claim_id=c_id,
+                        source_id=s.id,
+                        support_direction=EvidenceDirection.SUPPORTS.value,
+                        excerpt=item["excerpt"],
+                        source_location=item["source_location"],
+                        strength_score=item["strength_score"],
+                    )
+                )
+                session.add(claim_obj)
+                existing_claims.append(claim_obj)
+    if eligible_init_sources:
+        await session.flush()
+
+    initial_families: list[str] = []
+    if existing_claims and contract:
+        vclaim_texts = [c.claim_text for c in existing_claims]
+        initial_families = extract_distinct_entities(
+            vclaim_texts,
+            topic_title=topic_title,
+            entity_type=contract.entity_type,
+        )
+    initial_supported_count = len(initial_families)
+
+    # If already fulfilled before discovery:
+    if contract and initial_supported_count >= contract.promised_count:
+        brief = await research_service.run_research(
+            session=session,
+            request_id=request_id,
+            authority_provider=authority_provider,
+        )
+        return {
+            "request_id": str(request_id),
+            "acquisition_mode": acquisition_mode,
+            "stop_reason": ResearchCoverageStopReason.COVERAGE_FULFILLED.value,
+            "rounds_executed": 0,
+            "initial_supported_count": initial_supported_count,
+            "final_supported_count": initial_supported_count,
+            "final_supported_families": initial_families,
+            "brief": brief,
+            "coverage_truth": [],
+            "manual_input_required": False,
+        }
+
+    # 3. Initialize Coverage Planning & Loop State
+    already_seen_urls: set[str] = {
+        normalize_url(s.url) for s in (req.sources or []) if s.url
+    }
+    current_supported_families: list[str] = list(initial_families)
+    rounds_truth: list[ResearchCoverageRoundTruth] = []
+    stop_reason: ResearchCoverageStopReason | None = None
+
+    # 4. Coverage Expansion Loop
+    for round_num in range(1, max_rounds + 1):
+        supported_before = len(current_supported_families)
+
+        # Budget Check: Total Acquired Sources
+        current_sources_res = await session.execute(
+            select(ResearchSource).where(ResearchSource.research_request_id == request_id)
+        )
+        current_source_count = len(current_sources_res.scalars().all())
+        if current_source_count >= max_total_acquired_sources:
+            stop_reason = ResearchCoverageStopReason.SEARCH_BUDGET_EXHAUSTED
+            break
+
+        # Generate deterministic grounded queries
+        queries = plan_research_queries(
+            topic_title=topic_title,
+            contract=contract,
+            round_number=round_num,
+            already_supported_families=current_supported_families,
+            max_queries=max_queries_per_round,
+        )
+        if not queries:
+            stop_reason = ResearchCoverageStopReason.NO_NEW_RELEVANT_SOURCES
+            break
+
+        round_queries_meta = [
+            {"query_text": q.query_text, "intent": q.intent.value, "reason": q.reason}
+            for q in queries
+        ]
+
+        # Execute discovery queries via provider
+        raw_candidates: list[DiscoveryCandidate] = []
+        provider_failed = False
+        for q in queries:
+            try:
+                candidates = await discovery_provider.search(
+                    query=q.query_text,
+                    limit=max_candidates_per_query,
+                )
+                raw_candidates.extend(candidates)
+            except (DiscoveryProviderError, Exception) as exc:
+                logger.warning(
+                    "Discovery provider search failed",
+                    query=q.query_text,
+                    error=str(exc),
+                )
+                provider_failed = True
+                stop_reason = ResearchCoverageStopReason.DISCOVERY_PROVIDER_UNAVAILABLE
+                break
+
+        if provider_failed:
+            rounds_truth.append(
+                ResearchCoverageRoundTruth(
+                    round_number=round_num,
+                    queries=round_queries_meta,
+                    candidates_discovered=len(raw_candidates),
+                    sources_accepted=0,
+                    sources_rejected=0,
+                    rejection_reasons=["PROVIDER_FAILURE"],
+                    supported_count_before=supported_before,
+                    supported_count_after=supported_before,
+                    supported_families_after=current_supported_families,
+                    remaining_count=max(0, (promised_count or 0) - supported_before),
+                    stop_reason=stop_reason.value if stop_reason else None,
+                )
+            )
+            break
+
+        # Filter & deduplicate candidates
+        accepted, rejections = filter_and_deduplicate_candidates(
+            candidates=raw_candidates,
+            already_seen_urls=already_seen_urls,
+            max_accepted=max_accepted_sources_per_round,
+        )
+
+        # Ingest accepted sources into canonical pipeline
+        sources_added_this_round = 0
+        for cand in accepted:
+            src_in = ResearchSourceCreate(
+                source_type=ResearchSourceType.WEB_SEARCH,
+                title=cand.title,
+                publisher=cand.publisher,
+                author=cand.author,
+                url=cand.canonical_url,
+                content_excerpt=cand.content_excerpt,
+                primary_source_status=cand.primary_source_status,
+                published_at=cand.published_at,
+                language=cand.language,
+                region=cand.region,
+                metadata=cand.metadata,
+            )
+            await research_service.add_source(
+                session=session,
+                request_id=request_id,
+                source_in=src_in,
+                authority_provider=authority_provider,
+            )
+            norm_u = normalize_url(cand.canonical_url)
+            if norm_u:
+                already_seen_urls.add(norm_u)
+            sources_added_this_round += 1
+
+        # Extract claims for sources added that don't have claims yet
+        all_sources_res = await session.execute(
+            select(ResearchSource).where(ResearchSource.research_request_id == request_id)
+        )
+        all_sources = list(all_sources_res.scalars().all())
+        eligible_sources = [s for s in all_sources if s.quality_score >= req.minimum_source_quality]
+
+        curr_claims_res = await session.execute(
+            select(ResearchClaim)
+            .options(selectinload(ResearchClaim.evidence))
+            .where(ResearchClaim.research_request_id == request_id)
+        )
+        curr_claims = list(curr_claims_res.scalars().all())
+        existing_src_ids_with_claims = {
+            e.source_id for c in curr_claims for e in (c.evidence or [])
+        }
+
+        for s in eligible_sources:
+            if s.id not in existing_src_ids_with_claims:
+                extracted = extract_deterministic_claims_from_source(
+                    source_title=s.title,
+                    source_excerpt=s.content_excerpt,
+                    metadata=dict(s.metadata_ or {}),
+                )
+                for item in extracted:
+                    c_id = uuid.uuid4()
+                    claim_obj = ResearchClaim(
+                        id=c_id,
+                        research_request_id=request_id,
+                        channel_id=req.channel_id,
+                        claim_text=item["claim_text"],
+                        normalized_claim=normalize_claim_text(item["claim_text"]),
+                        claim_type=item["claim_type"].value,
+                    )
+                    claim_obj.evidence.append(
+                        ClaimEvidence(
+                            id=uuid.uuid4(),
+                            claim_id=c_id,
+                            source_id=s.id,
+                            support_direction=EvidenceDirection.SUPPORTS.value,
+                            excerpt=item["excerpt"],
+                            source_location=item["source_location"],
+                            strength_score=item["strength_score"],
+                        )
+                    )
+                    session.add(claim_obj)
+                    curr_claims.append(claim_obj)
+        await session.flush()
+
+        # Re-evaluate distinct coverage
+        if contract and curr_claims:
+            vtexts = [c.claim_text for c in curr_claims]
+            current_supported_families = extract_distinct_entities(
+                vtexts,
+                topic_title=topic_title,
+                entity_type=contract.entity_type,
+            )
+        supported_after = len(current_supported_families)
+        remaining = max(0, (promised_count or 0) - supported_after) if promised_count else 0
+
+        # Record round truth
+        rounds_truth.append(
+            ResearchCoverageRoundTruth(
+                round_number=round_num,
+                queries=round_queries_meta,
+                candidates_discovered=len(raw_candidates),
+                sources_accepted=sources_added_this_round,
+                sources_rejected=len(rejections),
+                rejection_reasons=rejections,
+                supported_count_before=supported_before,
+                supported_count_after=supported_after,
+                supported_families_after=current_supported_families,
+                remaining_count=remaining,
+            )
+        )
+
+        # Check stopping conditions
+        if contract and supported_after >= contract.promised_count:
+            stop_reason = ResearchCoverageStopReason.COVERAGE_FULFILLED
+            break
+
+        if not contract and sources_added_this_round > 0 and len(eligible_sources) >= 3:
+            stop_reason = ResearchCoverageStopReason.COVERAGE_FULFILLED
+            break
+
+        if sources_added_this_round == 0:
+            stop_reason = ResearchCoverageStopReason.NO_NEW_RELEVANT_SOURCES
+            break
+
+    # Resolve final stop reason if loop finished without explicit break
+    if stop_reason is None:
+        if contract and len(current_supported_families) >= (promised_count or 0):
+            stop_reason = ResearchCoverageStopReason.COVERAGE_FULFILLED
+        elif contract:
+            stop_reason = ResearchCoverageStopReason.SEARCH_BUDGET_EXHAUSTED
+        else:
+            stop_reason = ResearchCoverageStopReason.COVERAGE_FULFILLED
+
+    # 5. Compile final canonical ResearchBrief
+    brief = await research_service.run_research(
+        session=session,
+        request_id=request_id,
+        authority_provider=authority_provider,
+    )
+
+    # 6. Update ResearchRequest with Coverage Expansion Observability
+    coverage_truth_dicts = [r.model_dump() for r in rounds_truth]
+    req_meta["coverage_expansion"] = {
+        "acquisition_mode": acquisition_mode,
+        "stop_reason": stop_reason.value,
+        "initial_supported_count": initial_supported_count,
+        "final_supported_count": len(current_supported_families),
+        "final_supported_families": current_supported_families,
+        "promised_count": promised_count,
+        "entity_type": entity_type,
+        "rounds_executed": len(rounds_truth),
+        "rounds": coverage_truth_dicts,
+    }
+    req.metadata_ = req_meta
+    await session.commit()
+
+    logger.info(
+        "Coverage-driven research completed",
+        request_id=str(request_id),
+        stop_reason=stop_reason.value,
+        final_supported_count=len(current_supported_families),
+        brief_outcome=brief.outcome.value,
+    )
+
+    return {
+        "request_id": str(request_id),
+        "acquisition_mode": acquisition_mode,
+        "stop_reason": stop_reason.value,
+        "rounds_executed": len(rounds_truth),
+        "initial_supported_count": initial_supported_count,
+        "final_supported_count": len(current_supported_families),
+        "final_supported_families": current_supported_families,
+        "brief": brief,
+        "coverage_truth": coverage_truth_dicts,
+        "manual_input_required": False,
+    }

@@ -14,7 +14,6 @@ from typing import Any
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
-
 # ── P20-A Recurring Scheduler Hard Bounds ──
 # HARD_SCHEMA_SAFETY_BOUND: The database migration 025 enforces chk_interval_minimum >= 60.
 SCHEMA_MINIMUM_INTERVAL_SECONDS: int = 60
@@ -133,6 +132,14 @@ class Settings(BaseSettings):
     db_health_timeout_seconds: float = 1.0
     redis_health_timeout_seconds: float = 1.0
     beat_health_threshold_seconds: float = 30.0
+
+    # ── P0.3 Automatic Research Coverage & Discovery ──
+    research_acquisition_mode: str = "MANUAL"
+    research_max_rounds: int = 3
+    research_max_queries_per_round: int = 3
+    research_max_candidates_per_query: int = 5
+    research_max_accepted_sources_per_round: int = 5
+    research_max_total_sources: int = 15
 
     # Production access control: Fail-closed in production if None
     metrics_auth_token: str | None = None

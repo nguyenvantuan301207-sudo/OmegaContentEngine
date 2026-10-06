@@ -26,11 +26,6 @@ from omega.application.research_scorer import (
     determine_research_outcome,
     evaluate_claim_confidence,
 )
-from omega.domain.numeric_promise import (
-    NumericPromiseContract,
-    extract_distinct_entities,
-    extract_numeric_promise,
-)
 from omega.application.source_independence import cluster_source_independence
 from omega.application.source_normalizer import (
     bound_excerpt,
@@ -40,6 +35,11 @@ from omega.application.source_normalizer import (
 )
 from omega.application.source_provider import SourceAuthorityProvider
 from omega.domain.channel import ChannelState
+from omega.domain.numeric_promise import (
+    NumericPromiseContract,
+    extract_distinct_entities,
+    extract_numeric_promise,
+)
 from omega.domain.research import (
     CitationRef,
     ClaimEvidenceCreate,
@@ -154,6 +154,8 @@ async def create_research_request(
         promise = extract_numeric_promise(topic.title)
         if promise:
             req_metadata["numeric_contract"] = promise.to_dict()
+    if "acquisition_mode" not in req_metadata:
+        req_metadata["acquisition_mode"] = request_in.acquisition_mode.value
 
     req = ResearchRequest(
         id=request_id,
@@ -286,6 +288,7 @@ async def add_source(
         freshness_score=fresh_score,
         quality_reasons=reasons,
         published_at=source_in.published_at,
+        retrieved_at=datetime.now(UTC),
         language=source_in.language,
         region=source_in.region,
         metadata_=source_in.metadata,
@@ -557,8 +560,13 @@ async def run_research(
     )
     claims = list(claim_res.scalars().all())
 
-    if not claims:
-        for s in eligible_sources:
+    existing_source_ids_with_claims = {
+        e.source_id for c in claims for e in (c.evidence or [])
+    }
+
+    new_claims_added = False
+    for s in eligible_sources:
+        if s.id not in existing_source_ids_with_claims:
             extracted = extract_deterministic_claims_from_source(
                 source_title=s.title,
                 source_excerpt=s.content_excerpt,
@@ -587,6 +595,8 @@ async def run_research(
                 )
                 session.add(claim_obj)
                 claims.append(claim_obj)
+                new_claims_added = True
+    if new_claims_added:
         await session.flush()
 
     # 5. Detect and record conflicts
@@ -836,6 +846,7 @@ async def run_research(
             ),
         },
         metadata_=brief_metadata,
+        created_at=datetime.now(UTC),
     )
     session.add(brief)
 
@@ -968,7 +979,7 @@ def _to_source_response(s: ResearchSource) -> ResearchSourceResponse:
         quality_reasons=list(s.quality_reasons or []),
         independence_cluster_id=s.independence_cluster_id,
         published_at=s.published_at,
-        retrieved_at=s.retrieved_at,
+        retrieved_at=s.retrieved_at or datetime.now(UTC),
         language=s.language,
         region=s.region,
         metadata_=dict(s.metadata_ or {}),
@@ -1078,5 +1089,5 @@ def _to_brief_response(b: ResearchBrief) -> ResearchBriefResponse:
         open_questions=list(b.open_questions or []),
         sources_summary=dict(b.sources_summary or {}),
         metadata_=dict(b.metadata_ or {}),
-        created_at=b.created_at,
+        created_at=b.created_at or datetime.now(UTC),
     )
