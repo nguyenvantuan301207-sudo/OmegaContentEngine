@@ -586,17 +586,29 @@ async def test_invalid_shape():
         await t_client.post_search("test")
 
 
-# ── 13. Oversized Response Blocked ──
+# ── 13. Streaming Response Body Bounding (Phase B) ──
+
+
+class _CustomAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, chunks: list[bytes], raise_on_chunk: Exception | None = None) -> None:
+        self._chunks = chunks
+        self._raise_on_chunk = raise_on_chunk
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+        if self._raise_on_chunk is not None:
+            raise self._raise_on_chunk
 
 
 @pytest.mark.asyncio
-async def test_oversized_response_blocked():
-    """Verify that response exceeding max_response_bytes raises TavilyResponseTooLargeError."""
+async def test_oversized_content_length_precheck():
+    """Verify that oversized Content-Length is rejected before reading body."""
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            content=b"x" * 2000,
             headers={"Content-Length": "2000"},
+            content=b"x" * 2000,
         )
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -606,8 +618,69 @@ async def test_oversized_response_blocked():
         client=client,
     )
 
-    with pytest.raises(TavilyResponseTooLargeError):
+    with pytest.raises(TavilyResponseTooLargeError, match="Content-Length"):
         await t_client.post_search("test")
+
+
+@pytest.mark.asyncio
+async def test_streaming_oversized_body_without_content_length():
+    """Verify that body without Content-Length is aborted as soon as accumulated bytes exceed limit."""
+    stream = _CustomAsyncStream([b"a" * 600, b"b" * 600])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    t_client = TavilyClient(
+        api_key=SYNTHETIC_API_KEY,
+        max_response_bytes=1000,
+        client=client,
+    )
+
+    with pytest.raises(TavilyResponseTooLargeError, match="body bytes"):
+        await t_client.post_search("test")
+
+
+@pytest.mark.asyncio
+async def test_valid_bounded_body_parses_normally():
+    """Verify that a valid response within bounded bytes parses normally."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"results": [{"title": "Concrete Cracks"}]})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    t_client = TavilyClient(
+        api_key=SYNTHETIC_API_KEY,
+        max_response_bytes=1000,
+        client=client,
+    )
+
+    data = await t_client.post_search("test")
+    assert data == {"results": [{"title": "Concrete Cracks"}]}
+
+
+@pytest.mark.asyncio
+async def test_secret_never_leaks_through_streaming_exceptions():
+    """Verify that secrets never leak when streaming body raises an exception."""
+    stream = _CustomAsyncStream(
+        [b"initial_data"],
+        raise_on_chunk=httpx.ReadError(f"Stream interrupted with secret key {SYNTHETIC_API_KEY}"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=stream)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    t_client = TavilyClient(
+        api_key=SYNTHETIC_API_KEY,
+        max_response_bytes=1000,
+        client=client,
+    )
+
+    with pytest.raises(Exception) as exc_info:
+        await t_client.post_search("test")
+
+    assert SYNTHETIC_API_KEY not in str(exc_info.value)
+    assert "***REDACTED***" in str(exc_info.value)
 
 
 # ── 14. Secret Safety: API Key Never Leaks ──
@@ -679,6 +752,40 @@ async def test_extract_failure_never_falls_back_to_snippet():
         title="Title",
         publisher="example.com",
         snippet="Valuable discovery snippet that must never become document content.",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+    )
+
+    doc = await extractor.extract_document(candidate)
+    assert doc is None
+
+
+@pytest.mark.asyncio
+async def test_extract_url_mismatch_fails_closed():
+    """Verify Phase C: When Tavily Extract returns an item with a different URL,
+
+    the extractor fails closed and returns None. It must NOT bind other content to candidate URL.
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "url": "https://b.example/other-article",
+                        "raw_content": "Legitimate content belonging to article B, not A.",
+                    }
+                ]
+            },
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    extractor = TavilyResearchContentExtractor(api_key=SYNTHETIC_API_KEY, client=client)
+
+    candidate = DiscoveryCandidate(
+        canonical_url="https://a.example/requested-article",
+        title="Article A",
+        publisher="a.example",
+        snippet="Snippet for A.",
         primary_source_status=PrimarySourceStatus.UNKNOWN,
     )
 
@@ -1317,3 +1424,369 @@ def test_request_settings_consistency_audit():
     assert req_create.acquisition_mode == ResearchAcquisitionMode.AUTOMATIC_SEARCH
     assert req_create.metadata["acquisition_mode"] == "AUTOMATIC_SEARCH"
 
+
+# ── 27. Configuration Consistency: Block Silent Downgrade (Phase D) ──
+
+
+def test_auto_mode_silent_downgrade_blocked():
+    """Verify Phase D: Settings validation rejects invalid combinations and blocks silent downgrade."""
+    import pydantic
+
+    # 1. MANUAL + NONE -> valid
+    s_manual = Settings(research_acquisition_mode="MANUAL", research_discovery_provider="NONE")
+    assert s_manual.research_acquisition_mode == "MANUAL"
+    assert s_manual.research_discovery_provider == "NONE"
+
+    # 2. AUTOMATIC_SEARCH + TAVILY + key -> valid
+    s_auto = Settings(
+        research_acquisition_mode="AUTOMATIC_SEARCH",
+        research_discovery_provider="TAVILY",
+        tavily_api_key=SYNTHETIC_API_KEY,
+    )
+    assert s_auto.research_acquisition_mode == "AUTOMATIC_SEARCH"
+    assert s_auto.research_discovery_provider == "TAVILY"
+
+    # 3. AUTOMATIC_SEARCH + NONE -> invalid, fails closed
+    with pytest.raises(pydantic.ValidationError) as exc_info:
+        Settings(research_acquisition_mode="AUTOMATIC_SEARCH", research_discovery_provider="NONE")
+    assert "research_acquisition_mode is 'AUTOMATIC_SEARCH' but research_discovery_provider is 'NONE'" in str(exc_info.value)
+
+    # 4. AUTOMATIC_SEARCH + TAVILY + missing key -> invalid, fails closed
+    with pytest.raises(pydantic.ValidationError) as exc_info:
+        Settings(
+            research_acquisition_mode="AUTOMATIC_SEARCH",
+            research_discovery_provider="TAVILY",
+            tavily_api_key=None,
+        )
+    assert "tavily_api_key is missing or empty" in str(exc_info.value)
+
+
+def test_worker_auto_mode_downgrade_blocked_fails_closed(monkeypatch):
+    """Verify Phase D: Worker rejects AUTOMATIC_SEARCH request if discovery provider is NONE."""
+    mission_id, execution_id, channel_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    task_id, topic_id, request_id, brief_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    identity = f"mission-research:{execution_id}:{task_id}"
+
+    task = SimpleNamespace(id=task_id, mission_id=mission_id, execution_id=execution_id)
+    execution = SimpleNamespace(id=execution_id, mission_id=mission_id, channel_dna_revision_id=uuid.uuid4())
+    mission = SimpleNamespace(id=mission_id, channel_id=channel_id)
+    topic = SimpleNamespace(id=topic_id, channel_id=channel_id, status=TopicStatus.SELECTED.value)
+    request = SimpleNamespace(
+        id=request_id,
+        topic_candidate_id=topic_id,
+        mission_execution_id=execution_id,
+        channel_id=channel_id,
+        metadata_={"canonical_task_identity": identity, "acquisition_mode": "AUTOMATIC_SEARCH"},
+        status=ResearchRequestStatus.PENDING.value,
+        outcome=None,
+    )
+    brief = SimpleNamespace(
+        id=brief_id,
+        research_request_id=request_id,
+        topic_candidate_id=topic_id,
+        channel_id=channel_id,
+        outcome=ResearchOutcome.SUFFICIENT.value,
+    )
+    records = {
+        (Task, task_id): task,
+        (MissionExecution, execution_id): execution,
+        (Mission, mission_id): mission,
+        (TopicCandidate, topic_id): topic,
+        (ResearchRequest, request_id): request,
+        (ResearchBrief, brief_id): brief,
+    }
+
+    class WorkerSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, model, ident):
+            return records.get((model, ident))
+
+        async def refresh(self, obj):
+            pass
+
+        async def execute(self, stmt):
+            sql = str(stmt)
+            if "research_requests" in sql:
+                return FakeResult([request])
+            return FakeResult([])
+
+    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: WorkerSession())
+    monkeypatch.setattr(
+        omega.config,
+        "get_settings",
+        lambda: Settings(research_acquisition_mode="MANUAL", research_discovery_provider="NONE"),
+    )
+
+    context = {
+        "mission_id": str(mission_id),
+        "execution_id": str(execution_id),
+        "dependency_outputs": {"topic_discovery": {"topic_candidate_id": str(topic_id)}},
+    }
+    with pytest.raises(ValueError, match="AUTOMATIC_SEARCH but discovery provider"):
+        worker_tasks._execute_canonical_research(task_id, {}, context)
+
+
+# ── 28. Provider Client Lifecycle (Phase E) ──
+
+
+@pytest.mark.asyncio
+async def test_tavily_client_lifecycle_internally_owned():
+    """Verify Phase E: Internally created client is closed when provider is closed."""
+    provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY)
+    client = await provider._client._get_client()
+    assert client.is_closed is False
+    await provider.close()
+    assert client.is_closed is True
+    assert provider._client._client is None
+
+
+@pytest.mark.asyncio
+async def test_tavily_client_lifecycle_injected_preserved():
+    """Verify Phase E: Externally injected client is not closed when provider is closed."""
+    ext_client = httpx.AsyncClient()
+    try:
+        provider = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=ext_client)
+        await provider.close()
+        assert ext_client.is_closed is False
+    finally:
+        await ext_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_factory_shared_client_lifecycle():
+    """Verify Phase E: Factory shares a single TavilyClient between discovery and extract providers,
+
+    and closing both providers is idempotent and safely cleans up the underlying client.
+    """
+    settings = Settings(
+        research_discovery_provider="TAVILY",
+        tavily_api_key=SYNTHETIC_API_KEY,
+        research_acquisition_mode="AUTOMATIC_SEARCH",
+    )
+    disc, ext = build_research_discovery_stack(settings)
+    assert disc._client is ext._client
+    c = await disc._client._get_client()
+    assert c.is_closed is False
+    await disc.close()
+    assert c.is_closed is True
+    assert disc._client._client is None
+    # Closing ext should be an idempotent no-op without exception
+    await ext.close()
+
+
+def test_worker_cleanup_happens_on_success_and_exception(monkeypatch):
+    """Verify Phase E: Canonical worker ensures close() is invoked in finally block on success and on error."""
+    mission_id, execution_id, channel_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    task_id, topic_id, request_id, brief_id = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    identity = f"mission-research:{execution_id}:{task_id}"
+
+    task = SimpleNamespace(id=task_id, mission_id=mission_id, execution_id=execution_id)
+    execution = SimpleNamespace(id=execution_id, mission_id=mission_id, channel_dna_revision_id=uuid.uuid4())
+    mission = SimpleNamespace(id=mission_id, channel_id=channel_id)
+    topic = SimpleNamespace(id=topic_id, channel_id=channel_id, status=TopicStatus.SELECTED.value)
+    request = SimpleNamespace(
+        id=request_id,
+        topic_candidate_id=topic_id,
+        mission_execution_id=execution_id,
+        channel_id=channel_id,
+        metadata_={"canonical_task_identity": identity, "acquisition_mode": "AUTOMATIC_SEARCH"},
+        status=ResearchRequestStatus.PENDING.value,
+        outcome=None,
+    )
+    brief = SimpleNamespace(
+        id=brief_id,
+        research_request_id=request_id,
+        topic_candidate_id=topic_id,
+        channel_id=channel_id,
+        outcome=ResearchOutcome.SUFFICIENT.value,
+    )
+    records = {
+        (Task, task_id): task,
+        (MissionExecution, execution_id): execution,
+        (Mission, mission_id): mission,
+        (TopicCandidate, topic_id): topic,
+        (ResearchRequest, request_id): request,
+        (ResearchBrief, brief_id): brief,
+    }
+
+    class WorkerSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, model, ident):
+            return records.get((model, ident))
+
+        async def refresh(self, obj):
+            pass
+
+        async def execute(self, stmt):
+            sql = str(stmt)
+            if "research_requests" in sql:
+                return FakeResult([request])
+            if "research_briefs" in sql:
+                return FakeResult([brief])
+            return FakeResult([])
+
+    monkeypatch.setattr(database, "AsyncWorkerSessionLocal", lambda: WorkerSession())
+    monkeypatch.setattr(
+        omega.config,
+        "get_settings",
+        lambda: Settings(
+            research_discovery_provider="TAVILY",
+            tavily_api_key=SYNTHETIC_API_KEY,
+            research_acquisition_mode="AUTOMATIC_SEARCH",
+        ),
+    )
+
+    mock_disc = MagicMock()
+    mock_disc.close = AsyncMock()
+    mock_ext = MagicMock()
+    mock_ext.close = AsyncMock()
+
+    from omega.application import research_discovery
+    monkeypatch.setattr(research_discovery, "build_research_discovery_stack", lambda s: (mock_disc, mock_ext))
+
+    async def fake_coverage(*args, **kwargs):
+        request.status = ResearchRequestStatus.SUCCEEDED.value
+        request.outcome = ResearchOutcome.SUFFICIENT.value
+        return {"brief": SimpleNamespace(id=brief_id)}
+
+    from omega.application import research_coverage_service
+    monkeypatch.setattr(research_coverage_service, "execute_coverage_driven_research", fake_coverage)
+
+    context = {
+        "mission_id": str(mission_id),
+        "execution_id": str(execution_id),
+        "dependency_outputs": {"topic_discovery": {"topic_candidate_id": str(topic_id)}},
+    }
+    # Success path
+    worker_tasks._execute_canonical_research(task_id, {}, context)
+    mock_disc.close.assert_awaited_once()
+    mock_ext.close.assert_awaited_once()
+
+    # Exception path
+    mock_disc.close.reset_mock()
+    mock_ext.close.reset_mock()
+    request.status = ResearchRequestStatus.PENDING.value
+
+    async def fake_coverage_fail(*args, **kwargs):
+        raise RuntimeError("Coverage crash")
+
+    monkeypatch.setattr(research_coverage_service, "execute_coverage_driven_research", fake_coverage_fail)
+
+    with pytest.raises(RuntimeError, match="Coverage crash"):
+        worker_tasks._execute_canonical_research(task_id, {}, context)
+
+    mock_disc.close.assert_awaited_once()
+    mock_ext.close.assert_awaited_once()
+
+
+# ── 29. Default Runtime Budget 0→5 (Phase F) ──
+
+
+@pytest.mark.asyncio
+async def test_default_runtime_offline_zero_to_five_coverage_expansion():
+    """Verify Phase F: Fully offline mocked-Tavily test using ACTUAL runtime defaults.
+
+    Defaults:
+    - max_rounds = 3
+    - max_queries_per_round = 3
+    - max_candidates_per_query = 5
+    - max_accepted_sources_per_round = 5
+    - max_total_acquired_sources = 15
+
+    No widened override values passed.
+    Topic: Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand
+    Gate:
+    DEFAULT_RUNTIME_OFFLINE_0_TO_5 = PASS
+    SOURCES_USED <= 15
+    BRIEF_OUTCOME = SUFFICIENT
+    """
+    session, req, channel_id, topic_id = make_test_fixture(max_sources=15)
+
+    mechanisms = [
+        ("plastic shrinkage", "Plastic shrinkage cracking occurs when rapid surface evaporation before set exceeds water bleeding."),
+        ("drying shrinkage", "Drying shrinkage cracking occurs when long-term moisture loss from paste causes drying shrinkage cracking."),
+        ("thermal contraction", "Thermal contraction cracking occurs when cooling from peak hydration temperatures produces thermal contraction cracking."),
+        ("alkali-silica reaction", "Alkali-silica reaction cracking occurs when internal gel swelling produces alkali-silica reaction cracking."),
+        ("chemical sulfate attack", "Chemical sulfate attack cracking occurs when ettringite expansion produces chemical sulfate attack cracking."),
+    ]
+    context_templates = [
+        (
+            "Highway department field inspection reports document extensive surface defect formations across bridge deck pours in civil engineering concrete.",
+            "Immediate fog spraying is recommended for site operations.",
+        ),
+        (
+            "University materials engineering laboratory analysis investigates hydration and hardening dynamics in fresh structural concrete.",
+            "Rigorous laboratory test protocols confirm these findings.",
+        ),
+        (
+            "Commercial paving contractor technical bulletin reviews preventive measures against moisture and distress in civil engineering.",
+            "Ambient site humidity and curing conditions must be monitored.",
+        ),
+    ]
+
+    docs: list[dict[str, Any]] = []
+    extract_db: dict[str, str] = {}
+    for m_idx, (m_name, prop) in enumerate(mechanisms, 1):
+        for s_idx in range(1, 4):
+            url_slug = m_name.replace(" ", "-")
+            url = f"https://journal-{m_idx}-{s_idx}.org/{url_slug}"
+            intro, outro = context_templates[s_idx - 1]
+            text = f"{intro} {prop} {outro}"
+            hit = {
+                "url": url,
+                "title": f"{m_name.title()} Report {s_idx}",
+                "content": f"{m_name} cracking discussed in detail.",
+                "score": 0.85,
+            }
+            docs.append(hit)
+            extract_db[url] = text
+
+    call_idx = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_idx
+        if str(request.url) == TAVILY_SEARCH_URL:
+            round_idx = call_idx // 3
+            call_idx += 1
+            start = min(round_idx * 5, len(docs))
+            batch = docs[start : start + 5]
+            return httpx.Response(200, json={"results": batch})
+        elif str(request.url) == TAVILY_EXTRACT_URL:
+            body = json.loads(request.content)
+            req_urls = body.get("urls", [])
+            results = []
+            for u in req_urls:
+                if u in extract_db:
+                    results.append({"url": u, "raw_content": extract_db[u], "title": f"Extracted {u}"})
+            return httpx.Response(200, json={"results": results})
+        return httpx.Response(404)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    discovery = TavilyDiscoveryProvider(api_key=SYNTHETIC_API_KEY, client=client)
+    extractor = TavilyResearchContentExtractor(api_key=SYNTHETIC_API_KEY, client=client)
+
+    # Note: NO widened parameters passed! Canonical defaults used.
+    result = await execute_coverage_driven_research(
+        session=session,
+        request_id=req.id,
+        discovery_provider=discovery,
+        content_extractor=extractor,
+        authority_provider=None,
+    )
+
+    assert result["final_supported_count"] == 5
+    assert len(result["final_supported_families"]) == 5
+    assert result["brief"].outcome == ResearchOutcome.SUFFICIENT
+    assert result["stop_reason"] == "COVERAGE_FULFILLED"
+    assert len(session.sources) <= 15
+    assert len(session.sources) == 15

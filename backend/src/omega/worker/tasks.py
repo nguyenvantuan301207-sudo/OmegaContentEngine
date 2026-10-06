@@ -861,10 +861,11 @@ def _execute_canonical_research(
             ).scalar_one_or_none()
             settings = get_settings()
             target_acq_mode = ResearchAcquisitionMode.MANUAL
-            if (
-                settings.research_acquisition_mode == "AUTOMATIC_SEARCH"
-                and settings.research_discovery_provider == "TAVILY"
-            ):
+            if settings.research_acquisition_mode == "AUTOMATIC_SEARCH":
+                if settings.research_discovery_provider != "TAVILY":
+                    raise ValueError(
+                        f"Cannot execute AUTOMATIC_SEARCH with provider '{settings.research_discovery_provider}'"
+                    )
                 target_acq_mode = ResearchAcquisitionMode.AUTOMATIC_SEARCH
 
             if request is None:
@@ -915,30 +916,43 @@ def _execute_canonical_research(
                 raise ValueError(f"ResearchRequest cannot run from state '{request.status}'")
             else:
                 if req_acq_mode == ResearchAcquisitionMode.AUTOMATIC_SEARCH.value:
-                    from omega.application.research_coverage_service import execute_coverage_driven_research
+                    if settings.research_discovery_provider != "TAVILY":
+                        raise ValueError(
+                            f"ResearchRequest '{request.id}' requested AUTOMATIC_SEARCH but discovery provider "
+                            f"is '{settings.research_discovery_provider}'. Automatic search requires TAVILY provider."
+                        )
+                    from omega.application.research_coverage_service import (
+                        execute_coverage_driven_research,
+                    )
                     from omega.application.research_discovery import build_research_discovery_stack
 
                     discovery_provider, content_extractor = build_research_discovery_stack(settings)
-                    cov_result = await execute_coverage_driven_research(
-                        session=async_session,
-                        request_id=request.id,
-                        discovery_provider=discovery_provider,
-                        content_extractor=content_extractor,
-                        max_rounds=settings.research_max_rounds,
-                        max_queries_per_round=settings.research_max_queries_per_round,
-                        max_candidates_per_query=settings.research_max_candidates_per_query,
-                        max_accepted_sources_per_round=settings.research_max_accepted_sources_per_round,
-                        max_total_acquired_sources=settings.research_max_total_sources,
-                    )
-                    brief_resp = cov_result.get("brief")
-                    if brief_resp is not None:
-                        brief = await async_session.get(ResearchBrief, brief_resp.id)
-                    if hasattr(async_session, "refresh"):
-                        await async_session.refresh(request)
-                    else:
-                        refreshed = await async_session.get(ResearchRequest, request.id)
-                        if refreshed is not None:
-                            request = refreshed
+                    try:
+                        cov_result = await execute_coverage_driven_research(
+                            session=async_session,
+                            request_id=request.id,
+                            discovery_provider=discovery_provider,
+                            content_extractor=content_extractor,
+                            max_rounds=settings.research_max_rounds,
+                            max_queries_per_round=settings.research_max_queries_per_round,
+                            max_candidates_per_query=settings.research_max_candidates_per_query,
+                            max_accepted_sources_per_round=settings.research_max_accepted_sources_per_round,
+                            max_total_acquired_sources=settings.research_max_total_sources,
+                        )
+                        brief_resp = cov_result.get("brief")
+                        if brief_resp is not None:
+                            brief = await async_session.get(ResearchBrief, brief_resp.id)
+                        if hasattr(async_session, "refresh"):
+                            await async_session.refresh(request)
+                        else:
+                            refreshed = await async_session.get(ResearchRequest, request.id)
+                            if refreshed is not None:
+                                request = refreshed
+                    finally:
+                        if hasattr(discovery_provider, "close"):
+                            await discovery_provider.close()
+                        if hasattr(content_extractor, "close"):
+                            await content_extractor.close()
                 else:
                     if source_batch is not None:
                         await research_service.batch_add_sources(

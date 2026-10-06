@@ -80,6 +80,9 @@ class NullDiscoveryProvider:
     ) -> list[DiscoveryCandidate]:
         return []
 
+    async def close(self) -> None:
+        pass
+
 
 class NullResearchContentExtractor:
     """Default null content extractor that returns no extracted document."""
@@ -89,6 +92,9 @@ class NullResearchContentExtractor:
         candidate: DiscoveryCandidate,
     ) -> ExtractedResearchDocument | None:
         return None
+
+    async def close(self) -> None:
+        pass
 
 
 class InMemoryDiscoveryProvider:
@@ -264,6 +270,7 @@ def build_research_discovery_stack(
             )
 
         from omega.infrastructure.tavily_provider import (
+            TavilyClient,
             TavilyDiscoveryProvider,
             TavilyResearchContentExtractor,
         )
@@ -273,21 +280,22 @@ def build_research_discovery_stack(
         timeout_seconds = getattr(settings, "research_tavily_timeout_seconds", 30.0)
         max_bytes = getattr(settings, "research_tavily_max_response_bytes", 5_000_000)
 
-        discovery_provider = TavilyDiscoveryProvider(
+        t_client = TavilyClient(
             api_key=str(api_key).strip(),
-            search_depth=search_depth,
             timeout_seconds=timeout_seconds,
             max_response_bytes=max_bytes,
             client=client,
             retry_delay_fn=retry_delay_fn,
         )
+        discovery_provider = TavilyDiscoveryProvider(
+            api_key=str(api_key).strip(),
+            search_depth=search_depth,
+            client=t_client,
+        )
         content_extractor = TavilyResearchContentExtractor(
             api_key=str(api_key).strip(),
             extract_depth=extract_depth,
-            timeout_seconds=timeout_seconds,
-            max_response_bytes=max_bytes,
-            client=client,
-            retry_delay_fn=retry_delay_fn,
+            client=t_client,
         )
         return discovery_provider, content_extractor
 

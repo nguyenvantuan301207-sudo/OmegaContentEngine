@@ -9,9 +9,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # ── P20-A Recurring Scheduler Hard Bounds ──
@@ -166,6 +166,22 @@ class Settings(BaseSettings):
                 f"research_acquisition_mode must be 'MANUAL' or 'AUTOMATIC_SEARCH', got '{v}'"
             )
         return upper
+
+    @model_validator(mode="after")
+    def validate_research_discovery_configuration(self) -> Self:
+        acq_mode = (self.research_acquisition_mode or "MANUAL").upper().strip()
+        provider = (self.research_discovery_provider or "NONE").upper().strip()
+        if acq_mode == "AUTOMATIC_SEARCH":
+            if provider == "NONE":
+                raise ValueError(
+                    "research_acquisition_mode is 'AUTOMATIC_SEARCH' but research_discovery_provider is 'NONE'. "
+                    "An active discovery provider (e.g. 'TAVILY') must be configured."
+                )
+            if provider == "TAVILY" and not (self.tavily_api_key and self.tavily_api_key.strip()):
+                raise ValueError(
+                    "research_discovery_provider is 'TAVILY' but tavily_api_key is missing or empty."
+                )
+        return self
 
     # Production access control: Fail-closed in production if None
     metrics_auth_token: str | None = None

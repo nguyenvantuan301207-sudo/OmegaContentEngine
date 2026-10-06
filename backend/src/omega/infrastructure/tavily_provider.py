@@ -16,6 +16,7 @@ Invariants:
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlparse
@@ -177,77 +178,86 @@ class TavilyClient:
 
         for attempt in range(MAX_RETRIES + 1):
             try:
-                response = await client.post(endpoint_url, json=payload, headers=headers)
+                async with client.stream("POST", endpoint_url, json=payload, headers=headers) as response:
+                    # 1. Pre-check Content-Length header before reading body if present
+                    content_len = response.headers.get("Content-Length")
+                    if content_len is not None:
+                        try:
+                            if int(content_len) > self._max_response_bytes:
+                                raise TavilyResponseTooLargeError(
+                                    f"Response Content-Length ({content_len}) exceeds limit ({self._max_response_bytes})"
+                                )
+                        except ValueError:
+                            pass
 
-                # Check Content-Length header before reading full body if present
-                content_len = response.headers.get("Content-Length")
-                if content_len is not None:
-                    try:
-                        if int(content_len) > self._max_response_bytes:
+                    # 2. Check early status codes
+                    if response.status_code in (401, 403):
+                        # No retry on authentication failure
+                        raise TavilyAuthenticationError()
+
+                    if response.status_code == 429:
+                        if attempt < MAX_RETRIES:
+                            retry_after_hdr = response.headers.get("Retry-After")
+                            delay = 1.0 * (attempt + 1)
+                            if retry_after_hdr:
+                                try:
+                                    parsed_delay = float(retry_after_hdr)
+                                    delay = min(parsed_delay, MAX_RETRY_AFTER_SECONDS)
+                                except ValueError:
+                                    pass
+                            await self._retry_delay_fn(delay)
+                            continue
+                        raise TavilyRateLimitError()
+
+                    # 3. Stream and accumulate chunks enforcing bound while reading
+                    chunks: list[bytes] = []
+                    bytes_accumulated = 0
+                    async for chunk in response.aiter_bytes():
+                        bytes_accumulated += len(chunk)
+                        if bytes_accumulated > self._max_response_bytes:
                             raise TavilyResponseTooLargeError(
-                                f"Response Content-Length ({content_len}) exceeds limit ({self._max_response_bytes})"
+                                f"Response body bytes ({bytes_accumulated}) exceeds limit ({self._max_response_bytes})"
                             )
-                    except ValueError:
-                        pass
+                        chunks.append(chunk)
 
-                body_bytes = response.content
-                if len(body_bytes) > self._max_response_bytes:
-                    raise TavilyResponseTooLargeError(
-                        f"Response body bytes ({len(body_bytes)}) exceeds limit ({self._max_response_bytes})"
-                    )
+                    body_bytes = b"".join(chunks)
 
-                if response.status_code in (401, 403):
-                    # No retry on authentication failure
-                    raise TavilyAuthenticationError()
+                    if 400 <= response.status_code < 500:
+                        # Non-retriable client errors
+                        err_text = body_bytes[:300].decode("utf-8", errors="replace")
+                        err_msg = _sanitize_secret(err_text, self._api_key)
+                        raise TavilyUpstreamError(
+                            f"Tavily returned client error {response.status_code}: {err_msg}",
+                            error_code="UPSTREAM_4XX",
+                        )
 
-                if response.status_code == 429:
-                    if attempt < MAX_RETRIES:
-                        retry_after_hdr = response.headers.get("Retry-After")
-                        delay = 1.0 * (attempt + 1)
-                        if retry_after_hdr:
-                            try:
-                                parsed_delay = float(retry_after_hdr)
-                                delay = min(parsed_delay, MAX_RETRY_AFTER_SECONDS)
-                            except ValueError:
-                                pass
-                        await self._retry_delay_fn(delay)
-                        continue
-                    raise TavilyRateLimitError()
+                    if response.status_code >= 500:
+                        if attempt < MAX_RETRIES:
+                            delay = 0.5 * (attempt + 1)
+                            await self._retry_delay_fn(delay)
+                            continue
+                        err_text = body_bytes[:300].decode("utf-8", errors="replace")
+                        err_msg = _sanitize_secret(err_text, self._api_key)
+                        raise TavilyUpstreamError(
+                            f"Tavily returned server error {response.status_code}: {err_msg}",
+                            error_code="UPSTREAM_5XX",
+                        )
 
-                if 400 <= response.status_code < 500:
-                    # Non-retriable client errors
-                    err_msg = _sanitize_secret(response.text[:300], self._api_key)
-                    raise TavilyUpstreamError(
-                        f"Tavily returned client error {response.status_code}: {err_msg}",
-                        error_code="UPSTREAM_4XX",
-                    )
+                    try:
+                        data = json.loads(body_bytes.decode("utf-8"))
+                    except Exception as json_exc:
+                        raise TavilyInvalidResponseError(
+                            "Tavily response could not be parsed as JSON",
+                            error_code="INVALID_JSON",
+                        ) from json_exc
 
-                if response.status_code >= 500:
-                    if attempt < MAX_RETRIES:
-                        delay = 0.5 * (attempt + 1)
-                        await self._retry_delay_fn(delay)
-                        continue
-                    err_msg = _sanitize_secret(response.text[:300], self._api_key)
-                    raise TavilyUpstreamError(
-                        f"Tavily returned server error {response.status_code}: {err_msg}",
-                        error_code="UPSTREAM_5XX",
-                    )
+                    if not isinstance(data, dict):
+                        raise TavilyInvalidResponseError(
+                            f"Expected JSON object response, got {type(data).__name__}",
+                            error_code="INVALID_RESPONSE_SHAPE",
+                        )
 
-                try:
-                    data = response.json()
-                except Exception as json_exc:
-                    raise TavilyInvalidResponseError(
-                        "Tavily response could not be parsed as JSON",
-                        error_code="INVALID_JSON",
-                    ) from json_exc
-
-                if not isinstance(data, dict):
-                    raise TavilyInvalidResponseError(
-                        f"Expected JSON object response, got {type(data).__name__}",
-                        error_code="INVALID_RESPONSE_SHAPE",
-                    )
-
-                return data
+                    return data
 
             except httpx.TimeoutException as exc:
                 last_exception = exc
@@ -317,17 +327,23 @@ class TavilyDiscoveryProvider:
         search_depth: str = "basic",
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
-        client: httpx.AsyncClient | None = None,
+        client: httpx.AsyncClient | TavilyClient | None = None,
         retry_delay_fn: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._search_depth = search_depth
-        self._client = TavilyClient(
-            api_key=api_key,
-            timeout_seconds=timeout_seconds,
-            max_response_bytes=max_response_bytes,
-            client=client,
-            retry_delay_fn=retry_delay_fn,
-        )
+        if isinstance(client, TavilyClient):
+            self._client = client
+        else:
+            self._client = TavilyClient(
+                api_key=api_key,
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=max_response_bytes,
+                client=client,
+                retry_delay_fn=retry_delay_fn,
+            )
+
+    async def close(self) -> None:
+        await self._client.close()
 
     async def search(
         self,
@@ -404,18 +420,24 @@ class TavilyResearchContentExtractor:
         extract_depth: str = "basic",
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
-        client: httpx.AsyncClient | None = None,
+        client: httpx.AsyncClient | TavilyClient | None = None,
         retry_delay_fn: Callable[[float], Awaitable[None]] | None = None,
     ) -> None:
         self._extract_depth = extract_depth
-        self._client = TavilyClient(
-            api_key=api_key,
-            timeout_seconds=timeout_seconds,
-            max_response_bytes=max_response_bytes,
-            client=client,
-            retry_delay_fn=retry_delay_fn,
-        )
+        if isinstance(client, TavilyClient):
+            self._client = client
+        else:
+            self._client = TavilyClient(
+                api_key=api_key,
+                timeout_seconds=timeout_seconds,
+                max_response_bytes=max_response_bytes,
+                client=client,
+                retry_delay_fn=retry_delay_fn,
+            )
         self._url_cache: dict[str, ExtractedResearchDocument | None] = {}
+
+    async def close(self) -> None:
+        await self._client.close()
 
     async def extract_document(
         self,
@@ -451,15 +473,12 @@ class TavilyResearchContentExtractor:
             self._url_cache[norm_url] = None
             return None
 
-        # Locate matching extraction result
+        # Locate matching extraction result strictly by normalized URL
         matched_item: dict[str, Any] | None = None
         for item in results:
             if isinstance(item, dict) and normalize_url(item.get("url", "")) == norm_url:
                 matched_item = item
                 break
-
-        if matched_item is None and results and isinstance(results[0], dict):
-            matched_item = results[0]
 
         if matched_item is None:
             self._url_cache[norm_url] = None
