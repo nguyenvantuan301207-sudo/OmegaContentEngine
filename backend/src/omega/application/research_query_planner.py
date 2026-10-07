@@ -125,6 +125,7 @@ GENERIC_PACKAGING: set[str] = {
     "principle", "principles", "factor", "factors", "method", "methods", "approach",
     "aspect", "aspects", "important", "effective", "common", "primary", "various",
     "according", "considering", "finally", "selects", "leave", "gaps", "theories",
+    "pattern", "patterns", "appearance", "distinctive", "directional", "visible", "form", "forms",
 }
 
 _CAUSAL_ENTITY_NOUNS: set[str] = {
@@ -230,7 +231,8 @@ _DIAGNOSTIC_OR_INSPECTION_PATTERNS: list[str] = [
 _MITIGATION_OR_PREVENTION_PATTERNS: list[str] = [
     r"\bpreventive\b",
     r"\bprevention\b",
-    r"\brepair\b",
+    r"\brepair(?:s|ed|ing)?\b",
+    r"\bcan\s+be\s+repaired\b",
     r"\btreatment\b",
     r"\bmaintenance\b",
     r"\bmitigation\b",
@@ -241,6 +243,17 @@ _MITIGATION_OR_PREVENTION_PATTERNS: list[str] = [
     r"\b(?:placement|spacing|layout|installation)\s+(?:of|at|around|for)\b",
     r"\b(?:require[s]?|requiring)\s+(?:regular\s+)?(?:maintenance|inspection|monitoring|repair)\b",
     r"\bproperly\s+(?:placed|spaced|installed|maintained|treated|applied)\b",
+]
+
+_MANIFESTATION_OR_PATTERN_PATTERNS: list[str] = [
+    r"\b(?:produces?|producing|creates?|creating|forms?|forming|exhibits?|displays?|shows?|characterized\s+by|appears?\s+as|manifests?\s+as)\s+(?:(?:a|an|the|very)\s+)?(?:distinctive\s+|characteristic\s+|typical\s+|visible\s+|linear\s+|fine\s+|closely\s+spaced\s+|red\s+|warning\s+)*(?:pattern|appearance|shape|orientation|spacing|width|depth|visible\s+(?:lines?|marks?|icons?|warning)|lines?|marks?|icons?|indicators?|map\s+(?:pattern|cracking))\b",
+    r"\b(?:distinctive|characteristic|typical)\s+pattern\b",
+    r"\bforms?\s+a\s+pattern\b",
+    r"\bmulti-directional\s+(?:or\s+map\s+)?(?:cracking|cracks?\s+to\s+form|pattern)\b",
+    r"\bmap\s+cracking\b",
+    r"\bwidth,\s+depth,\s+pattern\b",
+    r"\bpattern,\s+and\s+location\b",
+    r"\bcracks\s+produce\s+visible\b",
 ]
 
 _OUTCOME_OR_CONSEQUENCE_PATTERNS: list[str] = [
@@ -324,7 +337,11 @@ def classify_target_planning_usefulness(
         if re.search(pat, t):
             return ("MITIGATION_OR_PREVENTION", 25.0, "MITIGATION_OR_PREVENTION")
 
-    # 4. Outcome / consequence / severity check (prevents false entity candidates)
+    # 4. Manifestation / pattern / outcome / consequence / severity check (prevents false entity candidates)
+    for pat in _MANIFESTATION_OR_PATTERN_PATTERNS:
+        if re.search(pat, t):
+            return ("OUTCOME_OR_CONSEQUENCE", 30.0, "OUTCOME_OR_CONSEQUENCE")
+
     for pat in _OUTCOME_OR_CONSEQUENCE_PATTERNS:
         if re.search(pat, t):
             return ("OUTCOME_OR_CONSEQUENCE", 30.0, "OUTCOME_OR_CONSEQUENCE")

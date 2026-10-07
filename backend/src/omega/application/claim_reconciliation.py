@@ -162,19 +162,15 @@ def reconcile_source_extractions_into_claims(
         location = item.get("source_location")
         strength = float(item.get("strength_score", 80.0))
 
-        # 1. Check idempotency: is this excerpt already linked from this source to ANY claim?
-        already_linked = False
-        for c in existing_claims:
-            for ev in c.evidence or []:
-                if ev.source_id == source.id and (
-                    ev.excerpt == raw_excerpt
-                    or normalize_claim_text(ev.excerpt) == normalize_claim_text(raw_excerpt)
-                ):
-                    already_linked = True
-                    break
-            if already_linked:
-                break
-        if already_linked:
+        # 1. Check idempotency: has this source already provided evidence for this specific proposition?
+        # A single source excerpt can support multiple distinct atomic propositions,
+        # but the same source must never link twice to the same canonical proposition.
+        already_linked_to_identical_claim = any(
+            c.claim_text.strip().lower() == claim_text.lower()
+            and any(ev.source_id == source.id for ev in (c.evidence or []))
+            for c in existing_claims
+        )
+        if already_linked_to_identical_claim:
             continue
 
         # 2. Check if this proposition corroborates an existing canonical claim
@@ -217,7 +213,7 @@ def reconcile_source_extractions_into_claims(
                 claim_text=claim_text,
                 normalized_claim=normalize_claim_text(claim_text),
                 claim_type=type_str,
-                metadata_={},
+                metadata_={"is_atomic": True} if item.get("is_atomic") else {},
             )
             ev_obj = ClaimEvidence(
                 id=uuid.uuid4(),

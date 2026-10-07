@@ -158,6 +158,95 @@ def score_candidate_proposition(
     return score
 
 
+def _split_conjunction_list(raw_list: str) -> list[str]:
+    """Deterministically parse an explicit list of items from a list phrase."""
+    # Check for roman numerals / numbered list: i) ... ii) ... iii) or 1) ... 2) ...
+    if re.search(r"(?:[iIvVxX]+\)|\d+[\.\)])\s*", raw_list):
+        parts = re.split(r"(?:[iIvVxX]+\)|\d+[\.\)])\s*", raw_list)
+        clean_parts = []
+        for p in parts:
+            p_c = re.sub(r"[\;\,\.]", "", p).strip()
+            p_c = re.sub(r"\(.*?\)", "", p_c).strip()
+            p_c = re.sub(r"^(?:and|or)\s+", "", p_c).strip()
+            if p_c and len(p_c.split()) <= 6:
+                clean_parts.append(p_c)
+        if len(clean_parts) >= 2:
+            return clean_parts
+
+    delims = re.split(r",\s*(?:and|or)\s+|;\s*(?:and|or)\s+|\s+(?:and|or)\s+|,\s*|;\s*", raw_list)
+    items = []
+    for d in delims:
+        d_clean = d.strip()
+        if not d_clean:
+            continue
+        d_clean = re.sub(r"^[\*\-\•\s]+|[\*\-\•\s]+$", "", d_clean)
+        words = d_clean.split()
+        if 1 <= len(words) <= 6:
+            items.append(d_clean)
+        else:
+            return []
+    return items if len(items) >= 2 else []
+
+
+def split_explicit_enumeration(sentence: str) -> list[str]:
+    """Deterministically extract atomic causal propositions from explicit source enumerations.
+
+    Guarantees:
+    - Zero semantic invention: uses only lexical material in source sentence + existing connector words.
+    - Preserves exact source excerpt provenance.
+    - Leaves ambiguous or non-causal prose unsplit.
+    """
+    s = sentence.strip()
+    # Strip leading markdown decoration or questions
+    s_clean = re.sub(r"^(?:#+|\*\*|Why\s+does\s+[\w\s]+\?\s*\*?\*?)\s*", "", s).strip()
+
+    # Pattern 1: <EFFECT> (is/are/can be)? (caused by | due to | results from | resulting from) [intro words]? <LIST>
+    pat1 = re.compile(
+        r"^(?P<effect>.+?)\s+(?P<conn>(?:is|are|can\s+be)?\s*(?:caused\s+by|due\s+to|results?\s+from|resulting\s+from))\s*(?:(?:several|multiple|different|various)\s+(?:reasons|causes|factors|mechanisms)\s*(?:like|such\s+as)?:?|(?:reasons|causes|factors|mechanisms)\s*(?:like|such\s+as):?|like|such\s+as)?\s*(?P<list>[^.]+)\.?$",
+        re.I,
+    )
+    m1 = pat1.match(s_clean)
+    if m1:
+        effect = m1.group("effect").strip()
+        conn = m1.group("conn").strip()
+        raw_list = m1.group("list").strip()
+        items = _split_conjunction_list(raw_list)
+        if len(items) >= 2:
+            return [f"{effect} {conn} {item}" for item in items]
+
+    # Pattern 2: <LIST> (causes? | leads? to | results? in) <EFFECT>
+    pat2 = re.compile(
+        r"^(?P<list>.+?)\s+(?P<conn>(?:causes?|leads?\s+to|results?\s+in))\s+(?P<effect>[^.]+)\.?$",
+        re.I,
+    )
+    m2 = pat2.match(s_clean)
+    if m2:
+        raw_list = m2.group("list").strip()
+        conn = m2.group("conn").strip()
+        effect = m2.group("effect").strip()
+        items = _split_conjunction_list(raw_list)
+        if len(items) >= 2 and not any(len(it.split()) > 6 for it in items):
+            verb = "causes" if conn in ("cause", "causes") else conn
+            return [f"{item} {verb} {effect}" for item in items]
+
+    # Pattern 3: <EFFECT> (mechanisms|causes|reasons|factors|types) (include|are|can be categorised into) <LIST>
+    pat3 = re.compile(
+        r"^(?P<effect>.+?)\s+(?P<noun>mechanisms?|causes?|reasons?|factors?|types?)\s+(?P<verb>include|includes|are|can\s+be\s+categorised\s+into(?:\s+the\s+following\s+types)?):?\s*(?P<list>[^.]+)\.?$",
+        re.I,
+    )
+    m3 = pat3.match(s_clean)
+    if m3:
+        effect = m3.group("effect").strip()
+        noun = m3.group("noun").strip()
+        verb = m3.group("verb").strip()
+        raw_list = m3.group("list").strip()
+        items = _split_conjunction_list(raw_list)
+        if len(items) >= 2:
+            return [f"{effect} {noun} {verb} {item}" for item in items]
+
+    return [s]
+
+
 def extract_deterministic_claims_from_source(
     source_title: str,
     source_excerpt: str,
@@ -212,15 +301,30 @@ def extract_deterministic_claims_from_source(
 
                 excerpt = item.get("excerpt", text)
                 strength = float(item.get("strength_score", 85.0))
-                results.append(
-                    {
-                        "claim_text": text,
-                        "claim_type": claim_type,
-                        "excerpt": excerpt,
-                        "strength_score": min(max(strength, 0.0), 100.0),
-                        "source_location": item.get("source_location"),
-                    }
-                )
+                atoms = split_explicit_enumeration(text)
+                if len(atoms) >= 2:
+                    for atom in atoms:
+                        results.append(
+                            {
+                                "claim_text": atom,
+                                "claim_type": _classify_claim_type(atom),
+                                "excerpt": excerpt,
+                                "strength_score": min(max(strength, 0.0), 100.0),
+                                "source_location": item.get("source_location"),
+                                "is_atomic": True,
+                            }
+                        )
+                else:
+                    results.append(
+                        {
+                            "claim_text": text,
+                            "claim_type": claim_type,
+                            "excerpt": excerpt,
+                            "strength_score": min(max(strength, 0.0), 100.0),
+                            "source_location": item.get("source_location"),
+                            "is_atomic": False,
+                        }
+                    )
                 if len(results) >= max_claims_per_source:
                     return results
         if results:
@@ -303,16 +407,35 @@ def extract_deterministic_claims_from_source(
     )
 
     top_candidates = candidate_pool[:max_claims_per_source]
-    return [
-        {
-            "claim_text": c["statement"],
-            "claim_type": _classify_claim_type(c["statement"]),
-            "excerpt": c["excerpt"],
-            "strength_score": 80.0,
-            "source_location": None,
-        }
-        for c in top_candidates
-    ]
+    extracted_claims: list[dict[str, Any]] = []
+    for c in top_candidates:
+        stmt = c["statement"]
+        ex = c["excerpt"]
+        atoms = split_explicit_enumeration(stmt)
+        if len(atoms) >= 2:
+            for atom in atoms:
+                extracted_claims.append(
+                    {
+                        "claim_text": atom,
+                        "claim_type": _classify_claim_type(atom),
+                        "excerpt": ex,
+                        "strength_score": 80.0,
+                        "source_location": None,
+                        "is_atomic": True,
+                    }
+                )
+        else:
+            extracted_claims.append(
+                {
+                    "claim_text": stmt,
+                    "claim_type": _classify_claim_type(stmt),
+                    "excerpt": ex,
+                    "strength_score": 80.0,
+                    "source_location": None,
+                    "is_atomic": False,
+                }
+            )
+    return extracted_claims
 
 
 def normalize_claim_text(claim_text: str) -> str:
