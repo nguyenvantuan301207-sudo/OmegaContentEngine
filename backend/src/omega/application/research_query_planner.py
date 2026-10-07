@@ -108,6 +108,13 @@ STOPWORDS: set[str] = {
     "generates", "generate", "generated", "generating",
     "several", "reasons", "reason", "factors", "like", "various", "many", "types", "different",
     "excessive", "severe", "moderate", "slight", "high", "low", "rapid", "slow", "uneven", "differential", "massive", "minor", "major", "early", "late",
+    "while", "determining", "determine", "determined", "somewhat", "need", "needs", "needed", "watch", "watching",
+    "though", "should", "would", "could", "might", "must", "shall", "ought", "placed", "place", "placing", "places",
+    "either", "neither", "where", "wherever", "whenever", "whether", "whereas", "furthermore", "moreover", "however",
+    "therefore", "thus", "hence", "along", "across", "around", "within", "without", "against", "toward", "towards",
+    "upon", "among", "amongst", "almost", "nearly", "largely", "mainly", "mostly", "especially", "particularly",
+    "specifically", "actually", "indeed", "simply", "merely", "quite", "rather", "instead", "corner", "corners", "entrant",
+    "joint", "joints", "difficult", "difficulty", "difficulties", "severity",
 }
 
 GENERIC_PACKAGING: set[str] = {
@@ -206,6 +213,18 @@ _DIAGNOSTIC_OR_INSPECTION_PATTERNS: list[str] = [
     r"\bmeasurement\b",
     r"\bdisplacement\b",
     r"\bcracks?\s+require\s+inspection\b",
+    r"\bdetermining\s+(?:the\s+)?(?:cause|severity)\b",
+    r"\bidentifying\s+(?:the\s+)?(?:cause|severity)\b",
+    r"\bnarrow\s+down\b",
+    r"\bdiagnos(?:e|ing|is)\b",
+    r"\bevaluat(?:e|ing|ion)\b",
+    r"\bdistinguish(?:ing)?\s+between\b",
+    r"\barm(?:ing)?\s+ourselves\b",
+    r"\blook\s+for\s+signs\b",
+    r"\bcrack\s+testing\b",
+    r"\bwidth,\s+depth\b",
+    r"\bpattern,\s+and\s+location\b",
+    r"\bunderstanding\s+the\s+width\b",
 ]
 
 _MITIGATION_OR_PREVENTION_PATTERNS: list[str] = [
@@ -219,6 +238,16 @@ _MITIGATION_OR_PREVENTION_PATTERNS: list[str] = [
     r"\bsolutions to\s+(?:prevent|repair)\b",
     r"\bexpansion\s+joints?\s+require\s+maintenance\b",
     r"\bcuring\s+methods\b",
+    r"\bjoints?\s+(?:should|must|can|are|to\s+be)\b",
+    r"\bcontrol\s+joints?\b",
+    r"\bexpansion\s+joints?\b",
+    r"\bjoint\s+(?:placement|spacing|layout)\b",
+    r"\bre-entrant\s+corners?\b",
+    r"\bair\s+entrainment\b",
+    r"\bwater-cement\s+ratio\b",
+    r"\bsteel\s+reinforcement\b",
+    r"\breinforcing\s+steel\b",
+    r"\bproperly\s+(?:placed|spaced|cured)\b",
 ]
 
 _OUTCOME_OR_CONSEQUENCE_PATTERNS: list[str] = [
@@ -236,6 +265,16 @@ _OUTCOME_OR_CONSEQUENCE_PATTERNS: list[str] = [
     r"\bmost\s+widely\s+used\s+construction\s+material\b",
     r"\bdepletion\s+of\s+land\s+resources\b",
     r"\bconstruction\s+waste\b",
+    r"\bwatch\s+out\s+for\b",
+    r"\blarger\s+problem\b",
+    r"\bfar\s+more\s+damage\b",
+    r"\bmore\s+damage\s+than\b",
+    r"\bcosmetic\s+(?:issue|concern|defect)\b",
+    r"\bpropagate\s+either\s+vertically\s+or\s+horizontally\b",
+    r"\blinear\s+cracks\s+that\s+propagate\b",
+    r"\bif\s+left\s+unaddressed\b",
+    r"\bcostly\s+failures\b",
+    r"\bcompromise\s+the\s+safety\b",
 ]
 
 _METADATA_OR_TOC_PATTERNS: list[str] = [
@@ -247,6 +286,8 @@ _METADATA_OR_TOC_PATTERNS: list[str] = [
     r"\bproce-dures\s+are\s+presented\b",
     r"\bsection\s+\d+",
     r"\b(?:this\s+paper|this\s+study|in\s+this\s+study|in\s+the\s+present\s+study|existing\s+theories|previous\s+studies)\b",
+    r"\bcan\s+be\s+primarily\s+categorized\s+into\b",
+    r"\bcategorized\s+into\s+the\s+following\b",
 ]
 
 
@@ -576,36 +617,64 @@ def plan_research_queries(
         ]
         return any(add_query(q_candidate, q_intent, reason) for q_candidate, q_intent in variants)
 
+    is_causal = is_causal_entity_type(contract.entity_type if contract else None)
+
     if corroboration_targets:
-        # Phase G: Tiers 1-4: promised entity candidates and topic-relevant candidates (priority < 5)
-        entity_and_topic_targets = [
-            t for t in corroboration_targets if t.priority < 5
-        ]
+        if is_causal:
+            # Phase C Causal Contract Selection Policy:
+            # Strictly require PROMISED_ENTITY_CANDIDATE (priority 1 or 2) AND semantic_role == "CAUSE_OR_PROCESS".
+            # Priorities 3, 4, 5 (context, diagnostic, mitigation, outcome, metadata) are strictly FORBIDDEN
+            # from consuming corroboration query slots.
+            eligible_targets = []
+            for t in corroboration_targets:
+                if t.priority not in (1, 2):
+                    continue
+                if t.semantic_role in (
+                    "DIAGNOSTIC_OR_INSPECTION",
+                    "MITIGATION_OR_PREVENTION",
+                    "OUTCOME_OR_CONSEQUENCE",
+                    "METADATA",
+                ):
+                    continue
+                eligible_targets.append(t)
+        else:
+            # Non-causal enumerable behavior preserved
+            eligible_targets = [
+                t for t in corroboration_targets if t.priority < 5
+            ]
+
         sorted_high_targets = sorted(
-            entity_and_topic_targets,
+            eligible_targets,
             key=lambda t: (t.priority, -t.topic_relevance, -t.confidence_score),
         )
 
-        # Phase G Diversity Pass 1: Select up to max_queries targets from distinct candidate families
+        # Phase G Diversity Pass 1: Select up to max_queries targets from distinct candidate families.
+        # sorted_high_targets naturally orders:
+        # 1. 2-support CAUSE_OR_PROCESS family (priority 1)
+        # 2. Other distinct 1-support CAUSE_OR_PROCESS families (priority 2)
         selected_families: set[str] = set()
         for target in sorted_high_targets:
             if len(queries) >= max_queries:
                 break
+            fam = target.candidate_family or derive_candidate_family_signature(
+                extract_query_anchors(target.representative_claim_text, subject)
+            )
             if (
-                target.candidate_family
-                and target.candidate_family not in selected_families
+                fam
+                and fam not in selected_families
                 and _issue_from_target(target)
             ):
-                selected_families.add(target.candidate_family)
+                selected_families.add(fam)
 
-        # Phase G Diversity Pass 2: If query budget remains and fewer distinct families exist, select remaining
-        if len(queries) < max_queries:
+        # For non-causal contracts: allow second query from remaining targets if budget remains
+        if not is_causal and len(queries) < max_queries:
             for target in sorted_high_targets:
                 if len(queries) >= max_queries:
                     break
                 _issue_from_target(target)
 
     # Phase G Step 4: Generic coverage fallback if query budget remains
+    # (For causal contracts, this runs BEFORE any second query for an already-targeted candidate family)
     if len(queries) < max_queries:
         if contract and contract.promised_count and contract.promised_count > 0:
             add_query(
@@ -650,8 +719,16 @@ def plan_research_queries(
                 f"Seek additional empirical literature on {subject}.",
             )
 
-    # Phase G Step 5: If query budget STILL remains and generic fallback exhausted, lower-tier targets
-    if len(queries) < max_queries and corroboration_targets:
+    # Phase D: For causal contracts, only issue a second query for an already-selected candidate family
+    # when distinct families are exhausted AND generic fallback is exhausted.
+    if is_causal and len(queries) < max_queries and corroboration_targets:
+        for target in sorted_high_targets:
+            if len(queries) >= max_queries:
+                break
+            _issue_from_target(target)
+
+    # For non-causal contracts only: lower-tier targets if budget remains and fallback exhausted
+    if not is_causal and len(queries) < max_queries and corroboration_targets:
         low_targets = [t for t in corroboration_targets if t.priority >= 5]
         sorted_low = sorted(low_targets, key=lambda t: (t.priority, -t.confidence_score))
         for target in sorted_low:
