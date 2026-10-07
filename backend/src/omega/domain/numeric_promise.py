@@ -291,19 +291,64 @@ def _stem(w: str) -> str:
     return w
 
 
+_GENERIC_MANIFESTATION_WORDS: set[str] = {
+    "crack", "cracks", "cracking", "surface", "interior", "internal",
+    "fracture", "fractures", "fracturing",
+    "failure", "failures", "failing", "damage", "damages", "damaging",
+    "defect", "defects", "degradation", "degrade", "degrading",
+    "issue", "issues", "problem", "problems",
+}
+
+_CAUSE_BEFORE_CONNECTORS: list[str] = [
+    # Cause precedes connector: X [connector] Y
+    r"\b(?:causes?|causing)\b",
+    r"\b(?:leads?\s+to|leading\s+to)\b",
+    r"\b(?:results?\s+in|resulting\s+in)\b",
+    r"\b(?:produces?|producing)\b",
+    r"\b(?:induces?|inducing)\b",
+    r"\b(?:triggers?|triggering)\b",
+    r"\b(?:initiates?|initiating)\b",
+    r"\b(?:generates?|generating)\b",
+    r"\b(?:creates?|creating)\b",
+    r"\b(?:drives?|driving)\b",
+]
+
+_CAUSE_STRICTLY_AFTER_CONNECTORS: list[str] = [
+    # Cause strictly follows connector: Y [connector] X
+    r"\b(?:results?\s+from|resulting\s+from)\b",
+    r"\b(?:arises?\s+from|arising\s+from)\b",
+    r"\b(?:(?:is|are|was|were|being)?\s*due\s+to)\b",
+    r"\b(?:originates?\s+from|originating\s+from)\b",
+    r"\b(?:stems?\s+from|stemming\s+from)\b",
+    r"\b(?:is|are|was|were|being)?\s*caused\s+by\b",
+    r"\b(?:is|are|was|were|being)?\s*triggered\s+by\b",
+    r"\b(?:is|are|was|were|being)?\s*induced\s+by\b",
+    r"\b(?:is|are|was|were|being)?\s*produced\s+by\b",
+    r"\b(?:(?:is|are|was|were|being)?\s*a\s+result\s+of)\b",
+]
+
+_CONDITION_AFTER_CONNECTORS: list[str] = [
+    # Cause/condition follows connector: Y [connector] X
+    r"\b(?:occurs?\s+when|occurring\s+when)\b",
+    r"\b(?:develops?\s+when|developing\s+when)\b",
+    r"\b(?:forms?\s+when|forming\s+when)\b",
+    r"\b(?:happens?\s+when|happening\s+when)\b",
+]
+
+
 def derive_verified_family_label(
     text: str,
     topic_stopwords: set[str] | None = None,
     entity_type: str = "mechanism",
 ) -> tuple[set[str], str]:
-    """Deterministically derive distinguishing tokens and verified human-readable concept label.
+    """Deterministically derive distinguishing tokens and verified concept label via causal span extraction.
 
     Invariants:
     - Input is exclusively verified canonical propositions.
     - Grounded 100% in exact words present in the claim text.
-    - Human-readable phrases (e.g. 'drying shrinkage', 'applied forces', 'freeze-thaw expansion').
-    - Never emits arbitrary raw stems or discourse packaging (e.g. 'what_them', 'appli_forc').
-    - One proposition contributes at most one family.
+    - Zero domain-specific hard-coded mechanism mappings.
+    - Extracts cause-bearing phrase from causal connectors.
+    - Never emits arbitrary raw stems or invented domain vocabulary.
     - Returns (tokens_set, canon_label).
     """
     t_lower = text.lower()
@@ -317,83 +362,120 @@ def derive_verified_family_label(
     )
     t_clean = re.sub(r"^\d+\.\s*", "", t_clean)
 
-    words = re.findall(r"\b[a-zA-Z]{3,}\b", t_clean)
+    claim_words_raw = re.findall(r"\b[a-zA-Z]{2,}\b", t_clean)
+    claim_words_set = set(claim_words_raw)
+
     ignore = set(STOP_WORDS)
     if topic_stopwords:
         ignore.update(topic_stopwords)
 
-    sig_stems = []
-    for w in words:
-        s = _stem(w)
-        if s not in ignore and w not in ignore and len(s) >= 3:
-            sig_stems.append(s)
+    best_candidate_words: list[str] = []
 
-    tokens_set = set(sig_stems)
+    # 1. Definition / heading prefix before colon: "Mechanism Name: description..."
+    prefix_m = re.match(r"^([a-zA-Z\s\-]{3,35})\s*:\s*", t_clean)
+    if prefix_m:
+        cand_p = prefix_m.group(1).strip()
+        cand_words = [
+            w for w in re.findall(r"\b[a-zA-Z]{3,}\b", cand_p)
+            if w not in ignore and _stem(w) not in ignore and w not in _GENERIC_MANIFESTATION_WORDS
+        ]
+        if cand_words and not any(sw in cand_p for sw in ("note", "overview", "causes", "what", "summary", "chapter", "table")):
+            best_candidate_words = cand_words[:3]
 
-    canon_label = ""
-    # Check for prominent physical / chemical mechanism concepts grounded in exact claim vocabulary
-    if ("plastic" in tokens_set or "plastic" in t_clean) and ("shrink" in tokens_set or "shrinkage" in t_clean):
-        canon_label = "plastic shrinkage"
-    elif ("dry" in tokens_set or "drying" in t_clean) and ("shrink" in tokens_set or "shrinkage" in t_clean):
-        canon_label = "drying shrinkage"
-    elif ("differenti" in tokens_set or "differential" in t_clean) and ("shrink" in tokens_set or "shrinkage" in t_clean):
-        canon_label = "differential shrinkage"
-    elif "appli" in tokens_set or "applied" in t_clean:
-        if "load" in tokens_set or "loading" in t_clean:
-            canon_label = "applied loading"
-        elif "forc" in tokens_set or "forces" in t_clean:
-            canon_label = "applied forces"
-        else:
-            canon_label = "applied loading"
-    elif ("freez" in tokens_set or "freeze" in t_clean) and ("thaw" in tokens_set or "thaw" in t_clean):
-        if "cycl" in tokens_set or "cycling" in t_clean:
-            canon_label = "freeze-thaw cycling"
-        elif "expans" in tokens_set or "expansion" in t_clean:
-            canon_label = "freeze-thaw expansion"
-        else:
-            canon_label = "freeze-thaw"
-    elif "thermal" in tokens_set or "thermal" in t_clean:
-        if "contract" in tokens_set or "contraction" in t_clean:
-            canon_label = "thermal contraction"
-        elif "expans" in tokens_set or "expansion" in t_clean:
-            canon_label = "thermal expansion"
-        elif "cycl" in tokens_set or "cycling" in t_clean:
-            canon_label = "thermal cycling"
-        else:
-            canon_label = "thermal stress"
-    elif ("load" in tokens_set or "overload" in t_clean) and ("overload" in tokens_set or "tensil" in tokens_set):
-        canon_label = "tensile overload"
-    elif ("tensil" in tokens_set or "tensile" in t_clean) and ("capac" in tokens_set or "capacity" in t_clean):
-        canon_label = "tensile capacity"
-    elif ("tensil" in tokens_set or "tensile" in t_clean) and ("stress" in tokens_set or "stresses" in t_clean):
-        canon_label = "tensile stress"
-    elif ("subgrad" in tokens_set or "subgrade" in t_clean) or ("settlement" in t_clean and ("soil" in t_clean or "foundat" in tokens_set)):
-        canon_label = "subgrade settlement"
-    elif "alkali" in t_clean or "silica" in t_clean:
-        canon_label = "alkali-silica reaction"
-    elif ("chemic" in tokens_set or "chemical" in t_clean) and ("attack" in tokens_set or "attack" in t_clean):
-        canon_label = "chemical attack"
-    elif "corrosion" in t_clean or "rust" in t_clean:
-        canon_label = "rebar corrosion"
-    elif "shrink" in tokens_set or "shrinkage" in t_clean:
-        canon_label = "shrinkage"
+    # 2. Causal syntactic structure extraction (if causal entity type)
+    is_causal = entity_type in {
+        "mechanism", "cause", "reason", "factor", "driver", "origin", "failure mode", "failure mechanism"
+    }
 
-    if not canon_label:
-        prefix_m = re.match(r"^([a-zA-Z\s\-]{3,30})\s*:\s*", t_clean)
-        if prefix_m:
-            cand_p = prefix_m.group(1).strip().lower()
-            if not any(sw in cand_p for sw in ("note", "overview", "causes", "what", "summary", "chapter", "table")):
-                canon_label = cand_p
+    # 2a. Strictly after connectors (Y results from X, Y is due to X)
+    if not best_candidate_words and is_causal:
+        for pat in _CAUSE_STRICTLY_AFTER_CONNECTORS:
+            m = re.search(pat, t_clean)
+            if m:
+                after_span = t_clean[m.end():]
+                after_chunk = re.split(
+                    r"[\.\;\-\–\—\:]|\b(?:during|exceed|exceeds|exceeded|whether|where|which|that)\b",
+                    after_span,
+                )[0]
+                after_words = [
+                    w for w in re.findall(r"\b[a-zA-Z]{3,}\b", after_chunk)
+                    if w not in ignore and _stem(w) not in ignore
+                ]
+                if after_words:
+                    best_candidate_words = after_words[:3]
+                    break
 
-    if not canon_label:
-        non_stop_words = [w for w in words if _stem(w) not in ignore and w not in ignore and len(w) >= 3]
-        if len(non_stop_words) >= 2:
-            canon_label = f"{non_stop_words[0]} {non_stop_words[1]}"
-        elif non_stop_words:
-            canon_label = non_stop_words[0]
-        else:
-            canon_label = "unknown"
+    # 2b. Condition after connectors (Y occurs when X, Y develops when X)
+    if not best_candidate_words and is_causal:
+        for pat in _CONDITION_AFTER_CONNECTORS:
+            m = re.search(pat, t_clean)
+            if m:
+                before_span = t_clean[:m.start()]
+                after_span = t_clean[m.end():]
 
+                subject_chunk = re.split(r"[\.\;\-\–\—]", before_span)[-1]
+                subj_words = [
+                    w for w in re.findall(r"\b[a-zA-Z]{3,}\b", subject_chunk)
+                    if w not in ignore and _stem(w) not in ignore and w not in _GENERIC_MANIFESTATION_WORDS
+                ]
+
+                # Specific named mechanism before connector (e.g. "Plastic shrinkage cracking occurs when...")
+                if len(subj_words) >= 2:
+                    best_candidate_words = subj_words[:3]
+                    break
+                else:
+                    after_chunk = re.split(
+                        r"[\.\;\-\–\—\:]|\b(?:exceed|exceeds|exceeded|whether|where|which|that|during)\b",
+                        after_span,
+                    )[0]
+                    after_words = [
+                        w for w in re.findall(r"\b[a-zA-Z]{3,}\b", after_chunk)
+                        if w not in ignore and _stem(w) not in ignore
+                    ]
+                    if after_words:
+                        best_candidate_words = after_words[:3]
+                        break
+
+    # 2c. Cause before connectors (X causes Y, X produces Y, X leads to Y)
+    if not best_candidate_words and is_causal:
+        for pat in _CAUSE_BEFORE_CONNECTORS:
+            matches = list(re.finditer(pat, t_clean))
+            if matches:
+                for m in reversed(matches):
+                    before_span = t_clean[:m.start()]
+                    clause_chunk = re.split(r"[\.\;\-\–\—\:]|\b(?:because|when|while|if|as)\b", before_span)[-1]
+                    cause_words = [
+                        w for w in re.findall(r"\b[a-zA-Z]{3,}\b", clause_chunk)
+                        if w not in ignore and _stem(w) not in ignore
+                    ]
+                    if cause_words:
+                        best_candidate_words = cause_words[:3]
+                        break
+                if best_candidate_words:
+                    break
+
+    # 3. Fallback: extract substantive non-stopword tokens
+    if not best_candidate_words:
+        words = re.findall(r"\b[a-zA-Z]{3,}\b", t_clean)
+        substantive = [
+            w for w in words
+            if w not in ignore and _stem(w) not in ignore and w not in _GENERIC_MANIFESTATION_WORDS
+        ]
+        if len(substantive) >= 2:
+            best_candidate_words = substantive[:2]
+        elif substantive:
+            best_candidate_words = substantive[:1]
+
+    if not best_candidate_words:
+        return set(), "unknown"
+
+    # Invariant: Every lexical word in family label MUST originate from exact claim vocabulary
+    verified_words = [w for w in best_candidate_words if w in claim_words_set]
+    if not verified_words:
+        return set(), "unknown"
+
+    canon_label = " ".join(verified_words[:3])
+    tokens_set = {_stem(w) for w in verified_words}
     return tokens_set, canon_label
 
 
@@ -424,6 +506,9 @@ def extract_distinct_entities(
         if not c_tokens and c_label == "unknown":
             continue
 
+        all_words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
+        all_stems = {_stem(w) for w in all_words if _stem(w) not in topic_tokens and len(w) >= 3}
+
         matched_cluster = None
         for cl in clusters:
             if cl["name"] == c_label:
@@ -434,16 +519,22 @@ def extract_distinct_entities(
                 matched_cluster = cl
                 break
             union = cl["tokens"].union(c_tokens)
-            if union and (len(overlap) / len(union)) >= 0.4:
+            if union and (len(overlap) / len(union)) >= 0.5:
+                matched_cluster = cl
+                break
+            cl_name_tokens = {_stem(w) for w in cl["name"].split()}
+            if len(cl_name_tokens) >= 2 and cl_name_tokens.issubset(all_stems):
                 matched_cluster = cl
                 break
 
         if matched_cluster:
             matched_cluster["tokens"].update(c_tokens)
+            matched_cluster["all_stems"].update(all_stems)
         else:
             clusters.append({
                 "name": c_label,
                 "tokens": set(c_tokens),
+                "all_stems": set(all_stems),
             })
 
     return [cl["name"] for cl in clusters]

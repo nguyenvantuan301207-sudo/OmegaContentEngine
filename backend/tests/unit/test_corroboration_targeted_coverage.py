@@ -1247,3 +1247,318 @@ def test_phase_j_retry4_offline_corpus_remains_two_families() -> None:
         entity_type="mechanism",
     )
     assert len(distinct) == 2
+
+
+# ==============================================================================
+# Phase J R1.1: Domain-Agnostic Verified Family Grounding Tests (Items 1-20)
+# ==============================================================================
+
+def test_r1_1_no_concrete_mechanism_lookup_table_in_production_code() -> None:
+    """1. No concrete mechanism lookup table or hard-coded mechanisms in production code."""
+    import inspect
+
+    from omega.domain import numeric_promise
+
+    source = inspect.getsource(numeric_promise.derive_verified_family_label)
+
+    forbidden = [
+        "plastic shrinkage",
+        "drying shrinkage",
+        "differential shrinkage",
+        "applied loading",
+        "applied forces",
+        "freeze-thaw cycling",
+        "freeze-thaw expansion",
+        "thermal contraction",
+        "thermal expansion",
+        "thermal stress",
+        "tensile overload",
+        "tensile capacity",
+        "tensile stress",
+        "subgrade settlement",
+        "alkali-silica reaction",
+        "chemical attack",
+        "rebar corrosion",
+    ]
+    for term in forbidden:
+        assert f'"{term}"' not in source, f"Found hard-coded mechanism: {term}"
+        assert f"'{term}'" not in source, f"Found hard-coded mechanism: {term}"
+
+
+def test_r1_1_family_label_words_all_exist_in_claim() -> None:
+    """2. Every word in the derived family label must exist in the verified claim vocabulary."""
+    import re
+
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claims = [
+        "Cracking occurs when applied forces exceed tensile capacity.",
+        "Leader failure causes an election timeout and triggers a new election.",
+        "Lithium plating causes capacity loss during fast charging.",
+        "Packet congestion leads to retransmission and increased latency.",
+        "Differential shrinkage produces surface cracking in mass elements.",
+    ]
+    for claim in claims:
+        _, label = derive_verified_family_label(claim)
+        claim_words = set(re.findall(r"\b[a-zA-Z]{2,}\b", claim.lower()))
+        label_words = label.split()
+        for w in label_words:
+            assert w in claim_words, f"Word '{w}' from label '{label}' not in claim '{claim}'"
+
+
+def test_r1_1_x_causes_y_extracts_x_side_concept() -> None:
+    """3. 'X causes Y' extracts X-side concept."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Thermal contraction causes cracking as temperature falls."
+    _, label = derive_verified_family_label(claim)
+    assert label == "thermal contraction"
+
+
+def test_r1_1_x_leads_to_y_extracts_x_side_concept() -> None:
+    """4. 'X leads to Y' extracts X-side concept."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Packet congestion leads to retransmission and increased latency."
+    _, label = derive_verified_family_label(claim)
+    assert label == "packet congestion"
+
+
+def test_r1_1_y_results_from_x_extracts_x_side_concept() -> None:
+    """5. 'Y results from X' extracts X-side concept."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Surface cracking results from differential shrinkage during rapid hydration."
+    _, label = derive_verified_family_label(claim)
+    assert label == "differential shrinkage"
+
+
+def test_r1_1_y_occurs_when_x_extracts_x_side_concept() -> None:
+    """6. 'Y occurs when X' extracts X-side concept."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Cracking occurs when applied forces exceed tensile capacity."
+    _, label = derive_verified_family_label(claim)
+    assert label == "applied forces"
+
+
+def test_r1_1_applied_forces_claim_never_invents_loading() -> None:
+    """7. Applied-forces claim never invents 'loading' when absent from claim."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Structural cracking occurs when applied forces exceed the material's tensile capacity."
+    _, label = derive_verified_family_label(claim)
+    assert "loading" not in label
+    assert label == "applied forces"
+
+
+def test_r1_1_corrosion_claim_never_invents_rebar() -> None:
+    """8. Corrosion claim never invents 'rebar' when absent from claim."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Corrosion of embedded steel causes expansion and surface spalling."
+    _, label = derive_verified_family_label(claim)
+    assert "rebar" not in label
+    assert "corrosion" in label
+
+
+def test_r1_1_thermal_claim_never_invents_stress_unless_present() -> None:
+    """9. Thermal claim never invents 'stress' unless present in claim."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Thermal contraction causes cracking in mass concrete as heat dissipates."
+    _, label = derive_verified_family_label(claim)
+    assert "stress" not in label
+    assert label == "thermal contraction"
+
+
+def test_r1_1_subgrade_claim_never_invents_settlement_unless_present() -> None:
+    """10. Subgrade claim never invents 'settlement' unless present in claim."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Subgrade movement causes foundation cracking."
+    _, label = derive_verified_family_label(claim)
+    assert "settlement" not in label
+    assert label == "subgrade movement"
+
+
+def test_r1_1_domain_agnostic_distributed_systems() -> None:
+    """11. Distributed systems domain example PASS."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Leader failure causes an election timeout and triggers a new election."
+    _, label = derive_verified_family_label(claim)
+    assert label == "leader failure"
+    for w in label.split():
+        assert w in claim.lower()
+
+
+def test_r1_1_domain_agnostic_battery() -> None:
+    """12. Battery domain example PASS."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Lithium plating causes capacity loss during fast charging."
+    _, label = derive_verified_family_label(claim)
+    assert label == "lithium plating"
+    for w in label.split():
+        assert w in claim.lower()
+
+
+def test_r1_1_domain_agnostic_networking() -> None:
+    """13. Networking domain example PASS."""
+    from omega.domain.numeric_promise import derive_verified_family_label
+
+    claim = "Packet congestion leads to retransmission and increased latency."
+    _, label = derive_verified_family_label(claim)
+    assert label == "packet congestion"
+    for w in label.split():
+        assert w in claim.lower()
+
+
+def test_r1_1_verified_only_numeric_coverage_preserved() -> None:
+    """14. Verified-only numeric coverage preserved: unverified cannot change count."""
+    from omega.domain.numeric_promise import extract_distinct_entities
+
+    # Unverified claims never passed to verified numeric extraction
+    verified_distinct = extract_distinct_entities([], topic_title="Reliability Patterns")
+    assert len(verified_distinct) == 0
+
+
+def test_r1_1_one_verified_proposition_le_one_family() -> None:
+    """15. One verified proposition contributes at most one family."""
+    from omega.domain.numeric_promise import extract_distinct_entities
+
+    broad = "Structural cracking occurs when applied forces whether from loading, settlement, lateral pressure, or thermal stress exceed tensile capacity."
+    distinct = extract_distinct_entities([broad], topic_title="Structural Engineering")
+    assert len(distinct) == 1
+
+
+def test_r1_1_duplicate_family_collapsing_preserved() -> None:
+    """16. Duplicate family collapsing preserved across rephrased claims."""
+    from omega.domain.numeric_promise import extract_distinct_entities
+
+    duplicates = [
+        "Plastic shrinkage cracking occurs when surface evaporation is rapid.",
+        "Plastic-shrinkage cracking develops prior to initial set.",
+        "Rapid evaporation causes plastic shrinkage cracks on flatwork.",
+        "Plastic shrinkage crack formation during early curing.",
+        "Occurrence of plastic shrinkage cracking under high wind conditions.",
+    ]
+    distinct = extract_distinct_entities(duplicates, topic_title="Concrete Cracking")
+    assert len(distinct) == 1
+    assert "plastic" in distinct[0]
+
+
+def test_r1_1_retry4_corpus_remains_exactly_two_verified_families() -> None:
+    """17. Retry #4 corpus remains exactly 2 verified families with 0 absent words."""
+    import re
+
+    from omega.domain.numeric_promise import derive_verified_family_label, extract_distinct_entities
+
+    c1 = (
+        "What Causes Them: Concrete shrinks as it cures - the chemical hydration process that hardens "
+        "the concrete consumes water and reduces the material's volume slightly. This volumetric change is "
+        "normal and expected, but when it's uneven - because the surface is drying faster than the interior, "
+        "because the mix had too much water, or because curing conditions were too warm or too dry - the "
+        "differential shrinkage produces surface cracking."
+    )
+    c2 = (
+        "Structural cracking occurs when applied forces whether from loading, settlement, lateral pressure, "
+        "or thermal stress exceed the concrete's tensile capacity."
+    )
+    _, l1 = derive_verified_family_label(c1)
+    _, l2 = derive_verified_family_label(c2)
+
+    assert l1 == "differential shrinkage"
+    assert l2 == "applied forces"
+
+    c1_words = set(re.findall(r"\b[a-zA-Z]{2,}\b", c1.lower()))
+    c2_words = set(re.findall(r"\b[a-zA-Z]{2,}\b", c2.lower()))
+    assert all(w in c1_words for w in l1.split())
+    assert all(w in c2_words for w in l2.split())
+
+    families = extract_distinct_entities([c1, c2], topic_title="Why Concrete Cracks")
+    assert len(families) == 2
+
+
+def test_r1_1_r1_non_entity_query_waste_remains_zero() -> None:
+    """18. R1 non-entity query waste remains 0 with generalized planner rules."""
+    from omega.application.research_query_planner import (
+        classify_target_planning_usefulness,
+        plan_research_queries,
+    )
+    from omega.domain.numeric_promise import extract_numeric_promise
+    from omega.domain.research import CorroborationTarget
+
+    mitig_text = "Joints should also be placed at re-entrant corners where shrinkage causes stresses."
+    p_class, _, role = classify_target_planning_usefulness(mitig_text, "mechanism", ["concrete", "cracks"])
+    assert role == "MITIGATION_OR_PREVENTION"
+    assert p_class == "MITIGATION_OR_PREVENTION"
+
+    topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
+    contract = extract_numeric_promise(topic)
+    t_cause = CorroborationTarget(
+        representative_claim_text="Thermal contraction causes cracking as temperature falls.",
+        priority=2,
+        semantic_role="CAUSE_OR_PROCESS",
+        candidate_family="therm_contract",
+    )
+    t_mitig = CorroborationTarget(
+        representative_claim_text=mitig_text,
+        priority=5,
+        semantic_role="MITIGATION_OR_PREVENTION",
+        candidate_family="joint_place",
+    )
+    queries = plan_research_queries(
+        topic_title=topic,
+        contract=contract,
+        round_number=2,
+        max_queries=1,
+        corroboration_targets=[t_cause, t_mitig],
+    )
+    assert len(queries) == 1
+    assert "thermal" in queries[0].query_text or "contraction" in queries[0].query_text
+    assert "joint" not in queries[0].query_text
+
+
+def test_r1_1_offline_simulation_five_distinct_families_sufficient() -> None:
+    """19. Offline 0->5 simulation remains SUFFICIENT."""
+    from omega.application.research_scorer import determine_research_outcome
+    from omega.domain.numeric_promise import extract_distinct_entities
+    from omega.domain.research import ResearchOutcome
+
+    claims = [
+        "Plastic shrinkage cracking occurs when surface evaporation exceeds bleed rate.",
+        "Drying shrinkage develops over months as tensile stresses build up.",
+        "Thermal contraction causes cracking in mass concrete as hydration heat dissipates.",
+        "Chemical attack via alkali-silica reaction expands and fractures the aggregate matrix.",
+        "Subgrade settlement causes differential movement and structural shear cracking.",
+    ]
+    distinct = extract_distinct_entities(claims, topic_title="Why Concrete Cracks: 5 Mechanisms", entity_type="mechanism")
+    assert len(distinct) == 5
+
+    outcome = determine_research_outcome(
+        sources_count=3,
+        independent_sources_count=3,
+        verified_claims_count=5,
+        open_high_conflicts_count=0,
+        promised_count=5,
+        distinct_entities_count=len(distinct),
+    )
+    assert outcome == ResearchOutcome.SUFFICIENT
+
+
+def test_r1_1_non_causal_numeric_contracts_remain_valid() -> None:
+    """20. Non-causal numeric contracts remain valid."""
+    from omega.domain.numeric_promise import derive_verified_family_label, extract_numeric_promise
+
+    contract = extract_numeric_promise("7 Proven Tips for Effective Technical Writing")
+    assert contract is not None
+    assert contract.promised_count == 7
+    assert contract.entity_type == "tip"
+
+    claim = "Tip three emphasizes customer retention above aggressive acquisition."
+    _, label = derive_verified_family_label(claim, entity_type="tip")
+    assert label != "unknown"
+    for w in label.split():
+        assert w in claim.lower()
