@@ -87,3 +87,217 @@ def test_null_authority_provider_default() -> None:
     provider = NullAuthorityProvider()
     score = provider.get_authority_score("Random Tech Blog", "https://randomblog.com/post")
     assert score == 50.0
+
+
+# ── Phase L Calibrated Source Quality Test Matrix ──
+
+
+def test_irrelevant_web_source_rejected() -> None:
+    """1. Irrelevant web source (0 keywords) must remain strictly below threshold (< 50.0)."""
+    kws = ["concrete cracking", "shrinkage", "thermal cracking", "structural engineering", "construction materials"]
+    q, rel, _, _ = calculate_source_quality(
+        publisher="Generic Blog",
+        url="https://genericblog.com/chocolate-cake",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt="A completely unrelated recipe for chocolate cake with sugar, flour and baking soda.",
+    )
+    assert rel == 0.0
+    assert q < 50.0
+    assert q == 34.5
+
+
+def test_relevant_low_traceability_source_rejected() -> None:
+    """2. Relevant but low-traceability source (no URL, short snippet) must remain below threshold."""
+    kws = ["concrete cracking", "shrinkage", "thermal cracking", "structural engineering", "construction materials"]
+    q, _, _, _ = calculate_source_quality(
+        publisher="Offline Snippet",
+        url=None,
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt="Concrete cracking and shrinkage overview.",  # < 50 chars
+    )
+    assert q < 50.0  # 42.5 (rel=70, trace=40)
+
+
+def test_relevant_traceable_unknown_primary_web_source_qualifies() -> None:
+    """3. Relevant traceable UNKNOWN-primary web source must have a plausible path to >= 50.0."""
+    kws = ["concrete cracking", "shrinkage", "thermal cracking", "structural engineering", "construction materials"]
+    # Matches 3 of 5 keywords conceptually: 'concrete cracking', 'shrinkage', 'structural engineering'
+    text = "This paper examines concrete cracking mechanisms under structural engineering constraints in civil projects, focusing on plastic shrinkage."
+    q, rel, _, _ = calculate_source_quality(
+        publisher="Civil Engineering Digest",
+        url="https://cedigest.org/articles/crack-mechanisms",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt=text,
+    )
+    assert rel == 90.0
+    assert q >= 50.0
+    assert q == 52.5
+
+
+def test_confirmed_primary_outranks_unknown() -> None:
+    """4. CONFIRMED primary source must strictly outperform UNKNOWN."""
+    kws = ["concrete cracking", "shrinkage", "thermal cracking", "structural engineering", "construction materials"]
+    text = "This paper examines concrete cracking mechanisms under structural engineering constraints in civil projects, focusing on plastic shrinkage."
+    q_unk, _, _, _ = calculate_source_quality(
+        publisher="FHWA",
+        url="https://fhwa.dot.gov/pavements/pccp",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt=text,
+    )
+    q_conf, _, _, reasons = calculate_source_quality(
+        publisher="FHWA",
+        url="https://fhwa.dot.gov/pavements/pccp",
+        primary_source_status=PrimarySourceStatus.CONFIRMED,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt=text,
+    )
+    assert q_conf > q_unk
+    assert q_conf - q_unk == 25.0  # 0.25 * 100.0
+    assert "CONFIRMED_PRIMARY_SOURCE" in reasons
+
+
+def test_missing_published_at_safe() -> None:
+    """5. Missing published_at is mildly conservative but safe (does not kill a relevant source)."""
+    kws = ["concrete cracking", "shrinkage", "thermal cracking", "structural engineering", "construction materials"]
+    text = "This paper examines concrete cracking mechanisms under structural engineering constraints in civil projects, focusing on plastic shrinkage."
+    q_none, _, fresh_none, _ = calculate_source_quality(
+        publisher="Engineering Portal",
+        url="https://engportal.org/article",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt=text,
+    )
+    q_now, _, fresh_now, _ = calculate_source_quality(
+        publisher="Engineering Portal",
+        url="https://engportal.org/article",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=datetime.now(UTC),
+        topic_keywords=kws,
+        content_excerpt=text,
+    )
+    assert fresh_none == 70.0
+    assert fresh_now == 100.0
+    assert q_none >= 50.0  # 52.5
+    assert q_now == 55.5  # +3.0 freshness bonus
+
+
+def test_full_keyword_match_scaling() -> None:
+    """6. Full keyword match (5/5) scales cleanly to high score."""
+    kws = ["concrete cracking", "shrinkage", "thermal cracking", "structural engineering", "construction materials"]
+    text = "Concrete cracking caused by shrinkage and thermal cracking requires rigorous structural engineering and quality construction materials."
+    q, rel, _, _ = calculate_source_quality(
+        publisher="Materials Journal",
+        url="https://matjournal.com/pavements",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt=text,
+    )
+    assert rel == 100.0
+    assert q == 54.5
+
+
+def test_partial_keyword_match_scaling() -> None:
+    """7. Partial keyword match (3/5) scores between partial and full."""
+    kws = ["concrete cracking", "shrinkage", "thermal cracking", "structural engineering", "construction materials"]
+    text_3 = "Concrete cracking caused by shrinkage requires rigorous structural engineering evaluation."
+    text_5 = "Concrete cracking caused by shrinkage and thermal cracking requires rigorous structural engineering and quality construction materials."
+    q_3, rel_3, _, _ = calculate_source_quality(
+        publisher="Materials Journal",
+        url="https://matjournal.com/pavements",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt=text_3,
+    )
+    q_5, rel_5, _, _ = calculate_source_quality(
+        publisher="Materials Journal",
+        url="https://matjournal.com/pavements",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt=text_5,
+    )
+    assert rel_3 == 90.0
+    assert rel_5 == 100.0
+    assert 50.0 <= q_3 < q_5
+
+
+def test_zero_keyword_match_zero_relevance() -> None:
+    """8. Zero keyword match receives zero relevance score."""
+    kws = ["concrete cracking", "shrinkage", "thermal cracking", "structural engineering", "construction materials"]
+    q, rel, _, _ = calculate_source_quality(
+        publisher="Farming Weekly",
+        url="https://farmingweekly.com/soil",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt="Discussion of organic farming methods and sustainable agriculture practices in soil management.",
+    )
+    assert rel == 0.0
+    assert q < 50.0
+    assert q == 34.5
+
+
+def test_manual_source_path_preserved() -> None:
+    """9. Manual authority provider and CLAIMED status are preserved and score highly."""
+    prov = ManualAuthorityProvider({"ACI Standards": 90.0})
+    kws = ["concrete cracking", "shrinkage", "thermal cracking", "structural engineering", "construction materials"]
+    text = "Concrete cracking caused by shrinkage and thermal cracking requires rigorous structural engineering and quality construction materials."
+    q, _, _, reasons = calculate_source_quality(
+        publisher="ACI Standards",
+        url="https://concrete.org/standards",
+        primary_source_status=PrimarySourceStatus.CLAIMED,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt=text,
+        authority_provider=prov,
+    )
+    assert q > 70.0  # 73.5
+    assert "HIGH_AUTHORITY_PUBLISHER" in reasons
+    assert "CLAIMED_PRIMARY_SOURCE" in reasons
+
+
+def test_unrelated_topic_domain_rejected() -> None:
+    """10. Unrelated topic/domain yields zero relevance and rejects."""
+    quantum_kws = ["quantum entanglement", "superposition", "qubit", "wavefunction collapse", "schrodinger"]
+    concrete_text = "Concrete cracking caused by shrinkage and thermal cracking requires structural engineering and construction materials."
+    q, rel, _, _ = calculate_source_quality(
+        publisher="Concrete Journal",
+        url="https://concretejournal.org/paper",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=quantum_kws,
+        content_excerpt=concrete_text,
+    )
+    assert rel == 0.0
+    assert q < 50.0
+    assert q == 34.5
+
+
+def test_conceptual_multi_word_keyword_matching() -> None:
+    """11. Multi-word topic keywords match conceptually when constituents appear across technical phrasing."""
+    kws = ["concrete cracking", "thermal cracking"]
+    # Does not have exact adjacent "concrete cracking" or "thermal cracking", but has all constituent terms
+    text = "Investigation into premature cracking in mass concrete pavements subject to severe thermal stresses during hydration."
+    q, rel, _, _ = calculate_source_quality(
+        publisher="Pavement Tech",
+        url="https://pavementtech.org/report",
+        primary_source_status=PrimarySourceStatus.UNKNOWN,
+        published_at=None,
+        topic_keywords=kws,
+        content_excerpt=text,
+    )
+    assert rel == 100.0  # 2 of 2 matched conceptually
+    assert q >= 50.0
+    assert q == 54.5

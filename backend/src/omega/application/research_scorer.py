@@ -66,10 +66,25 @@ def calculate_source_quality(
 
     # 2. Relevance Score
     excerpt_lower = content_excerpt.lower()
-    matched_kws = sum(1 for kw in topic_keywords if kw.lower() in excerpt_lower)
+    matched_kws = 0
+    for kw in topic_keywords:
+        kw_lower = kw.strip().lower()
+        if not kw_lower:
+            continue
+        if kw_lower in excerpt_lower:
+            matched_kws += 1
+            continue
+        # Conceptual multi-word match: require all meaningful constituent terms
+        terms = [t for t in re.findall(r"\w+", kw_lower) if len(t) >= 3]
+        if len(terms) > 1 and all(t in excerpt_lower for t in terms):
+            matched_kws += 1
+
     relevance_score = 50.0
     if topic_keywords:
-        relevance_score = min(100.0, (matched_kws / len(topic_keywords)) * 100.0 + 30.0)
+        if matched_kws == 0:
+            relevance_score = 0.0
+        else:
+            relevance_score = min(100.0, (matched_kws / len(topic_keywords)) * 100.0 + 30.0)
 
     # 3. Freshness Score
     freshness_score = 70.0
@@ -305,8 +320,9 @@ def determine_research_outcome(
     )
 
     if normal_sufficient:
-        if promised_count is not None and promised_count > 0:
-            if distinct_entities_count is None or distinct_entities_count < promised_count:
+        if (promised_count is not None and promised_count > 0) and (
+            distinct_entities_count is None or distinct_entities_count < promised_count
+        ):
                 # Fails numeric promise coverage requirement
                 if (
                     sources_count >= profile.min_sources_partial
