@@ -104,6 +104,10 @@ STOPWORDS: set[str] = {
     "often", "typically", "usually", "general", "generally", "depending",
     "depends", "result", "results", "resulting", "lead", "leads", "leading",
     "produces", "produce", "produced", "producing", "induces", "induce", "induced",
+    "creates", "create", "created", "creating", "triggers", "trigger", "triggered", "triggering",
+    "generates", "generate", "generated", "generating",
+    "several", "reasons", "reason", "factors", "like", "various", "many", "types", "different",
+    "excessive", "severe", "moderate", "slight", "high", "low", "rapid", "slow", "uneven", "differential", "massive", "minor", "major", "early", "late",
 }
 
 GENERIC_PACKAGING: set[str] = {
@@ -113,26 +117,52 @@ GENERIC_PACKAGING: set[str] = {
     "introduction", "keywords", "keyword", "reference", "references", "proceedings",
     "principle", "principles", "factor", "factors", "method", "methods", "approach",
     "aspect", "aspects", "important", "effective", "common", "primary", "various",
+    "according", "considering", "finally", "selects", "leave", "gaps", "theories",
+}
+
+_CAUSAL_ENTITY_NOUNS: set[str] = {
+    "mechanism", "cause", "reason", "factor", "driver", "origin", "failure mode", "failure mechanism"
 }
 
 
-def extract_query_anchors(claim_text: str, subject: str = "") -> list[str]:
+def is_causal_entity_type(entity_type: str | None) -> bool:
+    """Deterministically check whether an entity type represents causal/process mechanisms."""
+    if not entity_type:
+        return True
+    ent = entity_type.strip().lower()
+    if ent.endswith("s") and len(ent) > 3:
+        ent = ent[:-1]
+    return ent in _CAUSAL_ENTITY_NOUNS
+
+
+def extract_query_anchors(
+    claim_text: str,
+    subject: str = "",
+    topic_keywords: list[str] | None = None,
+) -> list[str]:
     """Extract 3-6 distinctive, meaningful original words from a proposition for search planning.
 
     Invariants:
     - Retains original words (not stems like 'shrinkag').
     - Excludes URLs, stopwords, packaging clutter, and subject words.
+    - Strips leading question framing and boilerplate headers.
+    - Strips leading manifestation framing (e.g. 'Concrete cracking occurs when').
     - Deterministic order of appearance.
     - Zero invented terminology.
     """
-    subj_words = set(re.findall(r"\b[a-zA-Z]{3,}\b", subject.lower()))
+    from omega.domain.numeric_promise import _stem
+    combined_subj = f"{subject} {' '.join(topic_keywords or [])}".strip()
+    subj_stems = {_stem(w) for w in re.findall(r"\b[a-zA-Z]{3,}\b", combined_subj.lower())}
     cleaned = re.sub(r"https?://\S+", "", claim_text)
+    # Strip leading questions and boilerplate headers
+    cleaned = re.sub(r"^.*?\?\*?\*?\s*", "", cleaned)
+    cleaned = re.sub(r"^(?:what causes them|causes|mechanism|primary causes?)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"[\*\#\_\`\:\-\–\—\(\)\[\]]", " ", cleaned)
     tokens = re.findall(r"\b[a-zA-Z]{3,}\b", cleaned.lower())
     anchors: list[str] = []
     seen: set[str] = set()
     for t in tokens:
-        if t in STOPWORDS or t in GENERIC_PACKAGING or t in subj_words:
+        if t in STOPWORDS or t in GENERIC_PACKAGING or _stem(t) in subj_stems:
             continue
         if t not in seen:
             seen.add(t)
@@ -142,37 +172,30 @@ def extract_query_anchors(claim_text: str, subject: str = "") -> list[str]:
     return anchors
 
 
-_CAUSAL_CONNECTORS: set[str] = {
-    "causes",
-    "caused",
-    "causing",
-    "operates",
-    "operates on",
-    "resulting in",
-    "results from",
-    "produces",
-    "producing",
-    "induces",
-    "inducing",
-    "due to",
-    "leads to",
-    "leading to",
-    "initiates",
-    "initiating",
-    "triggers",
-    "triggering",
-    "mechanism",
-    "mechanisms",
-    "consumes",
-    "reduces",
-    "expands",
-    "contracts",
-    "fractures",
-    "fracturing",
-    "degradation",
-    "failure mode",
-    "failure mechanism",
-}
+def derive_candidate_family_signature(anchors: list[str]) -> str:
+    """Derive deterministic planning-only family signature from cause anchors for query diversification."""
+    from omega.domain.numeric_promise import _stem
+    if not anchors:
+        return "unknown"
+    stems = [_stem(a) for a in anchors[:2]]
+    return "_".join(stems)
+
+
+_CAUSAL_CONNECTORS_REGEX: list[str] = [
+    r"\b(?:causes?|causing)\b",
+    r"\b(?:leads?\s+to|leading\s+to)\b",
+    r"\b(?:results?\s+in|resulting\s+in)\b",
+    r"\b(?:results?\s+from|resulting\s+from)\b",
+    r"\b(?:(?:is|are)?\s*due\s+to)\b",
+    r"\b(?:produces?|producing)\b",
+    r"\b(?:induces?|inducing)\b",
+    r"\b(?:triggers?|triggering)\b",
+    r"\b(?:initiates?|initiating)\b",
+    r"\b(?:creates?|creating)\b",
+    r"\b(?:generates?|generating)\b",
+    r"\b(?:drives?|driving)\b",
+    r"\b(?:operates?\s+(?:on|by|through|where))\b",
+]
 
 _DIAGNOSTIC_OR_INSPECTION_PATTERNS: list[str] = [
     r"\binspection\b",
@@ -182,6 +205,7 @@ _DIAGNOSTIC_OR_INSPECTION_PATTERNS: list[str] = [
     r"\bhairline width\b",
     r"\bmeasurement\b",
     r"\bdisplacement\b",
+    r"\bcracks?\s+require\s+inspection\b",
 ]
 
 _MITIGATION_OR_PREVENTION_PATTERNS: list[str] = [
@@ -192,16 +216,37 @@ _MITIGATION_OR_PREVENTION_PATTERNS: list[str] = [
     r"\bmaintenance\b",
     r"\bmitigation\b",
     r"\bproper curing\b",
-    r"\bsolutions to\b",
+    r"\bsolutions to\s+(?:prevent|repair)\b",
+    r"\bexpansion\s+joints?\s+require\s+maintenance\b",
+    r"\bcuring\s+methods\b",
+]
+
+_OUTCOME_OR_CONSEQUENCE_PATTERNS: list[str] = [
+    r"\bpose[s]?\s+.*?\b(?:safety|risk|hazard|danger)\b",
+    r"\bstructural\s+fractures\s+pose\b",
+    r"\bseverity\s+depends\b",
+    r"\bfailure\s+severity\b",
+    r"\bvisible\s+at\s+the\s+surface\b",
+    r"\bmanifested\s+at\s+the\s+surface\b",
+    r"\baesthetic\s+(?:issue|concern|problem|defect)\b",
+    r"\bcompromise[s]?\s+(?:durability|structural\s+integrity|safety)\b",
+    r"\b(?:may\s+indicate|indicates?)\s+an\s+underlying\s+condition\b",
+    r"\bnon-structural\s+cracks\b",
+    r"\bcracking\s+is\s+an\s+unavoidable\s+response\b",
+    r"\bmost\s+widely\s+used\s+construction\s+material\b",
+    r"\bdepletion\s+of\s+land\s+resources\b",
+    r"\bconstruction\s+waste\b",
 ]
 
 _METADATA_OR_TOC_PATTERNS: list[str] = [
     r"\bkeywords\s*:",
     r"\bchapter\s+\d+",
     r"\btable\s+of\s+contents\b",
+    r"\b224r-\d+",
     r"\b\d+\.\d+\s+[a-z]",
     r"\bproce-dures\s+are\s+presented\b",
     r"\bsection\s+\d+",
+    r"\b(?:this\s+paper|this\s+study|in\s+this\s+study|in\s+the\s+present\s+study|existing\s+theories|previous\s+studies)\b",
 ]
 
 
@@ -209,7 +254,7 @@ def classify_target_planning_usefulness(
     text: str,
     entity_type: str | None = None,
     topic_keywords: list[str] | None = None,
-) -> tuple[str, float]:
+) -> tuple[str, float, str]:
     """Deterministically classify planning usefulness and compute topic relevance.
 
     Classes:
@@ -219,45 +264,62 @@ def classify_target_planning_usefulness(
     - MITIGATION_OR_PREVENTION: Mitigation, remediation, preventive advice.
     - METADATA_OR_GENERIC: TOC headings, citation fragments, bibliographic clutter.
     - OTHER: General unclassified statements.
+
+    Semantic Roles:
+    - CAUSE_OR_PROCESS: Concrete physical/chemical process or causal pathway.
+    - OUTCOME_OR_CONSEQUENCE: Damage severity, safety impact, manifestation.
+    - DIAGNOSTIC_OR_INSPECTION: Crack inspection, measurement, monitoring.
+    - MITIGATION_OR_PREVENTION: Remediation, curing, preventive maintenance.
+    - METADATA: Bibliographic, TOC, or scholarly literature statements.
+    - GENERIC_CONTEXT: General domain taxonomy and material statements.
     """
     t = text.lower()
 
     # 1. Metadata / TOC clutter check
     for pat in _METADATA_OR_TOC_PATTERNS:
         if re.search(pat, t):
-            return ("METADATA_OR_GENERIC", 10.0)
+            return ("METADATA_OR_GENERIC", 10.0, "METADATA")
 
     # 2. Diagnostic / inspection check
     for pat in _DIAGNOSTIC_OR_INSPECTION_PATTERNS:
         if re.search(pat, t):
-            return ("DIAGNOSTIC_OR_INSPECTION", 20.0)
+            return ("DIAGNOSTIC_OR_INSPECTION", 20.0, "DIAGNOSTIC_OR_INSPECTION")
 
     # 3. Mitigation / prevention check
     for pat in _MITIGATION_OR_PREVENTION_PATTERNS:
         if re.search(pat, t):
-            return ("MITIGATION_OR_PREVENTION", 25.0)
+            return ("MITIGATION_OR_PREVENTION", 25.0, "MITIGATION_OR_PREVENTION")
 
-    # 4. Check for causal / mechanism process language
-    has_causal = any(conn in t for conn in _CAUSAL_CONNECTORS)
-    has_entity_mention = (
-        (entity_type and entity_type.lower() in t)
-        or ("mechanism" in t)
-        or ("cause" in t)
-    )
+    # 4. Outcome / consequence / severity check (prevents false entity candidates)
+    for pat in _OUTCOME_OR_CONSEQUENCE_PATTERNS:
+        if re.search(pat, t):
+            return ("OUTCOME_OR_CONSEQUENCE", 30.0, "OUTCOME_OR_CONSEQUENCE")
 
-    if has_causal or has_entity_mention:
-        relevance = 80.0
-        if has_causal and has_entity_mention:
-            relevance = 95.0
-        if topic_keywords and any(kw.lower() in t for kw in topic_keywords):
-            relevance = min(100.0, relevance + 5.0)
-        return ("PROMISED_ENTITY_CANDIDATE", relevance)
+    # 5. Check for causal / mechanism process language
+    is_causal = is_causal_entity_type(entity_type)
+    if is_causal:
+        has_connector = any(re.search(pat, t) for pat in _CAUSAL_CONNECTORS_REGEX)
+        has_mechanism_noun = ("mechanism" in t) or ("what causes" in t)
 
-    # 5. General topic context
+        # Invariant: Broad tokens like 'fractures' or 'degradation' alone are NOT sufficient
+        if has_connector or has_mechanism_noun:
+            relevance = 85.0
+            if topic_keywords and any(kw.lower() in t for kw in topic_keywords):
+                relevance = min(100.0, relevance + 10.0)
+            return ("PROMISED_ENTITY_CANDIDATE", relevance, "CAUSE_OR_PROCESS")
+    else:
+        # Non-causal enumerable entities (step, method, tip, strategy, etc.)
+        if entity_type and entity_type.lower() in t:
+            relevance = 85.0
+            if topic_keywords and any(kw.lower() in t for kw in topic_keywords):
+                relevance = min(100.0, relevance + 10.0)
+            return ("PROMISED_ENTITY_CANDIDATE", relevance, "CAUSE_OR_PROCESS")
+
+    # 6. General topic context fallback
     relevance = 50.0
     if topic_keywords and any(kw.lower() in t for kw in topic_keywords):
         relevance = 65.0
-    return ("TOPIC_RELEVANT_CONTEXT", relevance)
+    return ("TOPIC_RELEVANT_CONTEXT", relevance, "GENERIC_CONTEXT")
 
 
 def build_corroboration_targets(
@@ -265,6 +327,7 @@ def build_corroboration_targets(
     sources_map: dict[UUID, Any] | None = None,
     contract: NumericPromiseContract | None = None,
     topic_keywords: list[str] | None = None,
+    topic_title: str = "",
 ) -> list[CorroborationTarget]:
     """Derive deterministic in-memory corroboration targets from candidate claims.
 
@@ -354,21 +417,25 @@ def build_corroboration_targets(
                             pass
 
         # 5. Planning Usefulness Classification and Topic Relevance Scoring
-        planning_class, topic_rel = classify_target_planning_usefulness(
+        planning_class, topic_rel, semantic_role = classify_target_planning_usefulness(
             text=claim_text,
             entity_type=contract.entity_type if contract else None,
             topic_keywords=topic_keywords,
         )
+
+        subj = extract_core_subject(topic_title) if topic_title else ""
+        anchors = extract_query_anchors(claim_text, subject=subj, topic_keywords=topic_keywords)
+        fam_sig = derive_candidate_family_signature(anchors)
 
         # Phase G Priority Tiers:
         # Tier 1: Promised-entity candidate with 2 independent supports
         # Tier 2: Promised-entity candidate with 1 independent support
         # Tier 3: Other topic-relevant context with >= 2 independent supports
         # Tier 4: Other topic-relevant context with 1 independent support
-        # Tier 5: Diagnostic, mitigation, prevention, or metadata context
+        # Tier 5: Diagnostic, mitigation, prevention, consequence, or metadata context
         if planning_class == "PROMISED_ENTITY_CANDIDATE":
             priority = 1 if indep_count >= 2 else 2
-        elif planning_class == "TOPIC_RELEVANT_CONTEXT":
+        elif planning_class == "TOPIC_RELEVANT_CONTEXT" and semantic_role == "GENERIC_CONTEXT":
             priority = 3 if indep_count >= 2 else 4
         else:
             priority = 5
@@ -381,6 +448,8 @@ def build_corroboration_targets(
             confidence_score=conf_score,
             topic_relevance=topic_rel,
             priority=priority,
+            semantic_role=semantic_role,
+            candidate_family=fam_sig,
         )
         targets.append(t)
 
@@ -408,6 +477,7 @@ def plan_research_queries(
     5. Execution-local query history deduplication across rounds.
     6. Round 1 remains broad foundational discovery.
     7. Round 2+ prioritizes missing independent corroboration (2-source before 1-source).
+    8. Candidate family diversification across distinct proposition families.
     """
     subject = extract_core_subject(topic_title)
 
@@ -484,10 +554,10 @@ def plan_research_queries(
         else "aspects"
     )
 
-    def _issue_from_target(target: CorroborationTarget) -> None:
+    def _issue_from_target(target: CorroborationTarget) -> bool:
         anchors = extract_query_anchors(target.representative_claim_text, subject)
         if not anchors:
-            return
+            return False
         a_slice = " ".join(anchors[:4])
         dom_info = f"; existing domains: {target.supporting_domains}" if target.supporting_domains else ""
         reason = (
@@ -504,20 +574,36 @@ def plan_research_queries(
             ),
             (f"{subject} {' '.join(anchors[:5])} analysis", ResearchQueryIntent.CORROBORATION),
         ]
-        for q_candidate, q_intent in variants:
-            if add_query(q_candidate, q_intent, reason):
-                break
+        return any(add_query(q_candidate, q_intent, reason) for q_candidate, q_intent in variants)
 
     if corroboration_targets:
-        # Phase G: Tiers 1-3: promised entity candidates and topic-relevant candidates (priority < 5)
+        # Phase G: Tiers 1-4: promised entity candidates and topic-relevant candidates (priority < 5)
         entity_and_topic_targets = [
             t for t in corroboration_targets if t.priority < 5
         ]
-        sorted_high_targets = sorted(entity_and_topic_targets, key=lambda t: (t.priority, -t.confidence_score))
+        sorted_high_targets = sorted(
+            entity_and_topic_targets,
+            key=lambda t: (t.priority, -t.topic_relevance, -t.confidence_score),
+        )
+
+        # Phase G Diversity Pass 1: Select up to max_queries targets from distinct candidate families
+        selected_families: set[str] = set()
         for target in sorted_high_targets:
             if len(queries) >= max_queries:
                 break
-            _issue_from_target(target)
+            if (
+                target.candidate_family
+                and target.candidate_family not in selected_families
+                and _issue_from_target(target)
+            ):
+                selected_families.add(target.candidate_family)
+
+        # Phase G Diversity Pass 2: If query budget remains and fewer distinct families exist, select remaining
+        if len(queries) < max_queries:
+            for target in sorted_high_targets:
+                if len(queries) >= max_queries:
+                    break
+                _issue_from_target(target)
 
     # Phase G Step 4: Generic coverage fallback if query budget remains
     if len(queries) < max_queries:

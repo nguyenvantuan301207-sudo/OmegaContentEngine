@@ -389,22 +389,26 @@ class MockSimulatedContentExtractor(ResearchContentExtractor):
     """Simulated content extractor returning substantive technical prose with keywords."""
 
     P1 = "Concrete cracking occurs when drying shrinkage causes internal tensile stresses in hardened concrete slabs."
+    P1_DUP = "Excessive drying shrinkage leads to slab volume reduction and surface tensile fractures."
     P2 = "Concrete cracking occurs when thermal gradients produce differential cooling and massive foundation fractures."
-    P3 = "Concrete cracking occurs when freeze-thaw cycling operates where absorbed water freezes and expands internally."
+    P3 = "Concrete cracking occurs when freeze-thaw cycling triggers absorbed water expansion that fractures concrete pores."
     P4 = "Concrete cracking occurs when alkali-silica reaction creates expansive chemical gel that disrupts aggregate matrix."
-    P5 = "Concrete cracking occurs when settlement subsidence occurs and fresh concrete bleeds and settles over rebar."
+    P5 = "Concrete cracking occurs when settlement subsidence induces tensile fissures as concrete settles over rebar."
 
     # Distractor claims to test target relevance gating
     DISTRACTOR_INSPECTION = "Cracks that have widened beyond hairline width warrant closer visual inspection and monitoring."
+    DISTRACTOR_SEVERITY = "Failure severity depends on crack width and environmental exposure."
+    DISTRACTOR_CONSEQUENCE = "Structural fractures pose a safety risk to the building and compromise durability."
     DISTRACTOR_PREVENTION = "Proper curing methods and preventive measures reduce the risk of structural surface defects."
+    DISTRACTOR_MAINTENANCE = "Expansion joints require periodic maintenance to prevent joint failure."
 
     async def extract_document(self, candidate: DiscoveryCandidate) -> ExtractedResearchDocument:
         url = candidate.canonical_url
 
         if "source-alpha.org" in url:
-            content = f"{self.P1}\n{self.P2}\n{self.DISTRACTOR_INSPECTION}"
+            content = f"{self.P1}\n{self.P1_DUP}\n{self.P2}\n{self.DISTRACTOR_INSPECTION}\n{self.DISTRACTOR_SEVERITY}\n{self.DISTRACTOR_CONSEQUENCE}"
         elif "source-beta.edu" in url:
-            content = f"{self.P3}\n{self.P4}\n{self.P5}\n{self.DISTRACTOR_PREVENTION}"
+            content = f"{self.P3}\n{self.P4}\n{self.P5}\n{self.DISTRACTOR_PREVENTION}\n{self.DISTRACTOR_MAINTENANCE}"
         elif "source-gamma.net" in url:
             content = f"{self.P1}\n{self.P5} (Gamma report)"
         elif "source-delta.com" in url:
@@ -474,9 +478,15 @@ async def test_offline_targeted_coverage_simulation_reaches_five_families() -> N
     # Verify distractor non-entity claims did NOT displace entity queries
     distractor_queries = [
         q for q in query_texts
-        if "inspection" in q or "preventive" in q or "widened" in q or "hairline" in q
+        if any(w in q for w in ["inspection", "preventive", "widened", "hairline", "severity", "maintenance", "safety"])
     ]
     assert len(distractor_queries) == 0  # DISTRACTOR_TARGET_DISPLACED_ENTITY_QUERY = NO
+
+    # Verify duplicate same-family proposition did NOT displace distinct candidate families in round 2
+    if len(res["coverage_truth"]) >= 2:
+        r2_queries = [q["query_text"] for q in res["coverage_truth"][1].get("queries", [])]
+        shrink_queries = [q for q in r2_queries if "shrinkage" in q or "shrinks" in q]
+        assert len(shrink_queries) <= 1  # SAME_FAMILY_DUPLICATE_DISPLACED_DISTINCT_FAMILY = NO
 
     # Verify corroboration-targeted intent appeared after round 1
     corroboration_intents = [
@@ -633,3 +643,306 @@ def test_provider_neutral_topic_relevance_scoring() -> None:
     assert targets[0].representative_claim_text == c_causal.claim_text
     assert targets[0].priority == 2  # Entity candidate
     assert targets[1].priority == 4  # Generic context
+
+
+def test_explicit_a_causes_b_proposition_is_entity_candidate() -> None:
+    """Explicit A-causes-B proposition is recognized as an entity candidate."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Drying shrinkage causes internal tensile stresses in hardened concrete.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 2
+    assert targets[0].semantic_role == "CAUSE_OR_PROCESS"
+
+
+def test_a_results_in_b_is_entity_candidate() -> None:
+    """A-results-in-B proposition is recognized as an entity candidate."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Rapid moisture evaporation results in plastic shrinkage fissures.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 2
+    assert targets[0].semantic_role == "CAUSE_OR_PROCESS"
+
+
+def test_b_due_to_a_is_entity_candidate() -> None:
+    """B-due-to-A proposition is recognized as an entity candidate."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Severe tensile cracking develops due to freeze-thaw pore pressure.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 2
+    assert targets[0].semantic_role == "CAUSE_OR_PROCESS"
+
+
+def test_consequence_only_structural_fractures_pose_safety_risk_not_mechanism() -> None:
+    """Consequence-only statement 'structural fractures pose safety risk' is NOT an entity candidate."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Structural fractures pose a safety risk to the building and compromise durability.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=54.35,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 5
+    assert targets[0].semantic_role == "OUTCOME_OR_CONSEQUENCE"
+
+
+def test_inspection_proposition_is_low_priority() -> None:
+    """Inspection advice is relegated to low priority."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Cracks that have widened beyond hairline width require inspection.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=54.35,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 5
+    assert targets[0].semantic_role == "DIAGNOSTIC_OR_INSPECTION"
+
+
+def test_mitigation_proposition_is_low_priority() -> None:
+    """Mitigation and maintenance advice is relegated to low priority."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Expansion joints require maintenance to prevent structural joint failure.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=54.35,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 5
+    assert targets[0].semantic_role == "MITIGATION_OR_PREVENTION"
+
+
+def test_broad_token_degradation_alone_not_sufficient() -> None:
+    """Broad token 'degradation' alone without causal process is not a mechanism candidate."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Material degradation is visible at the surface in aging concrete infrastructure.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 5
+    assert targets[0].semantic_role != "CAUSE_OR_PROCESS"
+
+
+def test_broad_token_fractures_alone_not_sufficient() -> None:
+    """Broad token 'fractures' alone without causal process is not a mechanism candidate."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Visible fractures appear along the exterior slab without structural consequence.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 4
+    assert targets[0].semantic_role == "GENERIC_CONTEXT"
+
+
+def test_explicit_mechanism_process_remains_candidate() -> None:
+    """Explicit mechanism noun with process relationship remains an entity candidate."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Freeze-thaw cycling operates on the damaging mechanism where absorbed water expands internally.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 2
+    assert targets[0].semantic_role == "CAUSE_OR_PROCESS"
+
+
+def test_cause_bearing_anchors_preserve_original_vocabulary() -> None:
+    """Anchors preserve exact original words and exclude invented terminology."""
+    text = "Drying shrinkage causes internal tensile stresses that crack hardened concrete slabs."
+    anchors = extract_query_anchors(text, subject="concrete cracks")
+    assert "drying" in anchors
+    assert "shrinkage" in anchors
+    assert "tensile" in anchors
+    # Zero invented or stemmed terminology
+    for a in anchors:
+        assert a in text.lower()
+
+
+def test_no_invented_search_terms_in_anchors() -> None:
+    """All extracted anchors are proven substrings of the original proposition."""
+    text = "Freeze-thaw cycling produces internal ice expansion that fractures pores."
+    anchors = extract_query_anchors(text, subject="concrete cracks")
+    for a in anchors:
+        assert a in text.lower()
+
+
+def test_three_distinct_candidate_families_outrank_duplicate_family_propositions() -> None:
+    """Three distinct candidate families are selected across query budget ahead of duplicates."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+
+    c_shrink_1 = ResearchClaim(
+        id=uuid4(),
+        claim_text="Drying shrinkage causes internal tensile stresses in hardened concrete.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    c_shrink_2 = ResearchClaim(
+        id=uuid4(),
+        claim_text="Excessive drying shrinkage leads to slab volume loss and surface cracking.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    c_thermal = ResearchClaim(
+        id=uuid4(),
+        claim_text="Thermal gradients produce differential cooling and massive foundation fractures.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    c_freeze = ResearchClaim(
+        id=uuid4(),
+        claim_text="Freeze-thaw cycling produces internal ice expansion that fractures pores.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+
+    targets = build_corroboration_targets(
+        claims=[c_shrink_1, c_shrink_2, c_thermal, c_freeze],
+        contract=contract,
+    )
+
+    queries = plan_research_queries(
+        topic_title="Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand",
+        contract=contract,
+        round_number=2,
+        max_queries=3,
+        corroboration_targets=targets,
+    )
+
+    assert len(queries) == 3
+    q_texts = [q.query_text for q in queries]
+    # Verify that shrinkage did not take 2 slots, leaving thermal and freeze thaw
+    shrink_count = sum(1 for q in q_texts if "shrinkage" in q or "shrinks" in q)
+    assert shrink_count == 1
+    thermal_count = sum(1 for q in q_texts if "thermal" in q)
+    assert thermal_count == 1
+    freeze_count = sum(1 for q in q_texts if "freeze" in q or "thaw" in q)
+    assert freeze_count == 1
+
+
+def test_planning_family_signature_does_not_alter_verified_coverage() -> None:
+    """Candidate family signature is strictly planning-only and cannot alter verified coverage."""
+    from omega.domain.numeric_promise import extract_distinct_entities
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Drying shrinkage causes internal tensile stresses.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert targets[0].candidate_family != ""
+
+    # Verified coverage requires verified claims, ignoring candidate_family
+    entities = extract_distinct_entities([], topic_title="Why Concrete Cracks", entity_type="mechanism")
+    assert len(entities) == 0
+
+
+def test_verified_claim_remains_excluded_from_targets() -> None:
+    """Already verified claims are strictly excluded from corroboration targets."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Drying shrinkage causes internal tensile stresses.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=True,  # Already verified
+        confidence_score=75.0,
+        independent_sources_count=3,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 0
+
+
+def test_non_concrete_causal_domain_battery_degradation() -> None:
+    """Causal process classification functions for arbitrary non-concrete technical domains."""
+    contract = extract_numeric_promise("5 Mechanisms of Lithium-Ion Battery Degradation")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Dendrite growth triggers internal short circuits causing battery thermal runaway.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.0,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 2
+    assert targets[0].semantic_role == "CAUSE_OR_PROCESS"
+
+
+def test_non_causal_enumerable_topic_regression() -> None:
+    """Non-causal enumerable entities (step, method, tip) do not require causal grammar."""
+    contract = extract_numeric_promise("5 Steps to Clean Architectural Code")
+    c = ResearchClaim(
+        id=uuid4(),
+        claim_text="Step one involves creating clear domain boundaries between application layers.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.0,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(claims=[c], contract=contract)
+    assert len(targets) == 1
+    assert targets[0].priority == 2

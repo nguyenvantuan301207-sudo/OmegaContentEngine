@@ -348,6 +348,8 @@ class CorroborationTarget(BaseModel):
     confidence_score: float = Field(default=0.0, ge=0.0, le=100.0)
     topic_relevance: float = Field(default=0.0, ge=0.0)
     priority: int = Field(default=1, ge=1)
+    semantic_role: str = Field(default="GENERIC_CONTEXT")
+    candidate_family: str = Field(default="")
 
 
 class ResearchCoveragePlan(BaseModel):

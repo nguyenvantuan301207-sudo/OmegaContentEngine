@@ -242,6 +242,7 @@ async def execute_coverage_driven_research(
             sources_map=init_sources_map,
             contract=contract,
             topic_keywords=req.topic_candidate.keywords if req.topic_candidate else None,
+            topic_title=req.topic_candidate.title if req.topic_candidate else "",
         )
 
     # 4. Coverage Expansion Loop
@@ -507,6 +508,7 @@ async def execute_coverage_driven_research(
             sources_map=sources_map_for_targets,
             contract=contract,
             topic_keywords=req.topic_candidate.keywords if req.topic_candidate else None,
+            topic_title=req.topic_candidate.title if req.topic_candidate else "",
         )
 
         # Record round truth
