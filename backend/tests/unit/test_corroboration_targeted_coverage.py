@@ -394,13 +394,17 @@ class MockSimulatedContentExtractor(ResearchContentExtractor):
     P4 = "Concrete cracking occurs when alkali-silica reaction creates expansive chemical gel that disrupts aggregate matrix."
     P5 = "Concrete cracking occurs when settlement subsidence occurs and fresh concrete bleeds and settles over rebar."
 
+    # Distractor claims to test target relevance gating
+    DISTRACTOR_INSPECTION = "Cracks that have widened beyond hairline width warrant closer visual inspection and monitoring."
+    DISTRACTOR_PREVENTION = "Proper curing methods and preventive measures reduce the risk of structural surface defects."
+
     async def extract_document(self, candidate: DiscoveryCandidate) -> ExtractedResearchDocument:
         url = candidate.canonical_url
 
         if "source-alpha.org" in url:
-            content = f"{self.P1}\n{self.P2}"
+            content = f"{self.P1}\n{self.P2}\n{self.DISTRACTOR_INSPECTION}"
         elif "source-beta.edu" in url:
-            content = f"{self.P3}\n{self.P4}"
+            content = f"{self.P3}\n{self.P4}\n{self.P5}\n{self.DISTRACTOR_PREVENTION}"
         elif "source-gamma.net" in url:
             content = f"{self.P1}\n{self.P5} (Gamma report)"
         elif "source-delta.com" in url:
@@ -467,6 +471,13 @@ async def test_offline_targeted_coverage_simulation_reaches_five_families() -> N
     # Verify zero duplicate query texts were issued across all rounds
     assert len(query_texts) == len(set(query_texts))
 
+    # Verify distractor non-entity claims did NOT displace entity queries
+    distractor_queries = [
+        q for q in query_texts
+        if "inspection" in q or "preventive" in q or "widened" in q or "hairline" in q
+    ]
+    assert len(distractor_queries) == 0  # DISTRACTOR_TARGET_DISPLACED_ENTITY_QUERY = NO
+
     # Verify corroboration-targeted intent appeared after round 1
     corroboration_intents = [
         q for q in all_queries if q.get("intent") in (
@@ -484,3 +495,141 @@ async def test_offline_targeted_coverage_simulation_reaches_five_families() -> N
     assert res["final_supported_count"] == 5
     assert len(res["final_supported_families"]) == 5
     assert len(brief.verified_claims) >= 5
+
+
+def test_canonical_evaluation_before_target_derivation_multi_domain() -> None:
+    """Canonical evaluation resolves 2 independent domains to independent_support_count=2 and priority=1."""
+    from omega.application.research_service import evaluate_canonical_claims
+    from omega.infrastructure.models import ClaimEvidence, ResearchSource
+
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    claim = ResearchClaim(
+        id=uuid4(),
+        claim_text="What Causes Them: Concrete shrinks as it cures consuming water and reducing volume.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=0.0,
+        independent_sources_count=1,
+    )
+    s1_id, s2_id = uuid4(), uuid4()
+    s1 = ResearchSource(
+        id=s1_id,
+        url="https://bethelcustombrick.com/article",
+        title="Bethel Brick",
+        publisher="Bethel",
+        content_excerpt="Bethel masonry advisory: Concrete shrinks as it cures consuming mix water in joints.",
+        quality_score=55.0,
+    )
+    s2 = ResearchSource(
+        id=s2_id,
+        url="https://specchem.com/guide",
+        title="SpecChem",
+        publisher="SpecChem",
+        content_excerpt="SpecChem technical engineering bulletin: Shrinkage during hydration reduces slab volume.",
+        quality_score=55.0,
+    )
+    claim.evidence = [
+        ClaimEvidence(id=uuid4(), source_id=s1_id, strength_score=80.0, support_direction="SUPPORTS", excerpt=""),
+        ClaimEvidence(id=uuid4(), source_id=s2_id, strength_score=80.0, support_direction="SUPPORTS", excerpt=""),
+    ]
+
+    sources_map = {s1_id: s1, s2_id: s2}
+    # Run canonical evaluation
+    evaluate_canonical_claims(eligible_sources=[s1, s2], claims=[claim])
+
+    assert claim.independent_sources_count == 2
+    assert claim.confidence_score > 60.0
+
+    targets = build_corroboration_targets(
+        claims=[claim],
+        sources_map=sources_map,
+        contract=contract,
+    )
+    assert len(targets) == 1
+    t = targets[0]
+    assert t.independent_support_count == 2
+    assert t.priority == 1
+    assert set(t.supporting_domains) == {"bethelcustombrick.com", "specchem.com"}
+
+
+def test_entity_candidate_outranks_diagnostic_context() -> None:
+    """Promised entity candidate outranks diagnostic/inspection proposition in planning priority."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+
+    c_entity = ResearchClaim(
+        id=uuid4(),
+        claim_text="Freeze-thaw cycling operates on the damaging mechanism where absorbed water expands.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    c_diagnostic = ResearchClaim(
+        id=uuid4(),
+        claim_text="Cracks that have widened beyond hairline width warrant closer visual inspection.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=54.35,  # Higher initial confidence
+        independent_sources_count=1,
+    )
+
+    targets = build_corroboration_targets(
+        claims=[c_diagnostic, c_entity],  # Diagnostic passed first
+        contract=contract,
+    )
+
+    assert len(targets) == 2
+    # Entity candidate is priority 2, diagnostic is priority 5
+    assert targets[0].representative_claim_text == c_entity.claim_text
+    assert targets[0].priority == 2
+    assert targets[1].representative_claim_text == c_diagnostic.claim_text
+    assert targets[1].priority == 5
+
+
+def test_diagnostic_context_preserved_at_lower_priority() -> None:
+    """Diagnostic/mitigation claims remain preserved in target pool at lower priority."""
+    contract = extract_numeric_promise("Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand")
+    c_mitigation = ResearchClaim(
+        id=uuid4(),
+        claim_text="Implementing preventive measures during construction and proper curing reduces defect risks.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.75,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(
+        claims=[c_mitigation],
+        contract=contract,
+    )
+    assert len(targets) == 1
+    assert targets[0].priority == 5
+    assert targets[0].topic_relevance == 25.0
+
+
+def test_provider_neutral_topic_relevance_scoring() -> None:
+    """Causal process classification works for arbitrary non-concrete domains."""
+    contract = extract_numeric_promise("10 Fault Tolerant Consensus Protocols in Distributed Storage")
+    c_causal = ResearchClaim(
+        id=uuid4(),
+        claim_text="Leader failure triggers automatic election timeout causing split vote resolution.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.0,
+        independent_sources_count=1,
+    )
+    c_generic = ResearchClaim(
+        id=uuid4(),
+        claim_text="Distributed storage networks consist of multiple interconnected server nodes.",
+        claim_type=ClaimType.FACT.value,
+        is_verified=False,
+        confidence_score=53.0,
+        independent_sources_count=1,
+    )
+    targets = build_corroboration_targets(
+        claims=[c_generic, c_causal],
+        contract=contract,
+    )
+    assert len(targets) == 2
+    assert targets[0].representative_claim_text == c_causal.claim_text
+    assert targets[0].priority == 2  # Entity candidate
+    assert targets[1].priority == 4  # Generic context

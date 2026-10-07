@@ -142,9 +142,129 @@ def extract_query_anchors(claim_text: str, subject: str = "") -> list[str]:
     return anchors
 
 
+_CAUSAL_CONNECTORS: set[str] = {
+    "causes",
+    "caused",
+    "causing",
+    "operates",
+    "operates on",
+    "resulting in",
+    "results from",
+    "produces",
+    "producing",
+    "induces",
+    "inducing",
+    "due to",
+    "leads to",
+    "leading to",
+    "initiates",
+    "initiating",
+    "triggers",
+    "triggering",
+    "mechanism",
+    "mechanisms",
+    "consumes",
+    "reduces",
+    "expands",
+    "contracts",
+    "fractures",
+    "fracturing",
+    "degradation",
+    "failure mode",
+    "failure mechanism",
+}
+
+_DIAGNOSTIC_OR_INSPECTION_PATTERNS: list[str] = [
+    r"\binspection\b",
+    r"\bwarrant.*inspection\b",
+    r"\bvisual inspection\b",
+    r"\bmonitoring\b",
+    r"\bhairline width\b",
+    r"\bmeasurement\b",
+    r"\bdisplacement\b",
+]
+
+_MITIGATION_OR_PREVENTION_PATTERNS: list[str] = [
+    r"\bpreventive\b",
+    r"\bprevention\b",
+    r"\brepair\b",
+    r"\btreatment\b",
+    r"\bmaintenance\b",
+    r"\bmitigation\b",
+    r"\bproper curing\b",
+    r"\bsolutions to\b",
+]
+
+_METADATA_OR_TOC_PATTERNS: list[str] = [
+    r"\bkeywords\s*:",
+    r"\bchapter\s+\d+",
+    r"\btable\s+of\s+contents\b",
+    r"\b\d+\.\d+\s+[a-z]",
+    r"\bproce-dures\s+are\s+presented\b",
+    r"\bsection\s+\d+",
+]
+
+
+def classify_target_planning_usefulness(
+    text: str,
+    entity_type: str | None = None,
+    topic_keywords: list[str] | None = None,
+) -> tuple[str, float]:
+    """Deterministically classify planning usefulness and compute topic relevance.
+
+    Classes:
+    - PROMISED_ENTITY_CANDIDATE: Plausibly represents an underlying mechanism/cause/entity.
+    - TOPIC_RELEVANT_CONTEXT: General domain context or structural/material facts.
+    - DIAGNOSTIC_OR_INSPECTION: Visual inspection, measurement, monitoring advice.
+    - MITIGATION_OR_PREVENTION: Mitigation, remediation, preventive advice.
+    - METADATA_OR_GENERIC: TOC headings, citation fragments, bibliographic clutter.
+    - OTHER: General unclassified statements.
+    """
+    t = text.lower()
+
+    # 1. Metadata / TOC clutter check
+    for pat in _METADATA_OR_TOC_PATTERNS:
+        if re.search(pat, t):
+            return ("METADATA_OR_GENERIC", 10.0)
+
+    # 2. Diagnostic / inspection check
+    for pat in _DIAGNOSTIC_OR_INSPECTION_PATTERNS:
+        if re.search(pat, t):
+            return ("DIAGNOSTIC_OR_INSPECTION", 20.0)
+
+    # 3. Mitigation / prevention check
+    for pat in _MITIGATION_OR_PREVENTION_PATTERNS:
+        if re.search(pat, t):
+            return ("MITIGATION_OR_PREVENTION", 25.0)
+
+    # 4. Check for causal / mechanism process language
+    has_causal = any(conn in t for conn in _CAUSAL_CONNECTORS)
+    has_entity_mention = (
+        (entity_type and entity_type.lower() in t)
+        or ("mechanism" in t)
+        or ("cause" in t)
+    )
+
+    if has_causal or has_entity_mention:
+        relevance = 80.0
+        if has_causal and has_entity_mention:
+            relevance = 95.0
+        if topic_keywords and any(kw.lower() in t for kw in topic_keywords):
+            relevance = min(100.0, relevance + 5.0)
+        return ("PROMISED_ENTITY_CANDIDATE", relevance)
+
+    # 5. General topic context
+    relevance = 50.0
+    if topic_keywords and any(kw.lower() in t for kw in topic_keywords):
+        relevance = 65.0
+    return ("TOPIC_RELEVANT_CONTEXT", relevance)
+
+
 def build_corroboration_targets(
     claims: list[Any],
     sources_map: dict[UUID, Any] | None = None,
+    contract: NumericPromiseContract | None = None,
+    topic_keywords: list[str] | None = None,
 ) -> list[CorroborationTarget]:
     """Derive deterministic in-memory corroboration targets from candidate claims.
 
@@ -152,8 +272,10 @@ def build_corroboration_targets(
     1. Only unverified claims qualify.
     2. Zero contradictory claims qualify.
     3. Metadata-like and boilerplate claims are rejected.
-    4. Prioritizes 2-independent-source claims before 1-independent-source claims.
-    5. Pure planning signal: unverified claims never become evidence or brief authority.
+    4. Prioritizes promised-entity candidate propositions before generic context.
+    5. Prioritizes 2-independent-source claims before 1-independent-source claims.
+    6. Diagnostic and mitigation context claims are relegated to lowest tier (never displace entity candidates).
+    7. Pure planning signal: unverified claims never become evidence or brief authority.
     """
     from omega.application.claim_extractor import _is_boilerplate, _is_scholarly_metadata_or_clutter
 
@@ -231,27 +353,39 @@ def build_corroboration_targets(
                         except Exception:
                             pass
 
-        # 5. Priority rule: 2 independent sources (priority 1) > 1 independent source (priority 2)
-        if indep_count >= 2:
-            priority = 1
-        elif indep_count == 1:
-            priority = 2
-        else:
-            priority = 3
-
-        targets.append(
-            CorroborationTarget(
-                representative_claim_text=claim_text,
-                claim_type=claim_type,
-                independent_support_count=indep_count,
-                supporting_domains=supporting_domains,
-                confidence_score=conf_score,
-                priority=priority,
-            )
+        # 5. Planning Usefulness Classification and Topic Relevance Scoring
+        planning_class, topic_rel = classify_target_planning_usefulness(
+            text=claim_text,
+            entity_type=contract.entity_type if contract else None,
+            topic_keywords=topic_keywords,
         )
 
-    # Sort deterministically: priority ascending (1 before 2), then confidence descending
-    targets.sort(key=lambda t: (t.priority, -t.confidence_score))
+        # Phase G Priority Tiers:
+        # Tier 1: Promised-entity candidate with 2 independent supports
+        # Tier 2: Promised-entity candidate with 1 independent support
+        # Tier 3: Other topic-relevant context with >= 2 independent supports
+        # Tier 4: Other topic-relevant context with 1 independent support
+        # Tier 5: Diagnostic, mitigation, prevention, or metadata context
+        if planning_class == "PROMISED_ENTITY_CANDIDATE":
+            priority = 1 if indep_count >= 2 else 2
+        elif planning_class == "TOPIC_RELEVANT_CONTEXT":
+            priority = 3 if indep_count >= 2 else 4
+        else:
+            priority = 5
+
+        t = CorroborationTarget(
+            representative_claim_text=claim_text,
+            claim_type=claim_type,
+            independent_support_count=indep_count,
+            supporting_domains=supporting_domains,
+            confidence_score=conf_score,
+            topic_relevance=topic_rel,
+            priority=priority,
+        )
+        targets.append(t)
+
+    # Sort deterministically: priority ascending (1 before 2, etc.), then topic_relevance descending, then confidence descending
+    targets.sort(key=lambda t: (t.priority, -t.topic_relevance, -t.confidence_score))
     return targets
 
 
@@ -350,37 +484,42 @@ def plan_research_queries(
         else "aspects"
     )
 
+    def _issue_from_target(target: CorroborationTarget) -> None:
+        anchors = extract_query_anchors(target.representative_claim_text, subject)
+        if not anchors:
+            return
+        a_slice = " ".join(anchors[:4])
+        dom_info = f"; existing domains: {target.supporting_domains}" if target.supporting_domains else ""
+        reason = (
+            f"Target missing independent corroboration for candidate proposition "
+            f"({target.independent_support_count} existing independent sources{dom_info})."
+        )
+
+        variants = [
+            (f"{subject} {a_slice} technical reference", ResearchQueryIntent.CORROBORATION),
+            (f"{subject} {a_slice} engineering research", ResearchQueryIntent.CORROBORATION),
+            (
+                f"{subject} {' '.join(anchors[1:5] if len(anchors) >= 5 else anchors[:4])} failure mechanism",
+                ResearchQueryIntent.CORROBORATION,
+            ),
+            (f"{subject} {' '.join(anchors[:5])} analysis", ResearchQueryIntent.CORROBORATION),
+        ]
+        for q_candidate, q_intent in variants:
+            if add_query(q_candidate, q_intent, reason):
+                break
+
     if corroboration_targets:
-        # Sort targets by priority (2-independent before 1-independent), then confidence
-        sorted_targets = sorted(corroboration_targets, key=lambda t: (t.priority, -t.confidence_score))
-        for target in sorted_targets:
+        # Phase G: Tiers 1-3: promised entity candidates and topic-relevant candidates (priority < 5)
+        entity_and_topic_targets = [
+            t for t in corroboration_targets if t.priority < 5
+        ]
+        sorted_high_targets = sorted(entity_and_topic_targets, key=lambda t: (t.priority, -t.confidence_score))
+        for target in sorted_high_targets:
             if len(queries) >= max_queries:
                 break
-            anchors = extract_query_anchors(target.representative_claim_text, subject)
-            if not anchors:
-                continue
-            a_slice = " ".join(anchors[:4])
-            dom_info = f"; existing domains: {target.supporting_domains}" if target.supporting_domains else ""
-            reason = (
-                f"Target missing independent corroboration for candidate proposition "
-                f"({target.independent_support_count} existing independent sources{dom_info})."
-            )
+            _issue_from_target(target)
 
-            # Deterministic formulation variants grounded in the claim to prevent cross-round repetition
-            variants = [
-                (f"{subject} {a_slice} technical reference", ResearchQueryIntent.CORROBORATION),
-                (f"{subject} {a_slice} engineering research", ResearchQueryIntent.CORROBORATION),
-                (
-                    f"{subject} {' '.join(anchors[1:5] if len(anchors) >= 5 else anchors[:4])} failure mechanism",
-                    ResearchQueryIntent.CORROBORATION,
-                ),
-                (f"{subject} {' '.join(anchors[:5])} analysis", ResearchQueryIntent.CORROBORATION),
-            ]
-            for q_candidate, q_intent in variants:
-                if add_query(q_candidate, q_intent, reason):
-                    break
-
-    # If query budget remains, add generic diversification query to expand coverage
+    # Phase G Step 4: Generic coverage fallback if query budget remains
     if len(queries) < max_queries:
         if contract and contract.promised_count and contract.promised_count > 0:
             add_query(
@@ -424,5 +563,14 @@ def plan_research_queries(
                 ResearchQueryIntent.ADDITIONAL_COVERAGE,
                 f"Seek additional empirical literature on {subject}.",
             )
+
+    # Phase G Step 5: If query budget STILL remains and generic fallback exhausted, lower-tier targets
+    if len(queries) < max_queries and corroboration_targets:
+        low_targets = [t for t in corroboration_targets if t.priority >= 5]
+        sorted_low = sorted(low_targets, key=lambda t: (t.priority, -t.confidence_score))
+        for target in sorted_low:
+            if len(queries) >= max_queries:
+                break
+            _issue_from_target(target)
 
     return queries
