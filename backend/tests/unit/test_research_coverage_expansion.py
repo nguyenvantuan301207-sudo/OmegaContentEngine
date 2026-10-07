@@ -1560,7 +1560,7 @@ async def test_five_urls_one_mechanism_results_in_one_distinct_family():
 
     # All 5 URLs corroborate the single plastic shrinkage mechanism
     assert result["final_supported_count"] == 1
-    assert result["final_supported_families"] == ["plastic_shrinkage"]
+    assert result["final_supported_families"] in (["plastic_shrinkage"], ["plastic shrinkage"])
     # Coverage is not fulfilled because promised_count = 5
     assert result["stop_reason"] in (
         ResearchCoverageStopReason.NUMERIC_COVERAGE_NOT_FULFILLED.value,

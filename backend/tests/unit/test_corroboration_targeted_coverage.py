@@ -946,3 +946,304 @@ def test_non_causal_enumerable_topic_regression() -> None:
     targets = build_corroboration_targets(claims=[c], contract=contract)
     assert len(targets) == 1
     assert targets[0].priority == 2
+
+
+# ── Phase J: Live Failure Remediation R1 Dedicated Invariant Tests ──
+
+
+def test_phase_j_causal_contract_direct_corroboration_accepts_only_promised_candidate() -> None:
+    """1. Causal contract direct corroboration accepts only PROMISED_ENTITY_CANDIDATE + CAUSE_OR_PROCESS."""
+    topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
+    contract = extract_numeric_promise(topic)
+
+    t_valid = CorroborationTarget(
+        representative_claim_text="Plastic shrinkage occurs when surface evaporation exceeds bleed rate.",
+        claim_type=ClaimType.FACT,
+        priority=2,
+        semantic_role="CAUSE_OR_PROCESS",
+        candidate_family="plastic_shrink",
+        independent_support_count=1,
+    )
+    t_context = CorroborationTarget(
+        representative_claim_text="Concrete is the most widely used material in construction worldwide.",
+        claim_type=ClaimType.FACT,
+        priority=4,
+        semantic_role="GENERIC_CONTEXT",
+        candidate_family="general_context",
+        independent_support_count=1,
+    )
+
+    queries = plan_research_queries(
+        topic_title=topic,
+        contract=contract,
+        round_number=2,
+        max_queries=2,
+        corroboration_targets=[t_valid, t_context],
+    )
+    assert len(queries) == 2
+    assert queries[0].intent == ResearchQueryIntent.CORROBORATION
+    # The second query MUST NOT be corroboration for context; it must be generic fallback
+    assert queries[1].intent != ResearchQueryIntent.CORROBORATION
+    assert queries[1].intent == ResearchQueryIntent.ADDITIONAL_COVERAGE
+
+
+def test_phase_j_non_entity_roles_cannot_consume_causal_corroboration_slot() -> None:
+    """2-5. TOPIC_RELEVANT_CONTEXT, OUTCOME, DIAGNOSTIC, MITIGATION cannot consume causal corroboration slot."""
+    topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
+    contract = extract_numeric_promise(topic)
+
+    t_context = CorroborationTarget(
+        representative_claim_text="Material properties vary across construction sites.",
+        priority=3,
+        semantic_role="GENERIC_CONTEXT",
+        candidate_family="mat_prop",
+    )
+    t_outcome = CorroborationTarget(
+        representative_claim_text="Structural fractures pose severe safety hazards to building occupants.",
+        priority=5,
+        semantic_role="OUTCOME_OR_CONSEQUENCE",
+        candidate_family="struct_fract",
+    )
+    t_diagnostic = CorroborationTarget(
+        representative_claim_text="Cracks wider than hairline require visual inspection and monitoring.",
+        priority=5,
+        semantic_role="DIAGNOSTIC_OR_INSPECTION",
+        candidate_family="visual_inspect",
+    )
+    t_mitigation = CorroborationTarget(
+        representative_claim_text="Joints should also be placed at re-entrant corners to prevent cracking.",
+        priority=5,
+        semantic_role="MITIGATION_OR_PREVENTION",
+        candidate_family="joint_place",
+    )
+
+    queries = plan_research_queries(
+        topic_title=topic,
+        contract=contract,
+        round_number=2,
+        max_queries=3,
+        corroboration_targets=[t_context, t_outcome, t_diagnostic, t_mitigation],
+    )
+    # Zero corroboration queries issued from these non-entity targets
+    corrob_queries = [q for q in queries if q.intent == ResearchQueryIntent.CORROBORATION]
+    assert len(corrob_queries) == 0
+
+
+def test_phase_j_generic_mechanism_coverage_preferred_over_context_target() -> None:
+    """6. Generic mechanism coverage fallback is preferred over context target."""
+    topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
+    contract = extract_numeric_promise(topic)
+
+    t_context = CorroborationTarget(
+        representative_claim_text="Concrete formulations require proper hydration time.",
+        priority=4,
+        semantic_role="GENERIC_CONTEXT",
+        candidate_family="proper_hydrat",
+    )
+    queries = plan_research_queries(
+        topic_title=topic,
+        contract=contract,
+        round_number=2,
+        max_queries=2,
+        corroboration_targets=[t_context],
+    )
+    # All queries should be generic coverage fallback, none corroborating context
+    assert len(queries) == 2
+    for q in queries:
+        assert q.intent != ResearchQueryIntent.CORROBORATION
+
+
+def test_phase_j_three_distinct_causal_candidate_families_fill_slots() -> None:
+    """7. Three distinct causal candidate families fill 3 slots when available."""
+    topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
+    contract = extract_numeric_promise(topic)
+
+    t1 = CorroborationTarget(
+        representative_claim_text="Drying shrinkage causes internal tensile stresses that crack hardened concrete.",
+        priority=2,
+        semantic_role="CAUSE_OR_PROCESS",
+        candidate_family="dry_shrink",
+    )
+    t2 = CorroborationTarget(
+        representative_claim_text="Freeze-thaw cycling produces internal ice expansion that fractures pores.",
+        priority=2,
+        semantic_role="CAUSE_OR_PROCESS",
+        candidate_family="freez_thaw",
+    )
+    t3 = CorroborationTarget(
+        representative_claim_text="Thermal contraction creates steep temperature gradients across thick slabs.",
+        priority=2,
+        semantic_role="CAUSE_OR_PROCESS",
+        candidate_family="therm_contract",
+    )
+
+    queries = plan_research_queries(
+        topic_title=topic,
+        contract=contract,
+        round_number=2,
+        max_queries=3,
+        corroboration_targets=[t1, t2, t3],
+    )
+    assert len(queries) == 3
+    for q in queries:
+        assert q.intent == ResearchQueryIntent.CORROBORATION
+
+
+def test_phase_j_two_support_causal_family_outranks_one_support() -> None:
+    """8. Two-support causal family outranks one-support family."""
+    topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
+    contract = extract_numeric_promise(topic)
+
+    t1_indep = CorroborationTarget(
+        representative_claim_text="Thermal contraction creates steep temperature gradients.",
+        priority=2,
+        semantic_role="CAUSE_OR_PROCESS",
+        candidate_family="therm_contract",
+        independent_support_count=1,
+    )
+    t2_indep = CorroborationTarget(
+        representative_claim_text="Plastic shrinkage occurs when evaporation exceeds bleed rate.",
+        priority=1,
+        semantic_role="CAUSE_OR_PROCESS",
+        candidate_family="plastic_shrink",
+        independent_support_count=2,
+    )
+
+    queries = plan_research_queries(
+        topic_title=topic,
+        contract=contract,
+        round_number=2,
+        max_queries=1,
+        corroboration_targets=[t1_indep, t2_indep],
+    )
+    assert len(queries) == 1
+    assert "plastic" in queries[0].query_text or "shrinkage" in queries[0].query_text
+
+
+def test_phase_j_cause_bearing_anchor_avoids_discourse_leading_tokens() -> None:
+    """9-10. Cause-bearing anchor avoids discourse-only leading tokens and remains exact-source grounded."""
+    text1 = "While determining the cause and severity of a crack can be somewhat difficult, shrinkage is primary."
+    anchors1 = extract_query_anchors(text1, subject="concrete cracks")
+    for bad_token in ["while", "determining", "somewhat", "difficult"]:
+        assert bad_token not in anchors1
+
+    text2 = "What we need to watch out for though, are cracks that are a result of foundation movement."
+    anchors2 = extract_query_anchors(text2, subject="concrete cracks")
+    for bad_token in ["need", "watch", "though"]:
+        assert bad_token not in anchors2
+
+    text3 = "Joints should also be placed at re-entrant corners where shrinkage causes stresses."
+    anchors3 = extract_query_anchors(text3, subject="concrete cracks")
+    for bad_token in ["joints", "should", "placed", "entrant"]:
+        assert bad_token not in anchors3
+
+    # All anchors in all three must be exact substrings of original text
+    for a in anchors1:
+        assert a in text1.lower()
+    for a in anchors2:
+        assert a in text2.lower()
+    for a in anchors3:
+        assert a in text3.lower()
+
+
+def test_phase_j_non_causal_enumerable_topics_remain_valid() -> None:
+    """11. Non-causal enumerable topics remain valid."""
+    contract = extract_numeric_promise("7 Proven Tips for Effective Technical Writing")
+    assert contract is not None
+    assert contract.promised_count == 7
+    assert contract.entity_type == "tip"
+
+    t = CorroborationTarget(
+        representative_claim_text="Tip three advises using active voice rather than passive constructions.",
+        priority=2,
+        semantic_role="GENERIC_CONTEXT",
+        candidate_family="active_voice",
+    )
+    queries = plan_research_queries(
+        topic_title="7 Proven Tips for Effective Technical Writing",
+        contract=contract,
+        round_number=2,
+        max_queries=1,
+        corroboration_targets=[t],
+    )
+    assert len(queries) == 1
+    assert queries[0].intent == ResearchQueryIntent.CORROBORATION
+
+
+def test_phase_j_verified_family_semantics_concrete_cases() -> None:
+    """12-14. Verified family labels are meaningful, cause-grounded, not raw stem bigrams."""
+    from omega.domain.numeric_promise import extract_distinct_entities
+
+    c1 = (
+        "What Causes Them: Concrete shrinks as it cures - the chemical hydration process that hardens "
+        "the concrete consumes water and reduces the material's volume slightly. This volumetric change is "
+        "normal and expected, but when it's uneven - because the surface is drying faster than the interior, "
+        "because the mix had too much water, or because curing conditions were too warm or too dry - the "
+        "differential shrinkage produces surface cracking."
+    )
+    c2 = (
+        "Structural cracking occurs when applied forces whether from loading, settlement, lateral pressure, "
+        "or thermal stress exceed the concrete's tensile capacity."
+    )
+
+    families = extract_distinct_entities(
+        [c1, c2],
+        topic_title="Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand",
+        entity_type="mechanism",
+    )
+    assert len(families) == 2
+    assert "what_them" not in families
+    assert "appli_forc" not in families
+    assert "while_determin" not in families
+    assert "need_watch" not in families
+    assert any("shrinkage" in f or "drying" in f for f in families)
+    assert any("applied" in f or "forces" in f or "loading" in f for f in families)
+
+
+def test_phase_j_planning_family_cannot_affect_verified_count() -> None:
+    """15. Unverified planning family cannot affect supported count."""
+    from omega.domain.numeric_promise import extract_distinct_entities
+
+    # Unverified claims must NOT be passed to extract_distinct_entities
+    # Even if planning created 10 candidate families, verified count remains 0
+    distinct = extract_distinct_entities([], topic_title="Why Concrete Cracks", entity_type="mechanism")
+    assert len(distinct) == 0
+
+
+def test_phase_j_one_broad_proposition_contributes_at_most_one_family() -> None:
+    """16. One broad verified proposition cannot fabricate multiple verified families."""
+    from omega.domain.numeric_promise import extract_distinct_entities
+
+    broad_claim = (
+        "Structural cracking occurs when applied forces whether from loading, settlement, lateral pressure, "
+        "or thermal stress exceed the concrete's tensile capacity."
+    )
+    distinct = extract_distinct_entities(
+        [broad_claim],
+        topic_title="Why Concrete Cracks: 5 Mechanisms",
+        entity_type="mechanism",
+    )
+    assert len(distinct) == 1
+
+
+def test_phase_j_retry4_offline_corpus_remains_two_families() -> None:
+    """17. Retry #4 offline corpus remains only 2 verified families."""
+    from omega.domain.numeric_promise import extract_distinct_entities
+
+    c1 = (
+        "What Causes Them: Concrete shrinks as it cures - the chemical hydration process that hardens "
+        "the concrete consumes water and reduces the material's volume slightly. This volumetric change is "
+        "normal and expected, but when it's uneven - because the surface is drying faster than the interior, "
+        "because the mix had too much water, or because curing conditions were too warm or too dry - the "
+        "differential shrinkage produces surface cracking."
+    )
+    c2 = (
+        "Structural cracking occurs when applied forces whether from loading, settlement, lateral pressure, "
+        "or thermal stress exceed the concrete's tensile capacity."
+    )
+    distinct = extract_distinct_entities(
+        [c1, c2],
+        topic_title="Why Concrete Cracks: 5 Mechanisms",
+        entity_type="mechanism",
+    )
+    assert len(distinct) == 2

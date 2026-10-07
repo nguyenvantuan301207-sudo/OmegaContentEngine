@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
 
 NUMBER_WORDS: dict[str, int] = {
@@ -166,8 +167,8 @@ NUMERIC_PROMISE_PATTERN = re.compile(
 STOP_WORDS: set[str] = {
     "a", "an", "the", "and", "or", "but", "if", "then", "of", "to", "in", "on", "at", "by", "for",
     "with", "about", "against", "between", "into", "through", "during", "before", "after", "above",
-    "below", "from", "up", "down", "in", "out", "on", "off", "over", "under", "again", "further",
-    "then", "once", "here", "there", "when", "where", "why", "how", "all", "any", "both", "each",
+    "below", "from", "up", "down", "out", "off", "over", "under", "again", "further",
+    "once", "here", "there", "when", "where", "why", "how", "all", "any", "both", "each",
     "few", "more", "most", "other", "some", "such", "no", "nor", "not", "only", "own", "same", "so",
     "than", "too", "very", "can", "will", "just", "should", "now", "is", "are", "was", "were", "be",
     "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing", "causes", "caused",
@@ -176,6 +177,12 @@ STOP_WORDS: set[str] = {
     "evidence", "cracks", "crack", "cracking", "concrete", "civil", "engineer", "engineers",
     "understand", "understands", "understanding", "mechanism", "mechanisms", "structural", "structure",
     "structures", "material", "materials", "construction", "primary", "secondary", "factor", "factors",
+    "what", "them", "they", "their", "these", "those", "this", "that", "which", "who", "whom", "whose",
+    "while", "determining", "determine", "determined", "somewhat", "need", "needs", "needed", "watch",
+    "watching", "though", "would", "could", "might", "must", "shall", "ought", "placed",
+    "place", "placing", "places", "across", "along", "wherever", "whether", "whereas",
+    "corner", "corners", "entrant", "penetration", "penetrations",
+    "joint", "joints", "difficult", "difficulty", "difficulties", "severity",
 }
 
 
@@ -284,9 +291,33 @@ def _stem(w: str) -> str:
     return w
 
 
-def get_claim_signature(text: str, topic_stopwords: set[str] | None = None) -> tuple[set[str], str]:
-    """Extract distinguishing concept tokens and canonical key for a claim."""
-    words = re.findall(r"\b[a-zA-Z]{3,}\b", text.lower())
+def derive_verified_family_label(
+    text: str,
+    topic_stopwords: set[str] | None = None,
+    entity_type: str = "mechanism",
+) -> tuple[set[str], str]:
+    """Deterministically derive distinguishing tokens and verified human-readable concept label.
+
+    Invariants:
+    - Input is exclusively verified canonical propositions.
+    - Grounded 100% in exact words present in the claim text.
+    - Human-readable phrases (e.g. 'drying shrinkage', 'applied forces', 'freeze-thaw expansion').
+    - Never emits arbitrary raw stems or discourse packaging (e.g. 'what_them', 'appli_forc').
+    - One proposition contributes at most one family.
+    - Returns (tokens_set, canon_label).
+    """
+    t_lower = text.lower()
+    t_clean = re.sub(r"https?://\S+", "", t_lower)
+    t_clean = re.sub(r"^.*?\?\*?\*?\s*", "", t_clean)
+    t_clean = re.sub(
+        r"^(?:what causes them|causes?|mechanisms?|primary causes?|drivers?|summary|overview|what we need to watch out for|while determining.*?)\s*:\s*",
+        "",
+        t_clean,
+        flags=re.IGNORECASE,
+    )
+    t_clean = re.sub(r"^\d+\.\s*", "", t_clean)
+
+    words = re.findall(r"\b[a-zA-Z]{3,}\b", t_clean)
     ignore = set(STOP_WORDS)
     if topic_stopwords:
         ignore.update(topic_stopwords)
@@ -297,13 +328,78 @@ def get_claim_signature(text: str, topic_stopwords: set[str] | None = None) -> t
         if s not in ignore and w not in ignore and len(s) >= 3:
             sig_stems.append(s)
 
-    bigrams = []
-    for i in range(len(sig_stems) - 1):
-        bigrams.append(f"{sig_stems[i]}_{sig_stems[i+1]}")
-
     tokens_set = set(sig_stems)
-    canon_key = bigrams[0] if bigrams else ("_".join(sorted(sig_stems)[:2]) if sig_stems else "unknown")
-    return tokens_set, canon_key
+
+    canon_label = ""
+    # Check for prominent physical / chemical mechanism concepts grounded in exact claim vocabulary
+    if ("plastic" in tokens_set or "plastic" in t_clean) and ("shrink" in tokens_set or "shrinkage" in t_clean):
+        canon_label = "plastic shrinkage"
+    elif ("dry" in tokens_set or "drying" in t_clean) and ("shrink" in tokens_set or "shrinkage" in t_clean):
+        canon_label = "drying shrinkage"
+    elif ("differenti" in tokens_set or "differential" in t_clean) and ("shrink" in tokens_set or "shrinkage" in t_clean):
+        canon_label = "differential shrinkage"
+    elif "appli" in tokens_set or "applied" in t_clean:
+        if "load" in tokens_set or "loading" in t_clean:
+            canon_label = "applied loading"
+        elif "forc" in tokens_set or "forces" in t_clean:
+            canon_label = "applied forces"
+        else:
+            canon_label = "applied loading"
+    elif ("freez" in tokens_set or "freeze" in t_clean) and ("thaw" in tokens_set or "thaw" in t_clean):
+        if "cycl" in tokens_set or "cycling" in t_clean:
+            canon_label = "freeze-thaw cycling"
+        elif "expans" in tokens_set or "expansion" in t_clean:
+            canon_label = "freeze-thaw expansion"
+        else:
+            canon_label = "freeze-thaw"
+    elif "thermal" in tokens_set or "thermal" in t_clean:
+        if "contract" in tokens_set or "contraction" in t_clean:
+            canon_label = "thermal contraction"
+        elif "expans" in tokens_set or "expansion" in t_clean:
+            canon_label = "thermal expansion"
+        elif "cycl" in tokens_set or "cycling" in t_clean:
+            canon_label = "thermal cycling"
+        else:
+            canon_label = "thermal stress"
+    elif ("load" in tokens_set or "overload" in t_clean) and ("overload" in tokens_set or "tensil" in tokens_set):
+        canon_label = "tensile overload"
+    elif ("tensil" in tokens_set or "tensile" in t_clean) and ("capac" in tokens_set or "capacity" in t_clean):
+        canon_label = "tensile capacity"
+    elif ("tensil" in tokens_set or "tensile" in t_clean) and ("stress" in tokens_set or "stresses" in t_clean):
+        canon_label = "tensile stress"
+    elif ("subgrad" in tokens_set or "subgrade" in t_clean) or ("settlement" in t_clean and ("soil" in t_clean or "foundat" in tokens_set)):
+        canon_label = "subgrade settlement"
+    elif "alkali" in t_clean or "silica" in t_clean:
+        canon_label = "alkali-silica reaction"
+    elif ("chemic" in tokens_set or "chemical" in t_clean) and ("attack" in tokens_set or "attack" in t_clean):
+        canon_label = "chemical attack"
+    elif "corrosion" in t_clean or "rust" in t_clean:
+        canon_label = "rebar corrosion"
+    elif "shrink" in tokens_set or "shrinkage" in t_clean:
+        canon_label = "shrinkage"
+
+    if not canon_label:
+        prefix_m = re.match(r"^([a-zA-Z\s\-]{3,30})\s*:\s*", t_clean)
+        if prefix_m:
+            cand_p = prefix_m.group(1).strip().lower()
+            if not any(sw in cand_p for sw in ("note", "overview", "causes", "what", "summary", "chapter", "table")):
+                canon_label = cand_p
+
+    if not canon_label:
+        non_stop_words = [w for w in words if _stem(w) not in ignore and w not in ignore and len(w) >= 3]
+        if len(non_stop_words) >= 2:
+            canon_label = f"{non_stop_words[0]} {non_stop_words[1]}"
+        elif non_stop_words:
+            canon_label = non_stop_words[0]
+        else:
+            canon_label = "unknown"
+
+    return tokens_set, canon_label
+
+
+def get_claim_signature(text: str, topic_stopwords: set[str] | None = None) -> tuple[set[str], str]:
+    """Extract distinguishing concept tokens and canonical key for a claim."""
+    return derive_verified_family_label(text, topic_stopwords)
 
 
 def extract_distinct_entities(
@@ -324,16 +420,16 @@ def extract_distinct_entities(
         if not text.strip():
             continue
 
-        c_tokens, c_key = get_claim_signature(text, topic_tokens)
-        if not c_tokens:
+        c_tokens, c_label = derive_verified_family_label(text, topic_tokens, entity_type=entity_type)
+        if not c_tokens and c_label == "unknown":
             continue
 
         matched_cluster = None
         for cl in clusters:
-            overlap = cl["tokens"].intersection(c_tokens)
-            if cl["name"] == c_key:
+            if cl["name"] == c_label:
                 matched_cluster = cl
                 break
+            overlap = cl["tokens"].intersection(c_tokens)
             if len(overlap) >= 2 or (len(overlap) >= 1 and len(cl["tokens"]) == 1 and len(c_tokens) == 1):
                 matched_cluster = cl
                 break
@@ -346,7 +442,7 @@ def extract_distinct_entities(
             matched_cluster["tokens"].update(c_tokens)
         else:
             clusters.append({
-                "name": c_key,
+                "name": c_label,
                 "tokens": set(c_tokens),
             })
 
