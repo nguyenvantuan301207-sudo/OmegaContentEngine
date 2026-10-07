@@ -33,6 +33,7 @@ from omega.application.research_discovery import (
     filter_and_deduplicate_candidates,
 )
 from omega.application.research_query_planner import plan_research_queries
+from omega.application.research_scorer import calculate_source_quality
 from omega.application.research_service import evaluate_canonical_claims
 from omega.application.source_normalizer import bound_excerpt, normalize_url
 from omega.application.source_provider import SourceAuthorityProvider
@@ -300,24 +301,32 @@ async def execute_coverage_driven_research(
         # Strictly bound round acceptance to remaining capacity
         round_allowed = min(max_accepted_sources_per_round, remaining_capacity)
 
-        # Filter & deduplicate prospective candidates
-        accepted, rejections = filter_and_deduplicate_candidates(
+        # Filter & deduplicate prospective candidates from the discovered pool
+        prospective_candidates, rejections = filter_and_deduplicate_candidates(
             candidates=raw_candidates,
             already_seen_urls=already_seen_urls,
-            max_accepted=round_allowed,
+            max_accepted=None,
         )
 
-        # Ingest accepted sources through ResearchContentExtractor into canonical pipeline
+        # Ingest qualifying evidence-eligible sources through ResearchContentExtractor into canonical pipeline
         sources_added_this_round = 0
-        for cand in accepted:
+        for cand in prospective_candidates:
+            if sources_added_this_round >= round_allowed:
+                rejections.append(f"ROUND_BUDGET_REACHED: '{cand.canonical_url}'")
+                break
+
             if current_source_count + sources_added_this_round >= effective_max_sources:
                 rejections.append(f"CAPPED_AT_MAX_SOURCES: '{cand.canonical_url}'")
                 break
+
+            norm_cand_url = normalize_url(cand.canonical_url)
 
             try:
                 extracted_doc = await content_extractor.extract_document(cand)
             except (ContentExtractionError, Exception) as exc:
                 logger.warning("Content extraction failed", url=cand.canonical_url, error=str(exc))
+                if norm_cand_url:
+                    already_seen_urls.add(norm_cand_url)
                 rejections.append(f"EXTRACTION_FAILED: '{cand.canonical_url}'")
                 continue
 
@@ -326,14 +335,44 @@ async def execute_coverage_driven_research(
                 or not extracted_doc.extracted_content
                 or len(extracted_doc.extracted_content.strip()) < 15
             ):
+                if norm_cand_url:
+                    already_seen_urls.add(norm_cand_url)
                 rejections.append(f"CONTENT_UNAVAILABLE: '{cand.canonical_url}'")
                 continue
 
             # CRITICAL AUTHORITY BOUNDARY:
             # content_excerpt is strictly derived from extracted_doc.extracted_content.
             # cand.snippet is ONLY preserved as discovery metadata / observability.
-            # Bound content_excerpt to MAX_EXCERPT_LENGTH (<= 5000 chars) BEFORE validation
+            # Bound content_excerpt to MAX_EXCERPT_LENGTH (<= 5000 chars) BEFORE validation/scoring
             bounded_content = bound_excerpt(extracted_doc.extracted_content)
+
+            candidate_url = normalize_url(extracted_doc.canonical_url or cand.canonical_url)
+            candidate_publisher = (extracted_doc.publisher or cand.publisher or "").strip()
+            candidate_primary_status = extracted_doc.primary_source_status
+            candidate_published_at = extracted_doc.published_at or cand.published_at
+            topic_keywords = req.topic_candidate.keywords if req.topic_candidate else []
+
+            # Canonical pre-persistence quality calculation
+            pre_quality_score, _, _, _ = calculate_source_quality(
+                publisher=candidate_publisher,
+                url=candidate_url,
+                primary_source_status=candidate_primary_status,
+                published_at=candidate_published_at,
+                topic_keywords=topic_keywords,
+                content_excerpt=bounded_content,
+                authority_provider=authority_provider,
+            )
+
+            # Quality gate: only EVIDENCE-ELIGIBLE sources qualify for persistence and budget consumption
+            if pre_quality_score < req.minimum_source_quality:
+                if norm_cand_url:
+                    already_seen_urls.add(norm_cand_url)
+                if candidate_url:
+                    already_seen_urls.add(candidate_url)
+                rejections.append(
+                    f"SOURCE_QUALITY_BELOW_MINIMUM: '{candidate_url or cand.canonical_url}' score={pre_quality_score} minimum={req.minimum_source_quality}"
+                )
+                continue
 
             # Metadata firewall: clean discovery metadata, isolate snippet, forbid authority injection
             clean_discovery_meta: dict[str, Any] = {
@@ -361,13 +400,13 @@ async def execute_coverage_driven_research(
 
             src_in = ResearchSourceCreate(
                 source_type=ResearchSourceType.WEB_SEARCH,
-                title=extracted_doc.title or cand.title,
-                publisher=extracted_doc.publisher or cand.publisher,
-                author=extracted_doc.author or cand.author,
-                url=extracted_doc.canonical_url,
+                title=(extracted_doc.title or cand.title).strip(),
+                publisher=candidate_publisher,
+                author=(extracted_doc.author or cand.author).strip() if (extracted_doc.author or cand.author) else None,
+                url=candidate_url,
                 content_excerpt=bounded_content,
-                primary_source_status=extracted_doc.primary_source_status,
-                published_at=extracted_doc.published_at or cand.published_at,
+                primary_source_status=candidate_primary_status,
+                published_at=candidate_published_at,
                 language=extracted_doc.language,
                 region=extracted_doc.region,
                 metadata={
@@ -382,9 +421,10 @@ async def execute_coverage_driven_research(
                 source_in=src_in,
                 authority_provider=authority_provider,
             )
-            norm_u = normalize_url(cand.canonical_url)
-            if norm_u:
-                already_seen_urls.add(norm_u)
+            if norm_cand_url:
+                already_seen_urls.add(norm_cand_url)
+            if candidate_url:
+                already_seen_urls.add(candidate_url)
             sources_added_this_round += 1
 
         # Extract claims for newly added sources

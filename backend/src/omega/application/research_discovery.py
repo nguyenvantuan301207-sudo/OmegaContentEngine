@@ -177,7 +177,7 @@ class InMemoryResearchContentExtractor:
 def filter_and_deduplicate_candidates(
     candidates: list[DiscoveryCandidate],
     already_seen_urls: set[str],
-    max_accepted: int = 5,
+    max_accepted: int | None = None,
 ) -> tuple[list[DiscoveryCandidate], list[str]]:
     """Deterministically filter and deduplicate discovery candidates.
 
@@ -195,7 +195,7 @@ def filter_and_deduplicate_candidates(
     seen_in_batch: set[str] = set()
 
     for c in candidates:
-        if len(accepted) >= max_accepted:
+        if max_accepted is not None and len(accepted) >= max_accepted:
             reasons.append(f"CAPPED_AT_MAX_ACCEPTED: '{c.canonical_url}'")
             continue
 

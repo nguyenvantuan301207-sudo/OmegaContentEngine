@@ -1778,7 +1778,7 @@ async def test_ten_k_document_ingestion_canonical_bounding():
     session, req, channel_id, topic_id = make_test_fixture(max_sources=5)
     authority = ManualAuthorityProvider({"long-doc.org": 60.0})
 
-    ten_k_content = "Concrete cracking mechanism explanation sentence. " * 200
+    ten_k_content = ("Concrete cracks in civil engineering explanation sentence. " * 200)[:9999]
     assert len(ten_k_content) > 9000
 
     cand = DiscoveryCandidate(
