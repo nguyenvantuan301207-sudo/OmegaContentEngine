@@ -32,7 +32,10 @@ from omega.application.research_discovery import (
     ResearchDiscoveryProvider,
     filter_and_deduplicate_candidates,
 )
-from omega.application.research_query_planner import plan_research_queries
+from omega.application.research_query_planner import (
+    build_corroboration_targets,
+    plan_research_queries,
+)
 from omega.application.research_scorer import calculate_source_quality
 from omega.application.research_service import evaluate_canonical_claims
 from omega.application.source_normalizer import bound_excerpt, normalize_url
@@ -43,6 +46,7 @@ from omega.domain.numeric_promise import (
     extract_numeric_promise,
 )
 from omega.domain.research import (
+    CorroborationTarget,
     DiscoveryCandidate,
     ResearchAcquisitionMode,
     ResearchCoverageRoundTruth,
@@ -229,6 +233,14 @@ async def execute_coverage_driven_research(
     current_supported_families: list[str] = list(initial_families)
     rounds_truth: list[ResearchCoverageRoundTruth] = []
     stop_reason: ResearchCoverageStopReason | None = None
+    issued_query_texts: set[str] = set()
+    current_corroboration_targets: list[CorroborationTarget] = []
+    if existing_claims and eligible_init_sources:
+        init_sources_map = {s.id: s for s in eligible_init_sources}
+        current_corroboration_targets = build_corroboration_targets(
+            claims=existing_claims,
+            sources_map=init_sources_map,
+        )
 
     # 4. Coverage Expansion Loop
     for round_num in range(1, max_rounds + 1):
@@ -251,10 +263,15 @@ async def execute_coverage_driven_research(
             round_number=round_num,
             already_supported_families=current_supported_families,
             max_queries=max_queries_per_round,
+            corroboration_targets=current_corroboration_targets,
+            issued_query_texts=issued_query_texts,
         )
         if not queries:
             stop_reason = ResearchCoverageStopReason.NO_NEW_RELEVANT_SOURCES
             break
+
+        for q in queries:
+            issued_query_texts.add(q.query_text)
 
         round_queries_meta = [
             {"query_text": q.query_text, "intent": q.intent.value, "reason": q.reason}
@@ -480,6 +497,13 @@ async def execute_coverage_driven_research(
             )
         supported_after = len(current_supported_families)
         remaining = max(0, (promised_count or 0) - supported_after) if promised_count else 0
+
+        # Calculate PLANNING-ONLY corroboration deficits for next search round
+        sources_map_for_targets = {s.id: s for s in eligible_sources}
+        current_corroboration_targets = build_corroboration_targets(
+            claims=curr_claims,
+            sources_map=sources_map_for_targets,
+        )
 
         # Record round truth
         rounds_truth.append(

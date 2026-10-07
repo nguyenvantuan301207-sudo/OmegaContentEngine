@@ -81,6 +81,7 @@ class ResearchQueryIntent(enum.StrEnum):
     MECHANISMS = "MECHANISMS"
     TECHNICAL_REFERENCE = "TECHNICAL_REFERENCE"
     ADDITIONAL_COVERAGE = "ADDITIONAL_COVERAGE"
+    CORROBORATION = "CORROBORATION"
 
 
 class PrimarySourceStatus(enum.StrEnum):
@@ -335,6 +336,18 @@ class ResearchQuery(BaseModel):
     intent: ResearchQueryIntent
     reason: str = Field(default="", max_length=500)
     round_number: int = 1
+
+
+class CorroborationTarget(BaseModel):
+    """Deterministic in-memory planning representation for candidate proposition corroboration."""
+
+    representative_claim_text: str = Field(..., min_length=5, max_length=1000)
+    claim_type: ClaimType = ClaimType.FACT
+    independent_support_count: int = Field(default=1, ge=0)
+    supporting_domains: list[str] = Field(default_factory=list)
+    confidence_score: float = Field(default=0.0, ge=0.0, le=100.0)
+    topic_relevance: float = Field(default=0.0, ge=0.0)
+    priority: int = Field(default=1, ge=1)
 
 
 class ResearchCoveragePlan(BaseModel):
