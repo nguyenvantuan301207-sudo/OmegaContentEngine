@@ -659,6 +659,7 @@ async def run_research(
                 source_excerpt=s.content_excerpt,
                 metadata=dict(s.metadata_ or {}),
                 source_type=s.source_type,
+                topic_keywords=req.topic_candidate.keywords if req.topic_candidate else None,
             )
             reconcile_source_extractions_into_claims(
                 session=session,
