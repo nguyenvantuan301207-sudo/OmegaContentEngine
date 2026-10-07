@@ -88,11 +88,11 @@ def are_propositions_corroborating(
     3. Numerical tokens must match if present in both statements.
     4. Exact normalized text match => True.
     5. Content stem overlap must be high:
-       - Shared stems >= 4
-       - Overlap with shorter statement >= 0.50
-       - Jaccard similarity >= 0.30
+       - Shared stems >= 4, overlap with shorter >= 0.50, and Jaccard similarity >= 0.25
        OR
-       - Shared stems >= 5 and overlap with shorter >= 0.45
+       - Shared stems >= 5, overlap with shorter >= 0.40, and Jaccard similarity >= 0.18
+       OR
+       - Shared stems >= 6 and overlap with shorter >= 0.35
     """
     str_type_a = type_a.value if isinstance(type_a, ClaimType) else str(type_a).upper()
     str_type_b = type_b.value if isinstance(type_b, ClaimType) else str(type_b).upper()
@@ -131,7 +131,10 @@ def are_propositions_corroborating(
     overlap_ratio = len(common) / min_len if min_len else 0.0
     jaccard = len(common) / union_len if union_len else 0.0
 
-    return bool(len(common) >= 4 and overlap_ratio >= 0.55 and jaccard >= 0.40)
+    cond_tight = len(common) >= 4 and overlap_ratio >= 0.50 and jaccard >= 0.25
+    cond_standard = len(common) >= 5 and overlap_ratio >= 0.40 and jaccard >= 0.18
+    cond_deep = len(common) >= 6 and overlap_ratio >= 0.35
+    return bool(cond_tight or cond_standard or cond_deep)
 
 
 def reconcile_source_extractions_into_claims(
