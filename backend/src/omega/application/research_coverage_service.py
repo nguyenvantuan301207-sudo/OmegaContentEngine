@@ -243,6 +243,7 @@ async def execute_coverage_driven_research(
             contract=contract,
             topic_keywords=req.topic_candidate.keywords if req.topic_candidate else None,
             topic_title=req.topic_candidate.title if req.topic_candidate else "",
+            already_supported_families=list(current_supported_families),
         )
 
     # 4. Coverage Expansion Loop
@@ -509,6 +510,7 @@ async def execute_coverage_driven_research(
             contract=contract,
             topic_keywords=req.topic_candidate.keywords if req.topic_candidate else None,
             topic_title=req.topic_candidate.title if req.topic_candidate else "",
+            already_supported_families=list(current_supported_families),
         )
 
         # Record round truth

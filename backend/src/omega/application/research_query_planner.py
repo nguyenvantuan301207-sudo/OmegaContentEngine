@@ -143,6 +143,16 @@ def is_causal_entity_type(entity_type: str | None) -> bool:
     return ent in _CAUSAL_ENTITY_NOUNS
 
 
+DISALLOWED_QUERY_ANCHORS: frozenset[str] = frozenset(
+    {
+        "see", "aci", "astm", "aashto", "fhwa", "dot", "iso", "din", "hcc", "pccp",
+        "report", "manual", "spec", "guide", "chapt", "chapter", "section",
+        "may", "can", "could", "will", "would", "shall", "should", "might", "must",
+        "causes", "caused", "causing", "cause",
+    }
+)
+
+
 def extract_query_anchors(
     claim_text: str,
     subject: str = "",
@@ -152,8 +162,8 @@ def extract_query_anchors(
 
     Invariants:
     - Retains original words (not stems like 'shrinkag').
-    - Excludes URLs, stopwords, packaging clutter, and subject words.
-    - Strips leading question framing and boilerplate headers.
+    - Excludes URLs, stopwords, packaging clutter, subject words, and citation tokens.
+    - Strips citation parentheticals, leading question framing, and boilerplate headers.
     - Strips leading manifestation framing (e.g. 'Concrete cracking occurs when').
     - Deterministic order of appearance.
     - Zero invented terminology.
@@ -162,6 +172,13 @@ def extract_query_anchors(
     combined_subj = f"{subject} {' '.join(topic_keywords or [])}".strip()
     subj_stems = {_stem(w) for w in re.findall(r"\b[a-zA-Z]{3,}\b", combined_subj.lower())}
     cleaned = re.sub(r"https?://\S+", "", claim_text)
+    # Strip citation parentheticals e.g. (see ACI 201.1R and ACI 224.1R) or (e.g., retempering)
+    cleaned = re.sub(
+        r"\([^)]*(?:see|aci|astm|aashto|fhwa|ref|al\.|19\d\d|20\d\d|e\.g\.)[^)]*\)",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
     # Strip leading questions and boilerplate headers
     cleaned = re.sub(r"^.*?\?\*?\*?\s*", "", cleaned)
     cleaned = re.sub(r"^(?:what causes them|causes|mechanism|primary causes?)\s*:\s*", "", cleaned, flags=re.IGNORECASE)
@@ -170,7 +187,7 @@ def extract_query_anchors(
     anchors: list[str] = []
     seen: set[str] = set()
     for t in tokens:
-        if t in STOPWORDS or t in GENERIC_PACKAGING or _stem(t) in subj_stems:
+        if t in STOPWORDS or t in GENERIC_PACKAGING or t in DISALLOWED_QUERY_ANCHORS or _stem(t) in subj_stems:
             continue
         if t not in seen:
             seen.add(t)
@@ -180,17 +197,86 @@ def extract_query_anchors(
     return anchors
 
 
-def derive_candidate_family_signature(anchors: list[str]) -> str:
-    """Derive deterministic planning-only family signature from cause anchors for query diversification."""
-    from omega.domain.numeric_promise import _stem
+def derive_candidate_family_signature(
+    anchors: list[str],
+    claim_text: str = "",
+    entity_type: str | None = None,
+) -> str:
+    """Derive deterministic planning-only family signature from cause-bearing concepts for query diversification."""
+    from omega.domain.numeric_promise import _stem, derive_verified_family_label
+    if claim_text:
+        c_tokens, c_label = derive_verified_family_label(claim_text, entity_type=entity_type)
+        if c_tokens and c_label != "unknown":
+            return c_label
     if not anchors:
         return "unknown"
     stems = [_stem(a) for a in anchors[:2]]
     return "_".join(stems)
 
 
+def classify_candidate_family_coverage(
+    claim_text: str,
+    already_supported_families: list[str] | None = None,
+    entity_type: str | None = None,
+) -> tuple[str, str]:
+    """Deterministically classify a claim's candidate coverage status relative to verified families.
+
+    Classes:
+    - VERIFIED_ENTITY_FAMILY: The claim directly represents a verified family.
+    - UNVERIFIED_ENTITY_FAMILY: Genuine distinct unverified entity candidate family.
+    - AMBIGUOUS_OR_GENERIC_CONTEXT: Ambiguous phrasing (e.g. unspecific generic shrinkage) or incomplete fragment.
+    - METADATA_OR_CITATION: TOC, bibliography, standard specification numbers, or citation markers.
+    - REDUNDANT_VERIFIED_FAMILY_DESCRIPTION: Duplicate or alternate description of an already-verified family.
+    """
+    from omega.domain.numeric_promise import _stem, derive_verified_family_label
+
+    low = claim_text.lower()
+
+    # 1. Metadata / citation / bibliographic detection
+    if re.search(r"\b(?:aci|astm|aashto|iso|din)\s+\d+", low) or re.search(r"\bsee\s+(?:aci|astm|figure|table)\b", low):
+        return ("METADATA_OR_CITATION", "metadata")
+    if re.search(r"\bkeywords\s*:", low) or "224r-11" in low or "4.1 overview" in low:
+        return ("METADATA_OR_CITATION", "metadata")
+
+    # 2. Clipped / truncated clause detection
+    if re.search(r",\s*(?:and|or|with|but|which|that)\s*\w{0,2}$", claim_text.strip(), re.I):
+        return ("AMBIGUOUS_OR_GENERIC_CONTEXT", "fragment")
+    if re.search(r"\b(?:and|or|with|that|which)\s*$", claim_text.strip(), re.I):
+        return ("AMBIGUOUS_OR_GENERIC_CONTEXT", "fragment")
+
+    c_tokens, c_label = derive_verified_family_label(claim_text, entity_type=entity_type)
+    if not c_tokens or c_label == "unknown":
+        return ("AMBIGUOUS_OR_GENERIC_CONTEXT", "unknown")
+
+    # 3. Check for redundant description of already supported families
+    if already_supported_families:
+        for fam in already_supported_families:
+            fam_words = [w.lower() for w in re.findall(r"\b[a-zA-Z]{3,}\b", fam)]
+            fam_stems = {_stem(w) for w in fam_words}
+            if c_label.lower() == fam.lower():
+                return ("REDUNDANT_VERIFIED_FAMILY_DESCRIPTION", fam)
+            if len(fam_stems) >= 2 and fam_stems.issubset(c_tokens):
+                return ("REDUNDANT_VERIFIED_FAMILY_DESCRIPTION", fam)
+            if len(fam_words) >= 2 and all(w in low for w in fam_words):
+                return ("REDUNDANT_VERIFIED_FAMILY_DESCRIPTION", fam)
+            # Prefix variation safety (e.g., 'different shrinkage rates' matching 'differential shrinkage')
+            if (
+                "shrinkage" in fam_words
+                and "shrinkage" in c_tokens
+                and any(w.startswith("differ") for w in fam_words)
+                and any(w.startswith("differ") for w in c_tokens)
+            ):
+                return ("REDUNDANT_VERIFIED_FAMILY_DESCRIPTION", fam)
+
+    # 4. Ambiguous generic shrinkage must never merge automatically into plastic or differential shrinkage
+    if c_tokens == {"shrinkage"} or c_label == "shrinkage":
+        return ("AMBIGUOUS_OR_GENERIC_CONTEXT", "shrinkage")
+
+    return ("UNVERIFIED_ENTITY_FAMILY", c_label)
+
+
 _CAUSAL_CONNECTORS_REGEX: list[str] = [
-    r"\b(?:causes?|causing)\b",
+    r"\b(?:causes?|caused(?:\s+by)?|causing)\b",
     r"\b(?:leads?\s+to|leading\s+to)\b",
     r"\b(?:results?\s+in|resulting\s+in)\b",
     r"\b(?:results?\s+from|resulting\s+from)\b",
@@ -379,6 +465,7 @@ def build_corroboration_targets(
     contract: NumericPromiseContract | None = None,
     topic_keywords: list[str] | None = None,
     topic_title: str = "",
+    already_supported_families: list[str] | None = None,
 ) -> list[CorroborationTarget]:
     """Derive deterministic in-memory corroboration targets from candidate claims.
 
@@ -474,17 +561,36 @@ def build_corroboration_targets(
             topic_keywords=topic_keywords,
         )
 
+        cov_class, fam_label = classify_candidate_family_coverage(
+            claim_text=claim_text,
+            already_supported_families=already_supported_families,
+            entity_type=contract.entity_type if contract else None,
+        )
+
         subj = extract_core_subject(topic_title) if topic_title else ""
         anchors = extract_query_anchors(claim_text, subject=subj, topic_keywords=topic_keywords)
         fam_sig = derive_candidate_family_signature(anchors)
 
-        # Phase G Priority Tiers:
-        # Tier 1: Promised-entity candidate with 2 independent supports
-        # Tier 2: Promised-entity candidate with 1 independent support
+        # Coverage-Aware Priority Tiers:
+        # Tier 1: Distinct UNVERIFIED mechanism family with >= 2 independent supports
+        # Tier 2: Distinct UNVERIFIED mechanism family with 1 independent support
         # Tier 3: Other topic-relevant context with >= 2 independent supports
-        # Tier 4: Other topic-relevant context with 1 independent support
-        # Tier 5: Diagnostic, mitigation, prevention, consequence, or metadata context
-        if planning_class == "PROMISED_ENTITY_CANDIDATE":
+        # Tier 4: Ambiguous / generic context
+        # Tier 5: Redundant verified family description, metadata/citation, diagnostic, mitigation, or consequence
+        if cov_class in ("REDUNDANT_VERIFIED_FAMILY_DESCRIPTION", "METADATA_OR_CITATION") or semantic_role in (
+            "DIAGNOSTIC_OR_INSPECTION",
+            "MITIGATION_OR_PREVENTION",
+            "OUTCOME_OR_CONSEQUENCE",
+            "METADATA",
+        ):
+            priority = 5
+        elif cov_class == "UNVERIFIED_ENTITY_FAMILY" and semantic_role == "CAUSE_OR_PROCESS":
+            priority = 1 if indep_count >= 2 else 2
+        elif cov_class == "UNVERIFIED_ENTITY_FAMILY":
+            priority = 3 if indep_count >= 2 else 4
+        elif cov_class == "AMBIGUOUS_OR_GENERIC_CONTEXT":
+            priority = 4
+        elif planning_class == "PROMISED_ENTITY_CANDIDATE":
             priority = 1 if indep_count >= 2 else 2
         elif planning_class == "TOPIC_RELEVANT_CONTEXT" and semantic_role == "GENERIC_CONTEXT":
             priority = 3 if indep_count >= 2 else 4
@@ -607,9 +713,10 @@ def plan_research_queries(
 
     def _issue_from_target(target: CorroborationTarget) -> bool:
         anchors = extract_query_anchors(target.representative_claim_text, subject)
-        if not anchors:
+        clean_anchors = [a for a in anchors if a not in DISALLOWED_QUERY_ANCHORS]
+        if not clean_anchors:
             return False
-        a_slice = " ".join(anchors[:4])
+        a_slice = " ".join(clean_anchors[:4])
         dom_info = f"; existing domains: {target.supporting_domains}" if target.supporting_domains else ""
         reason = (
             f"Target missing independent corroboration for candidate proposition "
@@ -620,10 +727,10 @@ def plan_research_queries(
             (f"{subject} {a_slice} technical reference", ResearchQueryIntent.CORROBORATION),
             (f"{subject} {a_slice} engineering research", ResearchQueryIntent.CORROBORATION),
             (
-                f"{subject} {' '.join(anchors[1:5] if len(anchors) >= 5 else anchors[:4])} failure mechanism",
+                f"{subject} {' '.join(clean_anchors[1:5] if len(clean_anchors) >= 5 else clean_anchors[:4])} failure mechanism",
                 ResearchQueryIntent.CORROBORATION,
             ),
-            (f"{subject} {' '.join(anchors[:5])} analysis", ResearchQueryIntent.CORROBORATION),
+            (f"{subject} {' '.join(clean_anchors[:5])} analysis", ResearchQueryIntent.CORROBORATION),
         ]
         return any(add_query(q_candidate, q_intent, reason) for q_candidate, q_intent in variants)
 
@@ -662,13 +769,32 @@ def plan_research_queries(
         # sorted_high_targets naturally orders:
         # 1. 2-support CAUSE_OR_PROCESS family (priority 1)
         # 2. Other distinct 1-support CAUSE_OR_PROCESS families (priority 2)
+        from omega.domain.numeric_promise import _stem
         selected_families: set[str] = set()
+        supported_stems: set[str] = set()
+        for f in (already_supported_families or []):
+            stems = tuple(sorted(_stem(w) for w in re.findall(r"\b[a-zA-Z]{3,}\b", f)))
+            supported_stems.add("_".join(stems))
+            supported_stems.add(f.lower())
+
         for target in sorted_high_targets:
             if len(queries) >= max_queries:
                 break
             fam = target.candidate_family or derive_candidate_family_signature(
                 extract_query_anchors(target.representative_claim_text, subject)
             )
+            # Suppress already verified families and redundant descriptions
+            if fam and (fam.lower() in supported_stems or any(s in fam.lower() for s in supported_stems if len(s) >= 8)):
+                continue
+            if is_causal and already_supported_families:
+                cov_class, _ = classify_candidate_family_coverage(
+                    target.representative_claim_text,
+                    already_supported_families,
+                    contract.entity_type if contract else None,
+                )
+                if cov_class == "REDUNDANT_VERIFIED_FAMILY_DESCRIPTION":
+                    continue
+
             if (
                 fam
                 and fam not in selected_families

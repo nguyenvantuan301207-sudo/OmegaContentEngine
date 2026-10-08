@@ -40,7 +40,7 @@ BOILERPLATE_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 SCHOLARLY_METADATA_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
-        r"^(?:[\*\-\•]|\d+[\.\)])?\s*(?:\*\*|\b)?(?:by|author[s]?|date|published|received|accepted|revised|edited by|issn|isbn|pmid|pmcid|doi)\b\s*:",
+        r"^(?:[\*\-\•]|\d+[\.\)])?\s*(?:\*\*|\b)?(?:by|author[s]?|date|published|received|accepted|revised|edited by|issn|isbn|pmid|pmcid|doi|keywords)\b\s*:",
         re.I,
     ),
     re.compile(
@@ -64,6 +64,7 @@ SCHOLARLY_METADATA_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"\b(?:checkget notified|checksave papers|version of our website|how to cite)\b",
         re.I,
     ),
+    re.compile(r"^\s*keywords\s*:", re.I),
 )
 
 CAUSAL_INDICATORS = re.compile(
@@ -98,7 +99,14 @@ def _is_scholarly_metadata_or_clutter(text: str) -> bool:
     # Dominant URL ratio
     urls = re.findall(r"https?://\S+|/[a-z0-9_/-]+", t)
     url_len = sum(len(u) for u in urls)
-    return bool(url_len > 0 and (url_len / len(t)) > 0.40 and len(t) < 150)
+    if url_len > 0 and (url_len / len(t)) > 0.40 and len(t) < 150:
+        return True
+
+    # Truncated or clipped sentence fragments ending with dangling conjunctions or trailing clauses
+    return bool(
+        re.search(r",\s*(?:and|or|with|but|which|that)\s*\w{0,2}$", t, re.I)
+        or re.search(r"\b(?:and|or|with|that|which)\s*$", t, re.I)
+    )
 
 
 def _classify_claim_type(statement: str) -> ClaimType:
@@ -159,7 +167,7 @@ def score_candidate_proposition(
 
 
 def _split_conjunction_list(raw_list: str) -> list[str]:
-    """Deterministically parse an explicit list of items from a list phrase."""
+    """Deterministically parse an explicit list of items while respecting nested parentheses."""
     # Check for roman numerals / numbered list: i) ... ii) ... iii) or 1) ... 2) ...
     if re.search(r"(?:[iIvVxX]+\)|\d+[\.\)])\s*", raw_list):
         parts = re.split(r"(?:[iIvVxX]+\)|\d+[\.\)])\s*", raw_list)
@@ -167,25 +175,67 @@ def _split_conjunction_list(raw_list: str) -> list[str]:
         for p in parts:
             p_c = re.sub(r"[\;\,\.]", "", p).strip()
             p_c = re.sub(r"\(.*?\)", "", p_c).strip()
-            p_c = re.sub(r"^(?:and|or)\s+", "", p_c).strip()
-            if p_c and len(p_c.split()) <= 6:
+            p_c = re.sub(r"^(?:and|or|both|either)\s+", "", p_c, flags=re.I).strip()
+            if p_c and len(p_c.split()) <= 8:
                 clean_parts.append(p_c)
         if len(clean_parts) >= 2:
             return clean_parts
 
-    delims = re.split(r",\s*(?:and|or)\s+|;\s*(?:and|or)\s+|\s+(?:and|or)\s+|,\s*|;\s*", raw_list)
-    items = []
-    for d in delims:
-        d_clean = d.strip()
-        if not d_clean:
+    # Parenthesis-aware splitting on commas/semicolons and conjunctions at depth 0
+    items: list[str] = []
+    current: list[str] = []
+    depth = 0
+    i = 0
+    n = len(raw_list)
+    while i < n:
+        ch = raw_list[i]
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth = max(0, depth - 1)
+            current.append(ch)
+        elif depth == 0 and ch in (",", ";"):
+            item = "".join(current).strip()
+            if item:
+                items.append(item)
+            current = []
+            j = i + 1
+            while j < n and raw_list[j].isspace():
+                j += 1
+            if raw_list[j : j + 4].lower() == "and ":
+                i = j + 3
+            elif raw_list[j : j + 3].lower() in ("or ", "and"):
+                i = j + 2
+            elif raw_list[j : j + 2].lower() == "or":
+                i = j + 1
+            else:
+                i = j - 1
+        elif depth == 0 and ch in (" ", "\t") and not current:
+            pass
+        else:
+            current.append(ch)
+        i += 1
+
+    if current:
+        item = "".join(current).strip()
+        if item:
+            items.append(item)
+
+    cleaned: list[str] = []
+    for it in items:
+        it_c = re.sub(r"^[\*\-\•\s]+|[\*\-\•\s]+$", "", it).strip()
+        it_c = re.sub(r"^(?:and|or|both|either)\s+", "", it_c, flags=re.I).strip()
+        it_c = re.sub(r"[\.\,]+$", "", it_c).strip()
+        if not it_c:
             continue
-        d_clean = re.sub(r"^[\*\-\•\s]+|[\*\-\•\s]+$", "", d_clean)
-        words = d_clean.split()
-        if 1 <= len(words) <= 6:
-            items.append(d_clean)
+        words = it_c.split()
+        if 1 <= len(words) <= 12:
+            cleaned.append(it_c)
         else:
             return []
-    return items if len(items) >= 2 else []
+
+    return cleaned if len(cleaned) >= 2 else []
 
 
 def split_explicit_enumeration(sentence: str) -> list[str]:
@@ -222,12 +272,14 @@ def split_explicit_enumeration(sentence: str) -> list[str]:
     m2 = pat2.match(s_clean)
     if m2:
         raw_list = m2.group("list").strip()
-        conn = m2.group("conn").strip()
-        effect = m2.group("effect").strip()
-        items = _split_conjunction_list(raw_list)
-        if len(items) >= 2 and not any(len(it.split()) > 6 for it in items):
-            verb = "causes" if conn in ("cause", "causes") else conn
-            return [f"{item} {verb} {effect}" for item in items]
+        # Guard: list must be coordinate nominals, not sentences with embedded subordinate clauses or modals
+        if not re.search(r"\b(?:where|which|that|who|whose|when|while|if|because|although|should|must|ought)\b", raw_list, re.I):
+            conn = m2.group("conn").strip()
+            effect = m2.group("effect").strip()
+            items = _split_conjunction_list(raw_list)
+            if len(items) >= 2 and not any(len(it.split()) > 12 for it in items):
+                verb = "causes" if conn in ("cause", "causes") else conn
+                return [f"{item} {verb} {effect}" for item in items]
 
     # Pattern 3: <EFFECT> (mechanisms|causes|reasons|factors|types) (include|are|can be categorised into) <LIST>
     pat3 = re.compile(
@@ -243,6 +295,21 @@ def split_explicit_enumeration(sentence: str) -> list[str]:
         items = _split_conjunction_list(raw_list)
         if len(items) >= 2:
             return [f"{effect} {noun} {verb} {item}" for item in items]
+
+    # Pattern 4: <EFFECT> (may have|have|has) (several|multiple|various|many)? (causes|mechanisms|reasons|factors) [(see ...)]?:? <LIST>
+    pat4 = re.compile(
+        r"^(?P<effect>.+?)\s+(?P<verb>may\s+have|have|has)\s+(?:(?:several|multiple|different|various|many)\s+)?(?P<noun>causes?|mechanisms?|reasons?|factors?)\s*(?:\([^)]*(?:see|aci|astm|ref|al\.|19\d\d|20\d\d)[^)]*\))?:?\s*(?P<list>.+)$",
+        re.I,
+    )
+    m4 = pat4.match(s_clean)
+    if m4:
+        effect = m4.group("effect").strip()
+        verb = m4.group("verb").strip()
+        noun = m4.group("noun").strip()
+        raw_list = m4.group("list").strip()
+        items = _split_conjunction_list(raw_list)
+        if len(items) >= 2:
+            return [f"{effect} may be caused by {item}" for item in items]
 
     return [s]
 
