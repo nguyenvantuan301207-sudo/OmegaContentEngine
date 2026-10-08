@@ -15,6 +15,7 @@ Verifies:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -41,6 +42,32 @@ from omega.domain.research import (
 from omega.infrastructure.models import ResearchClaim
 
 
+def grounded_target(**kwargs):
+    """Unit-only canonical source fixture; production targets require real edges.
+
+    Invalid/context fixtures retain no provenance and must fall back to discovery.
+    """
+    target = CorroborationTarget(**kwargs)
+    topic = "Why Concrete Cracks: 5 Mechanisms"
+    request_id, source_id = uuid4(), uuid4()
+    text = target.representative_claim_text
+    claim = SimpleNamespace(id=uuid4(), research_request_id=request_id,
+        claim_text=text, is_verified=False, confidence_score=target.confidence_score,
+        independent_sources_count=target.independent_support_count,
+        evidence=[SimpleNamespace(source_id=source_id, excerpt=text, support_direction="SUPPORTS")])
+    source = SimpleNamespace(research_request_id=request_id,
+        content_excerpt=text, url="https://example.org/fixture")
+    candidates = build_corroboration_targets([claim], {source_id: source},
+        extract_numeric_promise(topic), topic_title=topic)
+    if not candidates:
+        return target
+    candidate = candidates[0]
+    return target.model_copy(update={"claim_id": candidate.claim_id,
+        "source_ids": candidate.source_ids, "source_grounded": candidate.source_grounded,
+        "causal_assertion": candidate.causal_assertion,
+        "candidate_family": candidate.candidate_family})
+
+
 def test_round_1_remains_broad() -> None:
     topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
     contract = extract_numeric_promise(topic)
@@ -58,8 +85,8 @@ def test_two_support_target_produces_targeted_query() -> None:
     topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
     contract = extract_numeric_promise(topic)
 
-    target = CorroborationTarget(
-        representative_claim_text="Plastic shrinkage occurs when concrete loses moisture rapidly under high wind.",
+    target = grounded_target(
+        representative_claim_text="Plastic shrinkage cracking occurs when concrete loses moisture rapidly under high wind.",
         claim_type=ClaimType.FACT,
         independent_support_count=2,
         supporting_domains=["example.org", "reference.com"],
@@ -88,14 +115,14 @@ def test_two_support_target_outranks_one_support_target() -> None:
     topic = "Structural Failure Modes in Modern Architecture"
     contract = extract_numeric_promise(topic)
 
-    t_1_indep = CorroborationTarget(
+    t_1_indep = grounded_target(
         representative_claim_text="Torsional flutter causes aeroelastic instability in slender suspension bridges.",
         claim_type=ClaimType.FACT,
         independent_support_count=1,
         confidence_score=54.0,
         priority=2,
     )
-    t_2_indep = CorroborationTarget(
+    t_2_indep = grounded_target(
         representative_claim_text="Progressive collapse initiates when primary load bearing columns undergo shear failure.",
         claim_type=ClaimType.FACT,
         independent_support_count=2,
@@ -144,7 +171,7 @@ def test_verified_claims_excluded_from_corroboration_targets() -> None:
 
 
 def test_planning_authority_firewall_unverified_claims_not_evidence() -> None:
-    target = CorroborationTarget(
+    target = grounded_target(
         representative_claim_text="Unverified proposition about chemical attack.",
         claim_type=ClaimType.FACT,
         independent_support_count=1,
@@ -182,7 +209,7 @@ def test_round_2_and_round_3_differ_for_unresolved_deficit() -> None:
     topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
     contract = extract_numeric_promise(topic)
 
-    target = CorroborationTarget(
+    target = grounded_target(
         representative_claim_text="Drying shrinkage causes cracking in concrete structures when restrained.",
         claim_type=ClaimType.FACT,
         independent_support_count=2,
@@ -812,7 +839,7 @@ def test_cause_bearing_anchors_preserve_original_vocabulary() -> None:
 
 def test_no_invented_search_terms_in_anchors() -> None:
     """All extracted anchors are proven substrings of the original proposition."""
-    text = "Freeze-thaw cycling produces internal ice expansion that fractures pores."
+    text = "Freeze-thaw cycling produces internal ice expansion that causes cracking."
     anchors = extract_query_anchors(text, subject="concrete cracks")
     for a in anchors:
         assert a in text.lower()
@@ -824,7 +851,7 @@ def test_three_distinct_candidate_families_outrank_duplicate_family_propositions
 
     c_shrink_1 = ResearchClaim(
         id=uuid4(),
-        claim_text="Drying shrinkage causes internal tensile stresses in hardened concrete.",
+        claim_text="Drying shrinkage causes internal tensile stresses that produce cracking.",
         claim_type=ClaimType.FACT.value,
         is_verified=False,
         confidence_score=53.75,
@@ -832,7 +859,7 @@ def test_three_distinct_candidate_families_outrank_duplicate_family_propositions
     )
     c_shrink_2 = ResearchClaim(
         id=uuid4(),
-        claim_text="Excessive drying shrinkage leads to slab volume loss and surface cracking.",
+        claim_text="Drying shrinkage leads to cracking in hardened concrete.",
         claim_type=ClaimType.FACT.value,
         is_verified=False,
         confidence_score=53.75,
@@ -840,7 +867,7 @@ def test_three_distinct_candidate_families_outrank_duplicate_family_propositions
     )
     c_thermal = ResearchClaim(
         id=uuid4(),
-        claim_text="Thermal gradients produce differential cooling and massive foundation fractures.",
+        claim_text="Thermal gradients produce cracking.",
         claim_type=ClaimType.FACT.value,
         is_verified=False,
         confidence_score=53.75,
@@ -848,17 +875,16 @@ def test_three_distinct_candidate_families_outrank_duplicate_family_propositions
     )
     c_freeze = ResearchClaim(
         id=uuid4(),
-        claim_text="Freeze-thaw cycling produces internal ice expansion that fractures pores.",
+        claim_text="Freeze-thaw cycling produces internal ice expansion that causes cracking.",
         claim_type=ClaimType.FACT.value,
         is_verified=False,
         confidence_score=53.75,
         independent_sources_count=1,
     )
 
-    targets = build_corroboration_targets(
-        claims=[c_shrink_1, c_shrink_2, c_thermal, c_freeze],
-        contract=contract,
-    )
+    targets = [grounded_target(representative_claim_text=c.claim_text,
+        confidence_score=c.confidence_score, independent_support_count=1)
+        for c in [c_shrink_1, c_shrink_2, c_thermal, c_freeze]]
 
     queries = plan_research_queries(
         topic_title="Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand",
@@ -956,15 +982,15 @@ def test_phase_j_causal_contract_direct_corroboration_accepts_only_promised_cand
     topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
     contract = extract_numeric_promise(topic)
 
-    t_valid = CorroborationTarget(
-        representative_claim_text="Plastic shrinkage occurs when surface evaporation exceeds bleed rate.",
+    t_valid = grounded_target(
+        representative_claim_text="Plastic shrinkage cracking occurs when surface evaporation exceeds bleed rate.",
         claim_type=ClaimType.FACT,
         priority=2,
         semantic_role="CAUSE_OR_PROCESS",
         candidate_family="plastic_shrink",
         independent_support_count=1,
     )
-    t_context = CorroborationTarget(
+    t_context = grounded_target(
         representative_claim_text="Concrete is the most widely used material in construction worldwide.",
         claim_type=ClaimType.FACT,
         priority=4,
@@ -992,25 +1018,25 @@ def test_phase_j_non_entity_roles_cannot_consume_causal_corroboration_slot() -> 
     topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
     contract = extract_numeric_promise(topic)
 
-    t_context = CorroborationTarget(
+    t_context = grounded_target(
         representative_claim_text="Material properties vary across construction sites.",
         priority=3,
         semantic_role="GENERIC_CONTEXT",
         candidate_family="mat_prop",
     )
-    t_outcome = CorroborationTarget(
+    t_outcome = grounded_target(
         representative_claim_text="Structural fractures pose severe safety hazards to building occupants.",
         priority=5,
         semantic_role="OUTCOME_OR_CONSEQUENCE",
         candidate_family="struct_fract",
     )
-    t_diagnostic = CorroborationTarget(
+    t_diagnostic = grounded_target(
         representative_claim_text="Cracks wider than hairline require visual inspection and monitoring.",
         priority=5,
         semantic_role="DIAGNOSTIC_OR_INSPECTION",
         candidate_family="visual_inspect",
     )
-    t_mitigation = CorroborationTarget(
+    t_mitigation = grounded_target(
         representative_claim_text="Joints should also be placed at re-entrant corners to prevent cracking.",
         priority=5,
         semantic_role="MITIGATION_OR_PREVENTION",
@@ -1034,7 +1060,7 @@ def test_phase_j_generic_mechanism_coverage_preferred_over_context_target() -> N
     topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
     contract = extract_numeric_promise(topic)
 
-    t_context = CorroborationTarget(
+    t_context = grounded_target(
         representative_claim_text="Concrete formulations require proper hydration time.",
         priority=4,
         semantic_role="GENERIC_CONTEXT",
@@ -1058,20 +1084,20 @@ def test_phase_j_three_distinct_causal_candidate_families_fill_slots() -> None:
     topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
     contract = extract_numeric_promise(topic)
 
-    t1 = CorroborationTarget(
+    t1 = grounded_target(
         representative_claim_text="Drying shrinkage causes internal tensile stresses that crack hardened concrete.",
         priority=2,
         semantic_role="CAUSE_OR_PROCESS",
         candidate_family="dry_shrink",
     )
-    t2 = CorroborationTarget(
-        representative_claim_text="Freeze-thaw cycling produces internal ice expansion that fractures pores.",
+    t2 = grounded_target(
+        representative_claim_text="Freeze-thaw cycling produces internal ice expansion that causes cracking.",
         priority=2,
         semantic_role="CAUSE_OR_PROCESS",
         candidate_family="freez_thaw",
     )
-    t3 = CorroborationTarget(
-        representative_claim_text="Thermal contraction creates steep temperature gradients across thick slabs.",
+    t3 = grounded_target(
+        representative_claim_text="Thermal contraction creates steep temperature gradients that cause cracking.",
         priority=2,
         semantic_role="CAUSE_OR_PROCESS",
         candidate_family="therm_contract",
@@ -1094,15 +1120,15 @@ def test_phase_j_two_support_causal_family_outranks_one_support() -> None:
     topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
     contract = extract_numeric_promise(topic)
 
-    t1_indep = CorroborationTarget(
+    t1_indep = grounded_target(
         representative_claim_text="Thermal contraction creates steep temperature gradients.",
         priority=2,
         semantic_role="CAUSE_OR_PROCESS",
         candidate_family="therm_contract",
         independent_support_count=1,
     )
-    t2_indep = CorroborationTarget(
-        representative_claim_text="Plastic shrinkage occurs when evaporation exceeds bleed rate.",
+    t2_indep = grounded_target(
+        representative_claim_text="Plastic shrinkage cracking occurs when evaporation exceeds bleed rate.",
         priority=1,
         semantic_role="CAUSE_OR_PROCESS",
         candidate_family="plastic_shrink",
@@ -1153,7 +1179,7 @@ def test_phase_j_non_causal_enumerable_topics_remain_valid() -> None:
     assert contract.promised_count == 7
     assert contract.entity_type == "tip"
 
-    t = CorroborationTarget(
+    t = grounded_target(
         representative_claim_text="Tip three advises using active voice rather than passive constructions.",
         priority=2,
         semantic_role="GENERIC_CONTEXT",
@@ -1488,7 +1514,6 @@ def test_r1_1_r1_non_entity_query_waste_remains_zero() -> None:
         plan_research_queries,
     )
     from omega.domain.numeric_promise import extract_numeric_promise
-    from omega.domain.research import CorroborationTarget
 
     mitig_text = "Joints should also be placed at re-entrant corners where shrinkage causes stresses."
     p_class, _, role = classify_target_planning_usefulness(mitig_text, "mechanism", ["concrete", "cracks"])
@@ -1497,13 +1522,13 @@ def test_r1_1_r1_non_entity_query_waste_remains_zero() -> None:
 
     topic = "Why Concrete Cracks: 5 Mechanisms Every Civil Engineer Should Understand"
     contract = extract_numeric_promise(topic)
-    t_cause = CorroborationTarget(
+    t_cause = grounded_target(
         representative_claim_text="Thermal contraction causes cracking as temperature falls.",
         priority=2,
         semantic_role="CAUSE_OR_PROCESS",
         candidate_family="therm_contract",
     )
-    t_mitig = CorroborationTarget(
+    t_mitig = grounded_target(
         representative_claim_text=mitig_text,
         priority=5,
         semantic_role="MITIGATION_OR_PREVENTION",

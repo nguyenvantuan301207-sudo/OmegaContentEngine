@@ -10,6 +10,13 @@ import re
 from typing import Any
 from uuid import UUID
 
+from omega.domain.causal_direction import (
+    ELIGIBLE_DIRECTIONS,
+    CausalDirection,
+    extract_causal_assertions,
+    ground_causal_assertion,
+    lexical_tokens,
+)
 from omega.domain.numeric_promise import NumericPromiseContract
 from omega.domain.research import ClaimType, CorroborationTarget, ResearchQuery, ResearchQueryIntent
 
@@ -220,6 +227,7 @@ def classify_candidate_family_coverage(
     claim_text: str,
     already_supported_families: list[str] | None = None,
     entity_type: str | None = None,
+    topic_title: str = "",
 ) -> tuple[str, str]:
     """Deterministically classify a claim's candidate coverage status relative to verified families.
 
@@ -231,6 +239,11 @@ def classify_candidate_family_coverage(
     - REDUNDANT_VERIFIED_FAMILY_DESCRIPTION: Duplicate or alternate description of an already-verified family.
     """
     from omega.domain.numeric_promise import _stem, derive_verified_family_label
+
+    if topic_title and is_causal_entity_type(entity_type):
+        assertions = extract_causal_assertions(claim_text, extract_core_subject(topic_title))
+        if not any(a.direction in ELIGIBLE_DIRECTIONS for a in assertions):
+            return ("AMBIGUOUS_OR_GENERIC_CONTEXT", "direction_not_established")
 
     low = claim_text.lower()
 
@@ -410,6 +423,7 @@ def classify_target_planning_usefulness(
     text: str,
     entity_type: str | None = None,
     topic_keywords: list[str] | None = None,
+    topic_title: str = "",
 ) -> tuple[str, float, str]:
     """Deterministically classify planning usefulness and compute topic relevance.
 
@@ -445,6 +459,14 @@ def classify_target_planning_usefulness(
     for pat in _MITIGATION_OR_PREVENTION_PATTERNS:
         if re.search(pat, t):
             return ("MITIGATION_OR_PREVENTION", 25.0, "MITIGATION_OR_PREVENTION")
+
+    if topic_title and is_causal_entity_type(entity_type):
+        assertions = extract_causal_assertions(text, extract_core_subject(topic_title))
+        if any(a.direction in ELIGIBLE_DIRECTIONS for a in assertions):
+            return ("PROMISED_ENTITY_CANDIDATE", 85.0, "CAUSE_OR_PROCESS")
+        if any(a.direction == CausalDirection.CONSEQUENCE_OF_TOPIC_OUTCOME for a in assertions):
+            return ("OUTCOME_OR_CONSEQUENCE", 30.0, "OUTCOME_OR_CONSEQUENCE")
+        return ("TOPIC_RELEVANT_CONTEXT", 50.0, "GENERIC_CONTEXT")
 
     # 4. Manifestation / pattern / outcome / consequence / severity check (prevents false entity candidates)
     for pat in _MANIFESTATION_OR_PATTERN_PATTERNS:
@@ -582,12 +604,14 @@ def build_corroboration_targets(
             text=claim_text,
             entity_type=contract.entity_type if contract else None,
             topic_keywords=topic_keywords,
+            topic_title=topic_title,
         )
 
         cov_class, fam_label = classify_candidate_family_coverage(
             claim_text=claim_text,
             already_supported_families=already_supported_families,
             entity_type=contract.entity_type if contract else None,
+            topic_title=topic_title,
         )
 
         subj = extract_core_subject(topic_title) if topic_title else ""
@@ -620,19 +644,42 @@ def build_corroboration_targets(
         else:
             priority = 5
 
-        t = CorroborationTarget(
-            representative_claim_text=claim_text,
-            claim_type=claim_type,
-            independent_support_count=indep_count,
-            supporting_domains=supporting_domains,
-            confidence_score=conf_score,
-            topic_relevance=topic_rel,
-            priority=priority,
-            semantic_role=semantic_role,
-            candidate_family=fam_sig,
-        )
-        targets.append(t)
-
+        # Causal numeric planning requires an actual edge in canonical source
+        # evidence. These fields are planning provenance, never verification.
+        causal_numeric = bool(topic_title and contract and contract.promised_count and is_causal_entity_type(contract.entity_type))
+        assertions = extract_causal_assertions(claim_text, subj) if causal_numeric else [None]
+        for assertion in assertions:
+            grounded, source_ids = ground_causal_assertion(assertion, c, sources_map or {}, subj)
+            if causal_numeric:
+                if (assertion.direction not in ELIGIBLE_DIRECTIONS or not grounded
+                        or semantic_role != "CAUSE_OR_PROCESS"
+                        or cov_class != "UNVERIFIED_ENTITY_FAMILY"):
+                    continue
+                cause_tokens = lexical_tokens(assertion.cause_span)
+                family_span = re.split(r"\b(?:on|under|at|across|without|during|that|which|when)\b",
+                                       assertion.cause_span, maxsplit=1, flags=re.I)[0].strip()
+                fam_sig = family_span.lower()
+                supported = [set(lexical_tokens(f)) for f in (already_supported_families or [])]
+                if any(f and f <= set(cause_tokens) for f in supported):
+                    continue
+                priority = 1 if indep_count >= 2 else 2
+                semantic_role = "CAUSE_OR_PROCESS"
+            t = CorroborationTarget(
+                representative_claim_text=claim_text,
+                claim_type=claim_type,
+                independent_support_count=indep_count,
+                supporting_domains=supporting_domains,
+                confidence_score=conf_score,
+                topic_relevance=topic_rel,
+                priority=priority,
+                semantic_role=semantic_role,
+                candidate_family=fam_sig,
+                claim_id=getattr(c, "id", None),
+                source_ids=source_ids,
+                causal_assertion=assertion,
+                source_grounded=grounded,
+            )
+            targets.append(t)
     # Sort deterministically: priority ascending (1 before 2, etc.), then topic_relevance descending, then confidence descending
     targets.sort(key=lambda t: (t.priority, -t.topic_relevance, -t.confidence_score))
     return targets
@@ -667,7 +714,7 @@ def plan_research_queries(
         re.sub(r"\s+", " ", q.strip().lower()) for q in (issued_query_texts or [])
     }
 
-    def add_query(text: str, intent: ResearchQueryIntent, reason: str) -> bool:
+    def add_query(text: str, intent: ResearchQueryIntent, reason: str, target: CorroborationTarget | None = None) -> bool:
         norm_text = re.sub(r"\s+", " ", text.strip().lower())
         if (
             norm_text
@@ -682,6 +729,11 @@ def plan_research_queries(
                     intent=intent,
                     reason=reason,
                     round_number=round_number,
+                    target_claim_id=target.claim_id if target else None,
+                    target_source_ids=target.source_ids if target else [],
+                    causal_assertion=target.causal_assertion if target else None,
+                    candidate_family=target.candidate_family if target else "",
+                    prior_independent_support=target.independent_support_count if target else 0,
                 )
             )
             return True
@@ -735,7 +787,10 @@ def plan_research_queries(
     )
 
     def _issue_from_target(target: CorroborationTarget) -> bool:
-        anchors = extract_query_anchors(target.representative_claim_text, subject)
+        anchor_text = target.representative_claim_text
+        if strict_causal and target.causal_assertion and "when" not in target.causal_assertion.relation:
+            anchor_text = target.causal_assertion.cause_span
+        anchors = extract_query_anchors(anchor_text, subject)
         clean_anchors = [a for a in anchors if a not in DISALLOWED_QUERY_ANCHORS]
         if not clean_anchors:
             return False
@@ -755,9 +810,10 @@ def plan_research_queries(
             ),
             (f"{subject} {' '.join(clean_anchors[:5])} analysis", ResearchQueryIntent.CORROBORATION),
         ]
-        return any(add_query(q_candidate, q_intent, reason) for q_candidate, q_intent in variants)
+        return any(add_query(q_candidate, q_intent, reason, target) for q_candidate, q_intent in variants)
 
     is_causal = is_causal_entity_type(contract.entity_type if contract else None)
+    strict_causal = bool(contract and contract.promised_count and is_causal)
 
     if corroboration_targets:
         if is_causal:
@@ -767,6 +823,17 @@ def plan_research_queries(
             # from consuming corroboration query slots.
             eligible_targets = []
             for t in corroboration_targets:
+                if strict_causal:
+                    a = t.causal_assertion
+                    if not (t.source_grounded and t.source_ids and t.claim_id and a
+                            and a.direction in ELIGIBLE_DIRECTIONS
+                            and a.provenance.get("source_grounded")):
+                        continue
+                    # Do not trust a direction supplied for a different topic.
+                    check = extract_causal_assertions(t.representative_claim_text, subject)
+                    if not any(x.direction in ELIGIBLE_DIRECTIONS and
+                               x.cause_span == a.cause_span for x in check):
+                        continue
                 if t.priority not in (1, 2):
                     continue
                 if t.semantic_role in (

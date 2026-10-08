@@ -277,10 +277,7 @@ async def execute_coverage_driven_research(
         for q in queries:
             issued_query_texts.add(q.query_text)
 
-        round_queries_meta = [
-            {"query_text": q.query_text, "intent": q.intent.value, "reason": q.reason}
-            for q in queries
-        ]
+        round_queries_meta = [q.model_dump(mode="json") for q in queries]
 
         # Execute discovery queries via provider
         raw_candidates: list[DiscoveryCandidate] = []

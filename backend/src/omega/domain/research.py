@@ -14,6 +14,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from omega.domain.causal_direction import CausalAssertion
+
 
 class ResearchRequestStatus(enum.StrEnum):
     """Lifecycle states for a ResearchRequest."""
@@ -336,6 +338,11 @@ class ResearchQuery(BaseModel):
     intent: ResearchQueryIntent
     reason: str = Field(default="", max_length=500)
     round_number: int = 1
+    target_claim_id: UUID | None = None
+    target_source_ids: list[UUID] = Field(default_factory=list)
+    causal_assertion: CausalAssertion | None = None
+    candidate_family: str = ""
+    prior_independent_support: int = 0
 
 
 class CorroborationTarget(BaseModel):
@@ -350,6 +357,10 @@ class CorroborationTarget(BaseModel):
     priority: int = Field(default=1, ge=1)
     semantic_role: str = Field(default="GENERIC_CONTEXT")
     candidate_family: str = Field(default="")
+    claim_id: UUID | None = None
+    source_ids: list[UUID] = Field(default_factory=list)
+    causal_assertion: CausalAssertion | None = None
+    source_grounded: bool = False
 
 
 class ResearchCoveragePlan(BaseModel):
