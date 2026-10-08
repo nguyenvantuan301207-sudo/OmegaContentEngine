@@ -103,9 +103,16 @@ def _is_scholarly_metadata_or_clutter(text: str) -> bool:
         return True
 
     # Truncated or clipped sentence fragments ending with dangling conjunctions or trailing clauses
-    return bool(
+    if (
         re.search(r",\s*(?:and|or|with|but|which|that)\s*\w{0,2}$", t, re.I)
         or re.search(r"\b(?:and|or|with|that|which)\s*$", t, re.I)
+    ):
+        return True
+
+    # Document summary, TOC overview, or chapter description packaging
+    return bool(
+        re.search(r"\b(?:are|is)\s+covered\s+in\s+detail\b", t, re.I)
+        or re.search(r"\b(?:are|is)\s+(?:discussed|presented|reviewed|summarized|detailed|described)\s+in\s+(?:detail|chapter|section|part)\b", t, re.I)
     )
 
 
@@ -258,8 +265,14 @@ def split_explicit_enumeration(sentence: str) -> list[str]:
     m1 = pat1.match(s_clean)
     if m1:
         effect = m1.group("effect").strip()
+        # Guard: effect must not be mitigation/control/inspection/repair/procedures
+        if re.search(r"\b(?:control\s+of|crack\s+control|prevention\s+of|mitigation\s+of|repair\s+of|inspection\s+of|methods?\s+(?:for|to)|procedures?\s+(?:for|to))\b", effect, re.I):
+            return [s]
         conn = m1.group("conn").strip()
         raw_list = m1.group("list").strip()
+        # Guard: raw_list must not end with document meta-predicates
+        if re.search(r"\b(?:are|is)\s+(?:covered|discussed|presented|reviewed|summarized|detailed|described)\b", raw_list, re.I):
+            return [s]
         items = _split_conjunction_list(raw_list)
         if len(items) >= 2:
             return [f"{effect} {conn} {item}" for item in items]

@@ -299,6 +299,43 @@ _GENERIC_MANIFESTATION_WORDS: set[str] = {
     "issue", "issues", "problem", "problems",
 }
 
+UNRESOLVED_ANAPHORIC_PATTERN = re.compile(
+    r"^(?:(?:when\s+)?(?:anything|something|nothing)\s+(?:happens|occurs)|"
+    r"(?:from\s+(?:the\s+)?(?:simulations?|experiments?|studies|literature|tests?))|"
+    r"(?:both|these|those|this|that|such|all|each|either|neither)\s+"
+    r"(?:actions?|factors?|process(?:es)?|effects?|mechanisms?|causes?|reasons?|conditions?|steps?|practices?|events?|elements?|aspects?|activities|behaviors?|influences?|combinations?))\b",
+    re.IGNORECASE,
+)
+
+GENERIC_UNRESOLVED_NOUNS: set[str] = {
+    "action", "actions", "factor", "factors", "process", "processes", "effect", "effects",
+    "mechanism", "mechanisms", "cause", "causes", "reason", "reasons", "condition", "conditions",
+    "element", "elements", "aspect", "aspects", "step", "steps", "practice", "practices",
+    "event", "events", "activity", "activities", "phenomenon", "behavior", "behaviors",
+    "influence", "influences", "statement", "statements", "combination", "combinations",
+}
+
+NON_CAUSAL_ACTION_VERBS: set[str] = {
+    "weaken", "weakens", "weakening", "exacerbate", "exacerbates", "exacerbating",
+    "worsen", "worsens", "worsening", "contribute", "contributes", "contributing",
+    "increase", "increases", "increasing", "decrease", "decreases", "decreasing",
+    "affect", "affects", "affecting", "manifest", "manifests", "manifesting",
+    "accelerate", "accelerates", "accelerating",
+}
+
+_UNRESOLVED_NOUN_STEMS: set[str] = {_stem(w) for w in GENERIC_UNRESOLVED_NOUNS}
+_NON_CAUSAL_VERB_STEMS: set[str] = {_stem(w) for w in NON_CAUSAL_ACTION_VERBS}
+
+
+def is_unresolved_or_non_causal_label(words: list[str]) -> bool:
+    """Deterministically check if candidate words consist exclusively of unresolved nouns or non-causal verbs."""
+    if not words:
+        return True
+    stems = {_stem(w) for w in words}
+    disallowed = _UNRESOLVED_NOUN_STEMS | _NON_CAUSAL_VERB_STEMS
+    return all(s in disallowed for s in stems)
+
+
 _CAUSE_BEFORE_CONNECTORS: list[str] = [
     # Cause precedes connector: X [connector] Y
     r"\b(?:causes?|causing)\b",
@@ -369,6 +406,10 @@ def derive_verified_family_label(
     if topic_stopwords:
         ignore.update(topic_stopwords)
 
+    is_causal = entity_type in {
+        "mechanism", "cause", "reason", "factor", "driver", "origin", "failure mode", "failure mechanism"
+    }
+
     best_candidate_words: list[str] = []
 
     # 1. Definition / heading prefix before colon: "Mechanism Name: description..."
@@ -382,11 +423,11 @@ def derive_verified_family_label(
         if cand_words and not any(sw in cand_p for sw in ("note", "overview", "causes", "what", "summary", "chapter", "table")):
             best_candidate_words = cand_words[:3]
 
-    # 2. Causal syntactic structure extraction (if causal entity type)
-    is_causal = entity_type in {
-        "mechanism", "cause", "reason", "factor", "driver", "origin", "failure mode", "failure mechanism"
-    }
+    # Rejection of unresolved anaphoric beginnings when no colon prefix defines the antecedent
+    if is_causal and not best_candidate_words and UNRESOLVED_ANAPHORIC_PATTERN.match(t_clean):
+        return set(), "unknown"
 
+    # 2. Causal syntactic structure extraction (if causal entity type)
     # 2a. Strictly after connectors (Y results from X, Y is due to X)
     if not best_candidate_words and is_causal:
         for pat in _CAUSE_STRICTLY_AFTER_CONNECTORS:
@@ -459,7 +500,11 @@ def derive_verified_family_label(
         words = re.findall(r"\b[a-zA-Z]{3,}\b", t_clean)
         substantive = [
             w for w in words
-            if w not in ignore and _stem(w) not in ignore and w not in _GENERIC_MANIFESTATION_WORDS
+            if w not in ignore
+            and _stem(w) not in ignore
+            and w not in _GENERIC_MANIFESTATION_WORDS
+            and _stem(w) not in _UNRESOLVED_NOUN_STEMS
+            and _stem(w) not in _NON_CAUSAL_VERB_STEMS
         ]
         if len(substantive) >= 2:
             best_candidate_words = substantive[:2]
@@ -467,6 +512,10 @@ def derive_verified_family_label(
             best_candidate_words = substantive[:1]
 
     if not best_candidate_words:
+        return set(), "unknown"
+
+    # Invariant: Causal labels must not consist exclusively of unresolved nouns or non-causal verbs
+    if is_causal and is_unresolved_or_non_causal_label(best_candidate_words):
         return set(), "unknown"
 
     # Invariant: Every lexical word in family label MUST originate from exact claim vocabulary

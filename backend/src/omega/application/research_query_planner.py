@@ -149,6 +149,8 @@ DISALLOWED_QUERY_ANCHORS: frozenset[str] = frozenset(
         "report", "manual", "spec", "guide", "chapt", "chapter", "section",
         "may", "can", "could", "will", "would", "shall", "should", "might", "must",
         "causes", "caused", "causing", "cause",
+        "control", "controlling", "prevent", "prevention", "preventing", "repair", "repairing",
+        "mitigate", "mitigation", "covered", "detail",
     }
 )
 
@@ -232,11 +234,13 @@ def classify_candidate_family_coverage(
 
     low = claim_text.lower()
 
-    # 1. Metadata / citation / bibliographic detection
+    # 1. Metadata / citation / bibliographic / mitigation detection
     if re.search(r"\b(?:aci|astm|aashto|iso|din)\s+\d+", low) or re.search(r"\bsee\s+(?:aci|astm|figure|table)\b", low):
         return ("METADATA_OR_CITATION", "metadata")
     if re.search(r"\bkeywords\s*:", low) or "224r-11" in low or "4.1 overview" in low:
         return ("METADATA_OR_CITATION", "metadata")
+    if re.search(r"\b(?:control\s+of|crack\s+control|prevention\s+of|mitigation\s+of|repair\s+of|inspection\s+of)\b", low):
+        return ("METADATA_OR_CITATION", "mitigation")
 
     # 2. Clipped / truncated clause detection
     if re.search(r",\s*(?:and|or|with|but|which|that)\s*\w{0,2}$", claim_text.strip(), re.I):
@@ -244,11 +248,22 @@ def classify_candidate_family_coverage(
     if re.search(r"\b(?:and|or|with|that|which)\s*$", claim_text.strip(), re.I):
         return ("AMBIGUOUS_OR_GENERIC_CONTEXT", "fragment")
 
+    # 3. Unresolved generic or anaphoric antecedent detection
+    if (
+        re.search(r"^(?:they|it|these|those|this|that|such)\s+(?:are|is|were|was)?\s*(?:caused\s+by|due\s+to|results?\s+from|resulting\s+from)\b", low)
+        or re.search(r"^(?:when\s+)?(?:anything|something|nothing)\s+(?:happens|occurs)\b", low)
+        or re.search(r"^(?:both|these|those|this|that|such|all|each|either|neither)\s+(?:actions?|factors?|process(?:es)?|effects?|mechanisms?|causes?|reasons?|conditions?|steps?|practices?|events?|elements?|aspects?|activities|behaviors?|influences?)\b", low)
+        or re.search(r"^from\s+(?:the\s+)?(?:simulations?|experiments?|studies|literature|tests?)\b", low)
+        or re.search(r"^this\s+combination\s+(?:creates?|leads?\s+to|causes?|results?\s+in)\b", low)
+    ):
+        return ("AMBIGUOUS_OR_GENERIC_CONTEXT", "unresolved_antecedent")
+
+    from omega.domain.numeric_promise import is_unresolved_or_non_causal_label
     c_tokens, c_label = derive_verified_family_label(claim_text, entity_type=entity_type)
-    if not c_tokens or c_label == "unknown":
+    if not c_tokens or c_label == "unknown" or is_unresolved_or_non_causal_label(c_label.split()):
         return ("AMBIGUOUS_OR_GENERIC_CONTEXT", "unknown")
 
-    # 3. Check for redundant description of already supported families
+    # 4. Check for redundant description of already supported families
     if already_supported_families:
         for fam in already_supported_families:
             fam_words = [w.lower() for w in re.findall(r"\b[a-zA-Z]{3,}\b", fam)]
@@ -268,7 +283,7 @@ def classify_candidate_family_coverage(
             ):
                 return ("REDUNDANT_VERIFIED_FAMILY_DESCRIPTION", fam)
 
-    # 4. Ambiguous generic shrinkage must never merge automatically into plastic or differential shrinkage
+    # 5. Ambiguous generic shrinkage must never merge automatically into plastic or differential shrinkage
     if c_tokens == {"shrinkage"} or c_label == "shrinkage":
         return ("AMBIGUOUS_OR_GENERIC_CONTEXT", "shrinkage")
 
@@ -329,6 +344,10 @@ _MITIGATION_OR_PREVENTION_PATTERNS: list[str] = [
     r"\b(?:placement|spacing|layout|installation)\s+(?:of|at|around|for)\b",
     r"\b(?:require[s]?|requiring)\s+(?:regular\s+)?(?:maintenance|inspection|monitoring|repair)\b",
     r"\bproperly\s+(?:placed|spaced|installed|maintained|treated|applied)\b",
+    r"\b(?:crack\s+control|control\s+of\s+cracking|crack-control|controlling\s+cracking)\b",
+    r"\bcontrol\s+of\s+.*?cracking\b",
+    r"\bcontrol\s+in\s+(?:flexural\s+members|overlays|mass\s+concrete)\b",
+    r"\bcontrol\s+of\s+cracking\s+due\s+to\b",
 ]
 
 _MANIFESTATION_OR_PATTERN_PATTERNS: list[str] = [
@@ -364,7 +383,9 @@ _OUTCOME_OR_CONSEQUENCE_PATTERNS: list[str] = [
     r"\bcosmetic\s+(?:issue|concern|defect)\b",
     r"\bpropagate\s+either\s+vertically\s+or\s+horizontally\b",
     r"\blinear\s+cracks\s+that\s+propagate\b",
-    r"\bif\s+left\s+unaddressed\b",
+    r"\bif\s+(?:not|left)\s+addressed\b",
+    r"\bcan\s+cause\s+other\s+issues\b",
+    r"\bother\s+issues\s+stemming\s+from\b",
     r"\bcostly\s+failures\b",
     r"\bcompromise\s+the\s+safety\b",
 ]
@@ -380,6 +401,8 @@ _METADATA_OR_TOC_PATTERNS: list[str] = [
     r"\b(?:this\s+paper|this\s+study|in\s+this\s+study|in\s+the\s+present\s+study|existing\s+theories|previous\s+studies)\b",
     r"\bcan\s+be\s+primarily\s+categorized\s+into\b",
     r"\bcategorized\s+into\s+the\s+following\b",
+    r"\b(?:are|is)\s+covered\s+in\s+detail\b",
+    r"\b(?:are|is)\s+(?:discussed|presented|reviewed|summarized|detailed|described)\s+in\s+(?:detail|chapter|section|part)\b",
 ]
 
 
